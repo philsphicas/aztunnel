@@ -1,0 +1,60 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+
+linters:
+  enable:
+    - errcheck
+    - gosec
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - revive
+    - misspell
+
+  settings:
+    errcheck:
+      exclude-functions:
+        # Keepalive is best-effort.
+        - (*net.TCPConn).SetKeepAlive
+        - (*net.TCPConn).SetKeepAlivePeriod
+        # Deadline errors are non-critical in bridge teardown.
+        - (net.Conn).SetReadDeadline
+        - (net.Conn).SetWriteDeadline
+        - (net.Conn).SetDeadline
+        # CloseNow is always deferred as cleanup.
+        - (*github.com/coder/websocket.Conn).CloseNow
+        # Close on net.Conn/net.Listener is best-effort cleanup.
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (*net.TCPListener).Close
+        # SendReply is best-effort on error paths.
+        - (github.com/philsphicas/aztunnel/internal/sender/socks5).SendReply
+
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+
+    gosec:
+      excludes:
+        - G104 # unhandled errors (covered by errcheck with more granularity)
+        - G115 # integer overflow conversion (too noisy for port numbers)
+        - G602 # slice bounds (false positive after ReadFull)
+        - G101 # hardcoded credentials (false positive on test strings)
+        - G304 # file inclusion via variable (config.Load is expected)
+
+  exclusions:
+    rules:
+      # Test files: allow unchecked errors for test setup/teardown.
+      - linters:
+          - errcheck
+        path: _test\.go
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
