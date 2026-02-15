@@ -22,6 +22,7 @@ func main() {
 
 	rootCmd.AddCommand(relayListenerCmd())
 	rootCmd.AddCommand(relaySenderCmd())
+	rootCmd.AddCommand(arcCmd())
 	rootCmd.AddCommand(versionCmd())
 
 	if err := rootCmd.Execute(); err != nil {
