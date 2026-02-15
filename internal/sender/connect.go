@@ -31,7 +31,7 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 	if err != nil {
 		return err
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	if err := sendEnvelopeAndCheck(ctx, ws, cfg.Target); err != nil {
 		return err

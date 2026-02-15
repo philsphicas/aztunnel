@@ -77,7 +77,7 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	if err != nil {
 		return err
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	// Send envelope and read response.
 	if err := sendEnvelopeAndCheck(ctx, ws, target); err != nil {

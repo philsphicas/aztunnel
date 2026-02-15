@@ -87,7 +87,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) error {
 	if err != nil {
 		return fmt.Errorf("dial control: %w", sanitizeErr(err))
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	cfg.Logger.Info("control channel connected", "entityPath", cfg.EntityPath)
 
@@ -159,7 +159,7 @@ func handleAccept(ctx context.Context, addr string, cfg ControlConfig) error {
 	if err != nil {
 		return fmt.Errorf("dial rendezvous: %w", err)
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	cfg.Handler(ctx, ws)
 	_ = ws.Close(websocket.StatusNormalClosure, "done")
