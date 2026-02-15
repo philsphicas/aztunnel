@@ -86,7 +86,7 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 		_ = socks5.SendReply(conn, socks5.RepGeneralFailure, nil)
 		return err
 	}
-	defer ws.CloseNow()
+	defer func() { _ = ws.CloseNow() }()
 
 	// Send envelope and check response.
 	if err := sendEnvelopeAndCheck(ctx, ws, target); err != nil {

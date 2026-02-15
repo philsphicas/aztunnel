@@ -17,24 +17,6 @@ linters:
     - misspell
 
   settings:
-    errcheck:
-      exclude-functions:
-        # Keepalive is best-effort.
-        - (*net.TCPConn).SetKeepAlive
-        - (*net.TCPConn).SetKeepAlivePeriod
-        # Deadline errors are non-critical in bridge teardown.
-        - (net.Conn).SetReadDeadline
-        - (net.Conn).SetWriteDeadline
-        - (net.Conn).SetDeadline
-        # CloseNow is always deferred as cleanup.
-        - (*github.com/coder/websocket.Conn).CloseNow
-        # Close on net.Conn/net.Listener is best-effort cleanup.
-        - (net.Conn).Close
-        - (net.Listener).Close
-        - (*net.TCPListener).Close
-        # SendReply is best-effort on error paths.
-        - (github.com/philsphicas/aztunnel/internal/sender/socks5).SendReply
-
     revive:
       rules:
         - name: exported
