@@ -64,13 +64,13 @@ jobs:
       matrix:
         include:
           - variant: ""
-            builder: golang:1.24-bookworm
+            builder: golang:1-bookworm
             runtime: scratch
           - variant: -alpine
-            builder: golang:1.24-alpine
+            builder: golang:1-alpine
             runtime: alpine
           - variant: -bookworm
-            builder: golang:1.24-bookworm
+            builder: golang:1-bookworm
             runtime: debian:bookworm-slim
     steps:
       - uses: actions/checkout@v6
