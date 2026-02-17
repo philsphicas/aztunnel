@@ -4,6 +4,12 @@ import (
 	"fmt"
 	"os"
 
+	// Automatically set GOMEMLIMIT based on cgroup memory limits (container
+	// or systemd MemoryMax=). If no cgroup limit is detected, GOMEMLIMIT is
+	// left at the Go default and a "memory is not limited, skipping" message
+	// is logged.
+	_ "github.com/KimMachineGun/automemlimit"
+
 	"github.com/philsphicas/aztunnel/internal/relay"
 	"github.com/spf13/cobra"
 )
