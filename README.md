@@ -327,16 +327,16 @@ exists, set `AUTOMEMLIMIT_EXPERIMENT=system`.
 
 ## Environment variables
 
-| Variable                  | Description                                  |
-| ------------------------- | -------------------------------------------- |
-| `AZTUNNEL_RELAY_NAME`     | Azure Relay namespace name                   |
-| `AZTUNNEL_HYCO_NAME`      | Hybrid connection name                       |
-| `AZTUNNEL_KEY_NAME`       | SAS policy name                              |
-| `AZTUNNEL_KEY`            | SAS key value                                |
-| `AZTUNNEL_ARC_RESOURCE_ID`| ARM resource ID of the Arc-connected machine |
-| `GOMEMLIMIT`              | Override automatic memory limit (e.g. `512MiB`) |
-| `AUTOMEMLIMIT`            | Ratio of cgroup limit to use (default `0.9`)  |
-| `AUTOMEMLIMIT_EXPERIMENT` | Comma-separated experiments (e.g. `system`)   |
+| Variable                   | Description                                     |
+| -------------------------- | ----------------------------------------------- |
+| `AZTUNNEL_RELAY_NAME`      | Azure Relay namespace name                      |
+| `AZTUNNEL_HYCO_NAME`       | Hybrid connection name                          |
+| `AZTUNNEL_KEY_NAME`        | SAS policy name                                 |
+| `AZTUNNEL_KEY`             | SAS key value                                   |
+| `AZTUNNEL_ARC_RESOURCE_ID` | ARM resource ID of the Arc-connected machine    |
+| `GOMEMLIMIT`               | Override automatic memory limit (e.g. `512MiB`) |
+| `AUTOMEMLIMIT`             | Ratio of cgroup limit to use (default `0.9`)    |
+| `AUTOMEMLIMIT_EXPERIMENT`  | Comma-separated experiments (e.g. `system`)     |
 
 ## License
 

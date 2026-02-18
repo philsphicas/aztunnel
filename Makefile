@@ -3,7 +3,7 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check help
 
 .DEFAULT_GOAL := help
 
@@ -55,6 +55,12 @@ docker-bookworm: ## Build Docker image (bookworm)
 		--build-arg BUILDER_IMAGE=golang:1-bookworm \
 		--build-arg RUNTIME_IMAGE=debian:bookworm-slim \
 		-t aztunnel:bookworm .
+
+fmt: ## Format markdown and YAML with prettier
+	npx --yes prettier --write .
+
+fmt-check: ## Check formatting (same as CI)
+	npx --yes prettier --check .
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \

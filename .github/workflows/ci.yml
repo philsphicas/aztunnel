@@ -43,6 +43,14 @@ jobs:
           name: coverage
           path: coverage.txt
 
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: prettier
+        run: npx --yes prettier --check .
+
   lint:
     runs-on: ubuntu-latest
     steps:
