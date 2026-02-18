@@ -42,9 +42,9 @@ type RelayInfo struct {
 	NamespaceName             string `json:"namespaceName"`
 	NamespaceNameSuffix       string `json:"namespaceNameSuffix"`
 	HybridConnectionName      string `json:"hybridConnectionName"`
-	AccessKey                 string `json:"accessKey"`
+	AccessKey                 string `json:"accessKey"` //nolint:gosec // G117: deserialized from Azure ARM API
 	ExpiresOn                 int64  `json:"expiresOn"`
-	ServiceConfigurationToken string `json:"serviceConfigurationToken"`
+	ServiceConfigurationToken string `json:"serviceConfigurationToken"` //nolint:gosec // G117: deserialized from Azure ARM API
 }
 
 // Endpoint returns the Azure Relay sb:// endpoint.
