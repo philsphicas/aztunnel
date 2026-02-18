@@ -132,6 +132,9 @@ write_files:
       Restart=on-failure
       RestartSec=5s
 
+      # Memory limit — aztunnel auto-tunes GOMEMLIMIT to 90% of this value
+      MemoryMax=512M
+
       # Security hardening
       NoNewPrivileges=true
       ProtectSystem=strict

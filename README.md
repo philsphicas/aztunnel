@@ -310,6 +310,21 @@ If no `--allow` flags are given, **all targets are permitted** (a warning is log
 
 Hostnames are matched literally — no DNS resolution is performed. Use CIDR notation for IP-based restrictions.
 
+## Memory management
+
+aztunnel automatically tunes the Go garbage collector based on the memory
+limit of the environment it runs in. When a cgroup memory limit is detected
+(container `--memory`, systemd `MemoryMax=`), `GOMEMLIMIT` is set to 90%
+of that limit so the GC can make informed decisions and avoid OOM kills.
+If no cgroup limit is found, `GOMEMLIMIT` is left at the Go default and
+automemlimit logs "memory is not limited, skipping".
+
+This is powered by [automemlimit](https://github.com/KimMachineGun/automemlimit)
+and requires no configuration. To override the behavior, set `GOMEMLIMIT`
+explicitly (e.g., `GOMEMLIMIT=512MiB`) or set `AUTOMEMLIMIT=0.8` to change
+the ratio. To use total system memory as a fallback when no cgroup limit
+exists, set `AUTOMEMLIMIT_EXPERIMENT=system`.
+
 ## Environment variables
 
 | Variable                  | Description                                  |
@@ -319,6 +334,9 @@ Hostnames are matched literally — no DNS resolution is performed. Use CIDR not
 | `AZTUNNEL_KEY_NAME`       | SAS policy name                              |
 | `AZTUNNEL_KEY`            | SAS key value                                |
 | `AZTUNNEL_ARC_RESOURCE_ID`| ARM resource ID of the Arc-connected machine |
+| `GOMEMLIMIT`              | Override automatic memory limit (e.g. `512MiB`) |
+| `AUTOMEMLIMIT`            | Ratio of cgroup limit to use (default `0.9`)  |
+| `AUTOMEMLIMIT_EXPERIMENT` | Comma-separated experiments (e.g. `system`)   |
 
 ## License
 
