@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -17,22 +18,30 @@ const (
 	bridgePingTimeout  = 10 * time.Second
 )
 
+// BridgeStats holds byte counters for a completed bridge.
+type BridgeStats struct {
+	TCPToWS int64 // bytes copied from the TCP/local side to the WebSocket
+	WSToTCP int64 // bytes copied from the WebSocket to the TCP/local side
+}
+
 // Bridge copies data bidirectionally between a WebSocket connection and a
 // TCP connection until one side closes or the context is cancelled.
-func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
+// It returns byte-transfer statistics and the first error from either direction.
+func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) (BridgeStats, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	var tcpToWSBytes, wsToTCPBytes atomic.Int64
 	errc := make(chan error, 2)
 
 	// WebSocket → TCP
 	go func() {
-		errc <- wsToTCP(ctx, ws, tcp)
+		errc <- wsToTCP(ctx, ws, tcp, &wsToTCPBytes)
 	}()
 
 	// TCP → WebSocket
 	go func() {
-		errc <- tcpToWS(ctx, ws, tcp)
+		errc <- tcpToWS(ctx, ws, tcp, &tcpToWSBytes)
 	}()
 
 	// WebSocket keepalive pings to prevent Azure Relay idle timeout.
@@ -44,7 +53,12 @@ func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
 	// Unblock tcp.Read in tcpToWS by closing the read side.
 	_ = tcp.SetReadDeadline(time.Now())
 	<-errc
-	return err
+
+	stats := BridgeStats{
+		TCPToWS: tcpToWSBytes.Load(),
+		WSToTCP: wsToTCPBytes.Load(),
+	}
+	return stats, err
 }
 
 // bridgePingLoop sends periodic WebSocket pings to keep the data channel alive.
@@ -63,19 +77,21 @@ func bridgePingLoop(ctx context.Context, ws *websocket.Conn) {
 	}
 }
 
-func wsToTCP(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
+func wsToTCP(ctx context.Context, ws *websocket.Conn, tcp net.Conn, count *atomic.Int64) error {
 	for {
 		_, r, err := ws.Reader(ctx)
 		if err != nil {
 			return ignoreNormalClose(err)
 		}
-		if _, err := io.Copy(tcp, r); err != nil {
+		n, err := io.Copy(tcp, r)
+		count.Add(n)
+		if err != nil {
 			return err
 		}
 	}
 }
 
-func tcpToWS(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
+func tcpToWS(ctx context.Context, ws *websocket.Conn, tcp net.Conn, count *atomic.Int64) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := tcp.Read(buf)
@@ -83,6 +99,7 @@ func tcpToWS(ctx context.Context, ws *websocket.Conn, tcp net.Conn) error {
 			if wErr := ws.Write(ctx, websocket.MessageBinary, buf[:n]); wErr != nil {
 				return wErr
 			}
+			count.Add(int64(n))
 		}
 		if err != nil {
 			return ignoreEOF(err)

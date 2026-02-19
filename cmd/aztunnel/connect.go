@@ -40,6 +40,10 @@ func runConnect(cmd *cobra.Command, args []string) error {
 	}
 
 	logLevel, _ := cmd.Flags().GetString("log-level")
+	logger := newLogger(logLevel)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	cfg := sender.ConnectConfig{
 		Endpoint:      endpoint,
@@ -48,11 +52,11 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		Target:        target,
 		Stdin:         os.Stdin,
 		Stdout:        os.Stdout,
-		Logger:        newLogger(logLevel),
+		Logger:        logger,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	if cfg.Metrics, err = resolveMetrics(ctx, cmd, logger); err != nil {
+		return err
+	}
 
 	return sender.Connect(ctx, cfg)
 }

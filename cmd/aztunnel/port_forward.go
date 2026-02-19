@@ -52,6 +52,10 @@ func runPortForward(cmd *cobra.Command, args []string) error {
 	}
 	tcpKeepAlive, _ := cmd.Flags().GetDuration("tcp-keepalive")
 	logLevel, _ := cmd.Flags().GetString("log-level")
+	logger := newLogger(logLevel)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	cfg := sender.PortForwardConfig{
 		Endpoint:      endpoint,
@@ -60,11 +64,11 @@ func runPortForward(cmd *cobra.Command, args []string) error {
 		Target:        target,
 		BindAddress:   bind,
 		TCPKeepAlive:  tcpKeepAlive,
-		Logger:        newLogger(logLevel),
+		Logger:        logger,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	if cfg.Metrics, err = resolveMetrics(ctx, cmd, logger); err != nil {
+		return err
+	}
 
 	return sender.PortForward(ctx, cfg)
 }

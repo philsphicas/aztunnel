@@ -51,18 +51,22 @@ func runSOCKS5Proxy(cmd *cobra.Command, args []string) error {
 	}
 	tcpKeepAlive, _ := cmd.Flags().GetDuration("tcp-keepalive")
 	logLevel, _ := cmd.Flags().GetString("log-level")
-
-	cfg := sender.SOCKS5Config{
-		Endpoint:      endpoint,
-		EntityPath:    hyco,
-		TokenProvider: tp,
-		BindAddress:   bind,
-		TCPKeepAlive:  tcpKeepAlive,
-		Logger:        newLogger(logLevel),
-	}
+	logger := newLogger(logLevel)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	cfg := sender.SOCKS5Config{
+		Endpoint:     endpoint,
+		EntityPath:   hyco,
+		BindAddress:  bind,
+		TCPKeepAlive: tcpKeepAlive,
+		Logger:       logger,
+	}
+	if cfg.Metrics, err = resolveMetrics(ctx, cmd, logger); err != nil {
+		return err
+	}
+	cfg.TokenProvider = tp
 
 	return sender.SOCKS5Proxy(ctx, cfg)
 }

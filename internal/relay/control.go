@@ -37,6 +37,10 @@ type ControlConfig struct {
 	MaxConnections int // 0 = unlimited
 	DialTimeout    time.Duration
 	Logger         *slog.Logger
+	// OnConnect is called when the control channel connects. Optional.
+	OnConnect func()
+	// OnDisconnect is called when the control channel disconnects. Optional.
+	OnDisconnect func()
 }
 
 // ListenAndServe connects to the Azure Relay control channel and accepts
@@ -51,8 +55,13 @@ func ListenAndServe(ctx context.Context, cfg ControlConfig) error {
 	delay := reconnectMin
 	for {
 		start := time.Now()
-		err := runControlLoop(ctx, cfg)
+		connected, err := runControlLoop(ctx, cfg)
 		if ctx.Err() != nil {
+			// Graceful shutdown: ensure OnDisconnect is called if
+			// OnConnect fired inside runControlLoop.
+			if connected && cfg.OnDisconnect != nil {
+				cfg.OnDisconnect()
+			}
 			return ctx.Err()
 		}
 		// Reset backoff if the connection was up for a meaningful duration.
@@ -60,6 +69,9 @@ func ListenAndServe(ctx context.Context, cfg ControlConfig) error {
 			delay = reconnectMin
 		}
 		cfg.Logger.Warn("control channel disconnected, reconnecting", "error", err, "delay", delay)
+		if connected && cfg.OnDisconnect != nil {
+			cfg.OnDisconnect()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -70,11 +82,11 @@ func ListenAndServe(ctx context.Context, cfg ControlConfig) error {
 	}
 }
 
-func runControlLoop(ctx context.Context, cfg ControlConfig) error {
+func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err error) {
 	resURI := ResourceURI(cfg.Endpoint, cfg.EntityPath)
 	token, err := cfg.TokenProvider.GetToken(ctx, resURI)
 	if err != nil {
-		return fmt.Errorf("get token: %w", err)
+		return false, fmt.Errorf("get token: %w", err)
 	}
 
 	wssBase := EndpointToWSS(cfg.Endpoint)
@@ -85,11 +97,14 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) error {
 	defer dialCancel()
 	ws, _, err := websocket.Dial(dialCtx, listenURL, nil)
 	if err != nil {
-		return fmt.Errorf("dial control: %w", sanitizeErr(err))
+		return false, fmt.Errorf("dial control: %w", sanitizeErr(err))
 	}
 	defer func() { _ = ws.CloseNow() }()
 
 	cfg.Logger.Info("control channel connected", "entityPath", cfg.EntityPath)
+	if cfg.OnConnect != nil {
+		cfg.OnConnect()
+	}
 
 	// Cancel used by ping/renew failure to force reconnect.
 	loopCtx, loopCancel := context.WithCancel(ctx)
@@ -118,7 +133,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) error {
 	for {
 		_, data, err := ws.Read(loopCtx)
 		if err != nil {
-			return fmt.Errorf("read control: %w", err)
+			return true, fmt.Errorf("read control: %w", err)
 		}
 
 		var msg struct {

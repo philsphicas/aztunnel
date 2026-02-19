@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
 	"github.com/philsphicas/aztunnel/internal/sender/socks5"
 )
@@ -19,6 +20,7 @@ type SOCKS5Config struct {
 	BindAddress   string // local address:port to listen on
 	TCPKeepAlive  time.Duration
 	Logger        *slog.Logger
+	Metrics       *metrics.Metrics // optional; nil disables metrics
 }
 
 // SOCKS5Proxy starts a local SOCKS5 proxy and forwards each connection
@@ -81,7 +83,7 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	cfg.Logger.Info("socks5 connect", "target", target)
 
 	// Dial the relay.
-	ws, err := relay.Dial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender")
 	if err != nil {
 		_ = socks5.SendReply(conn, socks5.RepGeneralFailure, nil)
 		return err
@@ -91,6 +93,7 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	// Send envelope and check response.
 	if err := sendEnvelopeAndCheck(ctx, ws, target); err != nil {
 		_ = socks5.SendReply(conn, socks5.RepHostUnreachable, nil)
+		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
 		return err
 	}
 
@@ -99,5 +102,6 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	_ = socks5.SendReply(conn, socks5.RepSuccess, tcpAddr)
 
 	// Bridge data.
-	return relay.Bridge(ctx, ws, conn)
+	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
+	return bridgeErr
 }
