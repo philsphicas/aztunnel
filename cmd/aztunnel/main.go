@@ -55,10 +55,11 @@ func versionCmd() *cobra.Command {
 
 // addAuthFlags adds the credential flags to a command.
 func addAuthFlags(cmd *cobra.Command) {
-	cmd.Flags().String("relay", "", "Azure Relay namespace name")
+	cmd.Flags().String("relay", "", "Azure Relay namespace name, FQDN, or URI")
 	cmd.Flags().String("namespace", "", "Azure Relay namespace name (alias for --relay)")
 	_ = cmd.Flags().MarkHidden("namespace")
 	cmd.Flags().String("hyco", "", "hybrid connection name")
+	cmd.Flags().String("relay-suffix", "", "namespace suffix for sovereign clouds (default: .servicebus.windows.net)")
 }
 
 // resolveMetrics creates a Metrics instance and starts the HTTP server if
@@ -90,9 +91,6 @@ func resolveMetrics(ctx context.Context, cmd *cobra.Command, logger *slog.Logger
 	}()
 	return m, nil
 }
-
-const relaySuffix = ".servicebus.windows.net"
-
 // resolveHyco returns the hybrid connection name from --hyco flag, env var, or positional arg.
 func resolveHyco(cmd *cobra.Command, args []string) (string, error) {
 	if hyco, _ := cmd.Flags().GetString("hyco"); hyco != "" {
@@ -128,7 +126,14 @@ func resolveAuth(cmd *cobra.Command) (endpoint string, tp relay.TokenProvider, e
 	if ns == "" {
 		return "", nil, fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
 	}
-	endpoint = "sb://" + ns + relaySuffix
+	suffix, _ := cmd.Flags().GetString("relay-suffix")
+	if suffix == "" {
+		suffix = os.Getenv("AZTUNNEL_RELAY_SUFFIX")
+	}
+	if suffix == "" {
+		suffix = relay.DefaultRelaySuffix
+	}
+	endpoint = relay.ParseRelayEndpoint(ns, suffix)
 
 	keyName := os.Getenv("AZTUNNEL_KEY_NAME")
 	key := os.Getenv("AZTUNNEL_KEY")
