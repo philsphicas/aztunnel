@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/protocol"
 	"github.com/philsphicas/aztunnel/internal/relay"
 )
@@ -27,6 +28,7 @@ type Config struct {
 	ConnectTimeout time.Duration
 	TCPKeepAlive   time.Duration
 	Logger         *slog.Logger
+	Metrics        *metrics.Metrics // optional; nil disables metrics
 }
 
 // ListenAndServe starts the relay-listener. It blocks until ctx is cancelled.
@@ -45,7 +47,7 @@ func ListenAndServe(ctx context.Context, cfg Config) error {
 		cfg.Logger.Warn("no allowlist configured, all targets will be permitted")
 	}
 
-	return relay.ListenAndServe(ctx, relay.ControlConfig{
+	ctrlCfg := relay.ControlConfig{
 		Endpoint:       cfg.Endpoint,
 		EntityPath:     cfg.EntityPath,
 		TokenProvider:  cfg.TokenProvider,
@@ -54,7 +56,11 @@ func ListenAndServe(ctx context.Context, cfg Config) error {
 		Handler: func(ctx context.Context, ws *websocket.Conn) {
 			handleConnection(ctx, ws, cfg)
 		},
-	})
+	}
+	ctrlCfg.OnConnect = func() { cfg.Metrics.SetControlChannelConnected(true) }
+	ctrlCfg.OnDisconnect = func() { cfg.Metrics.SetControlChannelConnected(false) }
+
+	return relay.ListenAndServe(ctx, ctrlCfg)
 }
 
 func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
@@ -66,6 +72,7 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	_, data, err := ws.Read(readCtx)
 	if err != nil {
 		logger.Warn("failed to read envelope", "error", err)
+		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
 
@@ -73,15 +80,18 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	if err := json.Unmarshal(data, &env); err != nil {
 		logger.Warn("invalid envelope", "error", err)
 		_ = sendResponse(ctx, ws, false, "invalid envelope")
+		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
 	if env.Version != protocol.CurrentVersion {
 		logger.Warn("unsupported protocol version", "version", env.Version)
 		_ = sendResponse(ctx, ws, false, "unsupported protocol version")
+		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
 	if env.Target == "" {
 		_ = sendResponse(ctx, ws, false, "missing target")
+		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
 
@@ -91,6 +101,7 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	if len(cfg.AllowList) > 0 && !isAllowed(env.Target, cfg.AllowList) {
 		logger.Warn("target not allowed", "target", env.Target)
 		_ = sendResponse(ctx, ws, false, "target not allowed")
+		cfg.Metrics.ConnectionError("listener", metrics.ReasonAllowlistRejected)
 		return
 	}
 
@@ -99,10 +110,13 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	dialCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
 	defer cancel()
 
+	dialStart := time.Now()
 	conn, err := dialer.DialContext(dialCtx, "tcp", env.Target)
+	cfg.Metrics.ObserveDialDuration("listener", time.Since(dialStart).Seconds())
 	if err != nil {
 		logger.Warn("dial target failed", "target", env.Target, "error", err)
 		_ = sendResponse(ctx, ws, false, "connection failed")
+		cfg.Metrics.ConnectionError("listener", metrics.DialReason(err, metrics.ReasonDialFailed))
 		return
 	}
 	defer conn.Close() //nolint:errcheck // best-effort cleanup
@@ -117,8 +131,9 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	}
 
 	// Bridge data.
-	if err := relay.Bridge(ctx, ws, conn); err != nil {
-		logger.Debug("bridge ended", "target", env.Target, "error", err)
+	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "listener", env.Target)
+	if bridgeErr != nil {
+		logger.Debug("bridge ended", "target", env.Target, "error", bridgeErr)
 	}
 }
 

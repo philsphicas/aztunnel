@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/philsphicas/aztunnel/internal/arc"
+	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
 	"github.com/spf13/cobra"
 )
@@ -56,6 +57,11 @@ func runArcPortForward(cmd *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	m, err := resolveMetrics(ctx, cmd, logger)
+	if err != nil {
+		return err
+	}
+
 	client, err := arc.NewClient(logger, nil)
 	if err != nil {
 		return err
@@ -83,6 +89,8 @@ func runArcPortForward(cmd *cobra.Command, _ []string) error {
 		_ = ln.Close()
 	}()
 
+	target := fmt.Sprintf("%s:%d", resourceID, port)
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -101,18 +109,23 @@ func runArcPortForward(cmd *cobra.Command, _ []string) error {
 			info, err := client.GetRelayCredentials(ctx, resourceID, service)
 			if err != nil {
 				logger.Warn("get relay credentials failed", "error", err)
+				m.ConnectionError("sender", metrics.ReasonAuthFailed)
 				return
 			}
 
+			dialStart := time.Now()
 			ws, err := arc.DialWithLogger(ctx, info, port, logger)
+			m.ObserveDialDuration("sender", time.Since(dialStart).Seconds())
 			if err != nil {
 				logger.Warn("arc relay dial failed", "error", err)
+				m.ConnectionError("sender", metrics.DialReason(err, metrics.ReasonRelayFailed))
 				return
 			}
 			defer func() { _ = ws.CloseNow() }()
 
-			if err := relay.Bridge(ctx, ws, conn); err != nil {
-				logger.Debug("bridge ended", "error", err)
+			_, bridgeErr := m.TrackedBridge(ctx, ws, conn, "sender", target)
+			if bridgeErr != nil {
+				logger.Debug("bridge ended", "error", bridgeErr)
 			}
 		}()
 	}

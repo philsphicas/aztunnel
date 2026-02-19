@@ -52,7 +52,8 @@ func TestBridge(t *testing.T) {
 	// Run bridge in background.
 	bridgeErr := make(chan error, 1)
 	go func() {
-		bridgeErr <- Bridge(ctx, ws, serverConn)
+		_, err := Bridge(ctx, ws, serverConn)
+		bridgeErr <- err
 	}()
 
 	// Write data through the "TCP" side, read it back (echoed by WS server).
@@ -77,6 +78,86 @@ func TestBridge(t *testing.T) {
 	case err := <-bridgeErr:
 		if err != nil {
 			t.Logf("bridge ended with: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not terminate")
+	}
+}
+
+func TestBridge_ByteCounts(t *testing.T) {
+	// WebSocket server that echoes data back.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+
+		for {
+			typ, data, err := ws.Read(r.Context())
+			if err != nil {
+				return
+			}
+			if err := ws.Write(r.Context(), typ, data); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.CloseNow()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type bridgeResult struct {
+		stats BridgeStats
+		err   error
+	}
+	ch := make(chan bridgeResult, 1)
+	go func() {
+		stats, err := Bridge(ctx, ws, serverConn)
+		ch <- bridgeResult{stats, err}
+	}()
+
+	// Send 100 bytes through the TCP side.
+	payload := strings.Repeat("X", 100)
+	if _, err := clientConn.Write([]byte(payload)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Read the echoed data back.
+	buf := make([]byte, 200)
+	clientConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := clientConn.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if n != 100 {
+		t.Fatalf("read %d bytes, want 100", n)
+	}
+
+	// Close to end bridge.
+	clientConn.Close()
+
+	select {
+	case res := <-ch:
+		// TCPToWS: 100 bytes sent from TCP to WS (the payload we wrote).
+		if res.stats.TCPToWS != 100 {
+			t.Errorf("TCPToWS = %d, want 100", res.stats.TCPToWS)
+		}
+		// WSToTCP: 100 bytes echoed back from WS to TCP.
+		if res.stats.WSToTCP != 100 {
+			t.Errorf("WSToTCP = %d, want 100", res.stats.WSToTCP)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("bridge did not terminate")
@@ -113,7 +194,8 @@ func TestBridge_ContextCancel(t *testing.T) {
 
 	bridgeErr := make(chan error, 1)
 	go func() {
-		bridgeErr <- Bridge(ctx, ws, serverConn)
+		_, err := Bridge(ctx, ws, serverConn)
+		bridgeErr <- err
 	}()
 
 	// Cancel context; bridge should exit promptly.
@@ -161,7 +243,7 @@ func TestBridge_ZeroLengthData(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	go Bridge(ctx, ws, serverConn)
+	go func() { _, _ = Bridge(ctx, ws, serverConn) }()
 
 	// Should receive "after-empty" even though empty message was sent first.
 	buf := make([]byte, 64)

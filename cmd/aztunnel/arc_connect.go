@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/philsphicas/aztunnel/internal/arc"
-	"github.com/philsphicas/aztunnel/internal/relay"
+	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/spf13/cobra"
 )
 
@@ -37,6 +39,11 @@ func runArcConnect(cmd *cobra.Command, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	m, err := resolveMetrics(ctx, cmd, logger)
+	if err != nil {
+		return err
+	}
+
 	client, err := arc.NewClient(logger, nil)
 	if err != nil {
 		return err
@@ -56,8 +63,13 @@ func runArcConnect(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	target := fmt.Sprintf("%s:%d", resourceID, port)
+
+	dialStart := time.Now()
 	ws, err := arc.DialWithLogger(ctx, info, port, logger)
+	m.ObserveDialDuration("sender", time.Since(dialStart).Seconds())
 	if err != nil {
+		m.ConnectionError("sender", metrics.DialReason(err, metrics.ReasonRelayFailed))
 		return err
 	}
 	defer func() { _ = ws.CloseNow() }()
@@ -65,5 +77,6 @@ func runArcConnect(cmd *cobra.Command, _ []string) error {
 	logger.Debug("connected to arc relay", "resource", resourceID)
 
 	stdio := &arcStdioConn{in: os.Stdin, out: os.Stdout}
-	return relay.Bridge(ctx, ws, stdio)
+	_, bridgeErr := m.TrackedBridge(ctx, ws, stdio, "sender", target)
+	return bridgeErr
 }

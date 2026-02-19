@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
 )
 
@@ -17,6 +18,7 @@ type ConnectConfig struct {
 	Stdin         io.ReadCloser
 	Stdout        io.WriteCloser
 	Logger        *slog.Logger
+	Metrics       *metrics.Metrics // optional; nil disables metrics
 }
 
 // Connect performs a one-shot connection: dials the relay, sends the
@@ -27,18 +29,20 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 		cfg.Logger = slog.Default()
 	}
 
-	ws, err := relay.Dial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = ws.CloseNow() }()
 
 	if err := sendEnvelopeAndCheck(ctx, ws, cfg.Target); err != nil {
+		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
 		return err
 	}
 
 	cfg.Logger.Debug("connected", "target", cfg.Target)
 
 	stdio := &stdioConn{in: cfg.Stdin, out: cfg.Stdout}
-	return relay.Bridge(ctx, ws, stdio)
+	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, stdio, "sender", cfg.Target)
+	return bridgeErr
 }

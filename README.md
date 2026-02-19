@@ -22,6 +22,7 @@ Tunnel TCP connections through [Azure Relay Hybrid Connections](https://learn.mi
 - **SOCKS5 proxy** — run a local SOCKS5 server for dynamic target selection
 - **SSH ProxyCommand** — bridge stdin/stdout for use with `ssh -o ProxyCommand`
 - **Azure Arc support** — connect to Arc-enrolled machines through automatically provisioned relays
+- **Prometheus metrics** — optional `--metrics-addr` flag exposes connection, byte, and error metrics
 - **Allowlist enforcement** — restrict which targets the listener can reach (CIDR, host:port, wildcard)
 - **Two auth modes** — SAS keys or Entra ID (DefaultAzureCredential)
 
@@ -217,7 +218,9 @@ Commands:
   version                               Print the version
 
 Global flags:
-  --log-level string   Log level: debug, info, warn, error (default "info")
+  --log-level string          Log level: debug, info, warn, error (default "info")
+  --metrics-addr string       Address for Prometheus metrics server (e.g. :9090); disabled if empty
+  --metrics-max-targets int   Max unique target labels in metrics (default 500, 0 = unlimited)
 ```
 
 ### relay-listener
@@ -295,6 +298,36 @@ Flags:
   --tcp-keepalive duration   TCP keepalive interval (default 30s)
 ```
 
+## Metrics
+
+aztunnel can expose [Prometheus](https://prometheus.io/) metrics via an HTTP endpoint. Pass `--metrics-addr` or set `AZTUNNEL_METRICS_ADDR` to enable it:
+
+```sh
+aztunnel relay-listener --relay my-ns --hyco my-hyco --metrics-addr :9090
+```
+
+Metrics are served at `/metrics` on the specified address. When neither the flag nor the env var is set, no metrics server is started.
+
+| Metric                                 | Type      | Labels                        | Description                                       |
+| -------------------------------------- | --------- | ----------------------------- | ------------------------------------------------- |
+| `aztunnel_connections_total`           | counter   | `role`, `target`, `status`    | Total connections handled (success/error)         |
+| `aztunnel_connection_errors_total`     | counter   | `role`, `reason`              | Connection failures by reason                     |
+| `aztunnel_bytes_total`                 | counter   | `role`, `target`, `direction` | Bytes transferred through the relay tunnel        |
+| `aztunnel_active_connections`          | gauge     | `role`, `target`              | Currently active bridged connections              |
+| `aztunnel_control_channel_connected`   | gauge     | —                             | 1 if the listener control channel is up, 0 if not |
+| `aztunnel_connection_duration_seconds` | histogram | `role`, `target`              | Duration of completed connections                 |
+| `aztunnel_dial_duration_seconds`       | histogram | `role`                        | Time to establish outbound connections            |
+
+Labels:
+
+- **role**: `listener` or `sender`
+- **target**: destination address (e.g. `10.0.0.5:22`)
+- **status**: `success` or `error`
+- **direction**: `to_relay` (local endpoint → relay) or `from_relay` (relay → local endpoint)
+- **reason**: `dial_failed`, `dial_timeout`, `allowlist_rejected`, `relay_failed`, `envelope_error`, `auth_failed`
+
+Go runtime and process metrics are also included in the output.
+
 ## Allowlist
 
 The listener's `--allow` flag restricts which targets can be dialed. Entries are matched against the target `host:port` requested by the sender.
@@ -327,16 +360,17 @@ exists, set `AUTOMEMLIMIT_EXPERIMENT=system`.
 
 ## Environment variables
 
-| Variable                   | Description                                     |
-| -------------------------- | ----------------------------------------------- |
-| `AZTUNNEL_RELAY_NAME`      | Azure Relay namespace name                      |
-| `AZTUNNEL_HYCO_NAME`       | Hybrid connection name                          |
-| `AZTUNNEL_KEY_NAME`        | SAS policy name                                 |
-| `AZTUNNEL_KEY`             | SAS key value                                   |
-| `AZTUNNEL_ARC_RESOURCE_ID` | ARM resource ID of the Arc-connected machine    |
-| `GOMEMLIMIT`               | Override automatic memory limit (e.g. `512MiB`) |
-| `AUTOMEMLIMIT`             | Ratio of cgroup limit to use (default `0.9`)    |
-| `AUTOMEMLIMIT_EXPERIMENT`  | Comma-separated experiments (e.g. `system`)     |
+| Variable                   | Description                                          |
+| -------------------------- | ---------------------------------------------------- |
+| `AZTUNNEL_RELAY_NAME`      | Azure Relay namespace name                           |
+| `AZTUNNEL_HYCO_NAME`       | Hybrid connection name                               |
+| `AZTUNNEL_KEY_NAME`        | SAS policy name                                      |
+| `AZTUNNEL_KEY`             | SAS key value                                        |
+| `AZTUNNEL_ARC_RESOURCE_ID` | ARM resource ID of the Arc-connected machine         |
+| `AZTUNNEL_METRICS_ADDR`    | Address for Prometheus metrics server (e.g. `:9090`) |
+| `GOMEMLIMIT`               | Override automatic memory limit (e.g. `512MiB`)      |
+| `AUTOMEMLIMIT`             | Ratio of cgroup limit to use (default `0.9`)         |
+| `AUTOMEMLIMIT_EXPERIMENT`  | Comma-separated experiments (e.g. `system`)          |
 
 ## License
 

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/protocol"
 	"github.com/philsphicas/aztunnel/internal/relay"
 )
@@ -26,6 +27,7 @@ type PortForwardConfig struct {
 	BindAddress   string // local address:port to listen on
 	TCPKeepAlive  time.Duration
 	Logger        *slog.Logger
+	Metrics       *metrics.Metrics // optional; nil disables metrics
 }
 
 // PortForward starts a local TCP listener and forwards each connection
@@ -73,7 +75,7 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	// Set TCP keepalive on the incoming connection.
 	relay.SetTCPKeepAlive(conn, cfg.TCPKeepAlive)
 
-	ws, err := relay.Dial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender")
 	if err != nil {
 		return err
 	}
@@ -81,11 +83,13 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 
 	// Send envelope and read response.
 	if err := sendEnvelopeAndCheck(ctx, ws, target); err != nil {
+		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
 		return err
 	}
 
 	// Bridge data.
-	return relay.Bridge(ctx, ws, conn)
+	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
+	return bridgeErr
 }
 
 // sendEnvelopeAndCheck sends a ConnectEnvelope and reads the ConnectResponse.

@@ -51,6 +51,14 @@ func runRelayListener(cmd *cobra.Command, args []string) error {
 	logLevel, _ := cmd.Flags().GetString("log-level")
 	logger := newLogger(logLevel)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	m, err := resolveMetrics(ctx, cmd, logger)
+	if err != nil {
+		return err
+	}
+
 	cfg := listener.Config{
 		Endpoint:       endpoint,
 		EntityPath:     hyco,
@@ -60,10 +68,8 @@ func runRelayListener(cmd *cobra.Command, args []string) error {
 		ConnectTimeout: connectTimeout,
 		TCPKeepAlive:   tcpKeepAlive,
 		Logger:         logger,
+		Metrics:        m,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 
 	return listener.ListenAndServe(ctx, cfg)
 }

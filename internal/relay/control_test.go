@@ -557,7 +557,7 @@ func TestRunControlLoop(t *testing.T) {
 			Logger:      discardLogger(),
 		}
 
-		err := runControlLoop(ctx, cfg)
+		_, err := runControlLoop(ctx, cfg)
 		// runControlLoop returns error when server closes the WebSocket.
 		if err == nil {
 			t.Fatal("expected error from runControlLoop when server closes")
@@ -645,7 +645,7 @@ func TestRunControlLoop(t *testing.T) {
 			Logger:      discardLogger(),
 		}
 
-		_ = runControlLoop(ctx, cfg)
+		_, _ = runControlLoop(ctx, cfg)
 
 		close(handlerCalls)
 		var count int
@@ -722,7 +722,7 @@ func TestRunControlLoop(t *testing.T) {
 			Logger:      discardLogger(),
 		}
 
-		err := runControlLoop(ctx, cfg)
+		_, err := runControlLoop(ctx, cfg)
 		// runControlLoop returns error when server closes the WebSocket.
 		// On return, defer loopCancel() cancels the context, which unblocks handlers.
 		// Then defer wg.Wait() waits for handler goroutines to finish.
@@ -755,7 +755,7 @@ func TestRunControlLoop(t *testing.T) {
 			Logger:        discardLogger(),
 		}
 
-		err := runControlLoop(ctx, cfg)
+		_, err := runControlLoop(ctx, cfg)
 		if err == nil {
 			t.Fatal("expected error on token failure")
 		}
@@ -779,7 +779,7 @@ func TestRunControlLoop(t *testing.T) {
 			Logger:        discardLogger(),
 		}
 
-		err := runControlLoop(ctx, cfg)
+		_, err := runControlLoop(ctx, cfg)
 		if err == nil {
 			t.Fatal("expected error on dial failure")
 		}
