@@ -19,6 +19,7 @@ type ConnectConfig struct {
 	Stdout        io.WriteCloser
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
+	DialRetries   int              // number of retry attempts on dial failure (0 = no retries)
 }
 
 // Connect performs a one-shot connection: dials the relay, sends the
@@ -29,7 +30,7 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 		cfg.Logger = slog.Default()
 	}
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender")
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.DialRetries, cfg.Logger)
 	if err != nil {
 		return err
 	}

@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -216,6 +218,177 @@ func TestDialWithLogger(t *testing.T) {
 		}
 		if !strings.Contains(output, "relay dial failed") {
 			t.Errorf("log output missing %q: %s", "relay dial failed", output)
+		}
+	})
+}
+
+func TestDialWithRetry(t *testing.T) {
+	t.Run("succeeds on first attempt", func(t *testing.T) {
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		var retryCalls int
+		onRetry := func() { retryCalls++ }
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		ws, err := DialWithRetry(ctx, endpoint, "my-entity", tp, 3, onRetry, logger)
+		if err != nil {
+			t.Fatalf("DialWithRetry: %v", err)
+		}
+		defer ws.CloseNow()
+
+		if retryCalls != 0 {
+			t.Errorf("onRetry called %d times, want 0", retryCalls)
+		}
+	})
+
+	t.Run("succeeds after retries", func(t *testing.T) {
+		// Server that rejects the first two connections and accepts the third.
+		var connCount atomic.Int32
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			n := connCount.Add(1)
+			if n < 3 {
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		var retryCalls int
+		onRetry := func() { retryCalls++ }
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		// The retry delays are hardcoded exponential backoff (1s, 2s, ...),
+		// so this test is designed to succeed on the 3rd attempt after two
+		// automatic retries. With retries=3 (4 total attempts), the test
+		// verifies both retry count and eventual success.
+		ws, err := DialWithRetry(ctx, endpoint, "my-entity", tp, 3, onRetry, logger)
+		if err != nil {
+			t.Fatalf("DialWithRetry: %v", err)
+		}
+		defer ws.CloseNow()
+
+		if retryCalls != 2 {
+			t.Errorf("onRetry called %d times, want 2", retryCalls)
+		}
+		if !strings.Contains(logBuf.String(), "retrying relay dial") {
+			t.Errorf("log missing retry message: %s", logBuf.String())
+		}
+	})
+
+	t.Run("fails after all retries exhausted", func(t *testing.T) {
+		tp := &mockTokenProvider{token: "test-token"}
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		var retryCalls int
+		onRetry := func() { retryCalls++ }
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 2, onRetry, logger)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		if retryCalls != 2 {
+			t.Errorf("onRetry called %d times, want 2", retryCalls)
+		}
+	})
+
+	t.Run("zero retries means one attempt only", func(t *testing.T) {
+		tp := &mockTokenProvider{token: "test-token"}
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		var retryCalls int
+		onRetry := func() { retryCalls++ }
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 0, onRetry, logger)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		if retryCalls != 0 {
+			t.Errorf("onRetry called %d times, want 0 for zero retries", retryCalls)
+		}
+	})
+
+	t.Run("context cancelled stops retries", func(t *testing.T) {
+		tp := &mockTokenProvider{token: "test-token"}
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithCancel(context.Background())
+
+		var retryCalls int
+		onRetry := func() {
+			retryCalls++
+			// Cancel after first retry is triggered.
+			cancel()
+		}
+
+		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 5, onRetry, logger)
+		if err == nil {
+			t.Fatal("expected error for cancelled context, got nil")
+		}
+
+		// Should have triggered exactly one retry before context was cancelled.
+		if retryCalls != 1 {
+			t.Errorf("onRetry called %d times, want 1", retryCalls)
+		}
+	})
+
+	t.Run("nil onRetry is safe", func(t *testing.T) {
+		tp := &mockTokenProvider{token: "test-token"}
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Should not panic with nil onRetry.
+		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 1, nil, logger)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+	})
+
+	t.Run("nil logger uses default", func(t *testing.T) {
+		tp := &mockTokenProvider{token: "test-token"}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Should not panic with nil logger.
+		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 0, nil, nil)
+		if err == nil {
+			t.Fatal("expected error, got nil")
 		}
 	})
 }
