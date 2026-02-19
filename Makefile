@@ -3,7 +3,7 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker help
 
 .DEFAULT_GOAL := help
 
@@ -61,6 +61,15 @@ fmt: ## Format markdown and YAML with prettier
 
 fmt-check: ## Check formatting (same as CI)
 	npx --yes prettier --check .
+
+e2e: build ## Run end-to-end tests (requires Azure Relay credentials)
+	go test -tags=e2e -timeout=10m -v ./e2e/...
+
+e2e-docker: ## Run container-to-container e2e tests
+	@status=0; \
+	docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner || status=$$?; \
+	docker compose -f docker-compose.e2e.yml down; \
+	exit $$status
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
