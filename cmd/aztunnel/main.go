@@ -9,9 +9,8 @@ import (
 
 	// Automatically set GOMEMLIMIT based on cgroup memory limits (container
 	// or systemd MemoryMax=). If no cgroup limit is detected, GOMEMLIMIT is
-	// left at the Go default and a "memory is not limited, skipping" message
-	// is logged.
-	_ "github.com/KimMachineGun/automemlimit"
+	// left at the Go default.
+	"github.com/KimMachineGun/automemlimit/memlimit"
 
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
@@ -20,11 +19,16 @@ import (
 
 var version = "dev"
 
+func init() {
+	_, _ = memlimit.SetGoMemLimitWithOpts(memlimit.WithLogger(nil))
+}
+
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "aztunnel",
-		Short: "Azure Relay Hybrid Connection tunnel",
-		Long:  "Tunnel TCP connections through Azure Relay Hybrid Connections.",
+		Use:          "aztunnel",
+		Short:        "Azure Relay Hybrid Connection tunnel",
+		Long:         "Tunnel TCP connections through Azure Relay Hybrid Connections.",
+		SilenceUsage: true,
 	}
 
 	// Global flags.

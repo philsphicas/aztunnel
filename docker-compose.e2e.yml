@@ -1,0 +1,115 @@
+# E2E container-to-container tests via Azure Relay.
+#
+# Usage:
+#   make e2e-docker
+#
+# Requires the same AZTUNNEL_SAS_* environment variables as `make e2e`:
+#   AZTUNNEL_RELAY_NAME, AZTUNNEL_SAS_HYCO_NAME,
+#   AZTUNNEL_SAS_LISTENER_KEY_NAME, AZTUNNEL_SAS_LISTENER_KEY,
+#   AZTUNNEL_SAS_SENDER_KEY_NAME, AZTUNNEL_SAS_SENDER_KEY
+#
+# Architecture:
+#   ┌──────────┐  ┌──────────────┐    Azure Relay    ┌──────────────┐
+#   │  echo    │←─│   listener   │◄═════════════════►│    sender    │
+#   │  :9999   │  │  container   │                    │  container   │
+#   └──────────┘  └──────────────┘                    ├──► :18000    │
+#                                                     └──────┬───────┘
+#                                                            │
+#                                                     ┌──────┴───────┐
+#                                                     │  test-runner  │
+#                                                     └──────────────┘
+
+services:
+  echo:
+    image: alpine/socat@sha256:accce73b02173c4a3d333e96500c294e5c6ed04e9c64a65cd119fd5a13bff263
+    command: TCP-LISTEN:9999,fork,reuseaddr EXEC:cat
+
+  listener:
+    build: .
+    command:
+      - relay-listener
+      - ${AZTUNNEL_SAS_HYCO_NAME}
+      - --relay
+      - ${AZTUNNEL_RELAY_NAME}
+      - --allow
+      - "echo:9999"
+      - --log-level
+      - debug
+    environment:
+      - AZTUNNEL_RELAY_NAME
+      - AZTUNNEL_KEY_NAME=${AZTUNNEL_SAS_LISTENER_KEY_NAME}
+      - AZTUNNEL_KEY=${AZTUNNEL_SAS_LISTENER_KEY}
+    depends_on:
+      - echo
+
+  sender:
+    build: .
+    command:
+      - relay-sender
+      - port-forward
+      - echo:9999
+      - --relay
+      - ${AZTUNNEL_RELAY_NAME}
+      - --hyco
+      - ${AZTUNNEL_SAS_HYCO_NAME}
+      - --bind
+      - "0.0.0.0:18000"
+      - --log-level
+      - debug
+    environment:
+      - AZTUNNEL_RELAY_NAME
+      - AZTUNNEL_KEY_NAME=${AZTUNNEL_SAS_SENDER_KEY_NAME}
+      - AZTUNNEL_KEY=${AZTUNNEL_SAS_SENDER_KEY}
+    depends_on:
+      - listener
+
+  test-runner:
+    image: debian:bookworm-slim
+    depends_on:
+      - sender
+    entrypoint:
+      - /bin/bash
+      - -ec
+      - |
+        apt-get update -qq && apt-get install -y -qq netcat-openbsd > /dev/null 2>&1
+
+        echo "Waiting for sender to be ready..."
+        sender_ready=0
+        for i in $$(seq 1 30); do
+          if nc -z sender 18000 2>/dev/null; then
+            echo "Sender is ready."
+            sender_ready=1
+            break
+          fi
+          sleep 2
+        done
+        if [ "$$sender_ready" -ne 1 ]; then
+          echo "ERROR: sender did not become ready on port 18000."
+          exit 1
+        fi
+
+        echo "=== Test 1: basic echo ==="
+        result=$$(echo "hello-from-docker" | nc -w 5 sender 18000)
+        echo "$$result"
+        echo "$$result" | grep -q "hello-from-docker"
+        echo "PASS: basic echo"
+
+        echo "=== Test 2: multiple connections ==="
+        for i in 1 2 3 4 5; do
+          result=$$(echo "conn-$$i" | nc -w 5 sender 18000)
+          echo "$$result" | grep -q "conn-$$i"
+        done
+        echo "PASS: multiple connections"
+
+        echo "=== Test 3: larger payload ==="
+        dd if=/dev/urandom bs=1024 count=100 2>/dev/null | base64 > /tmp/payload
+        nc -w 10 sender 18000 < /tmp/payload > /tmp/result
+        if cmp -s /tmp/payload /tmp/result; then
+          echo "PASS: 100KB payload"
+        else
+          echo "FAIL: payload mismatch"
+          exit 1
+        fi
+
+        echo ""
+        echo "All docker e2e tests passed!"
