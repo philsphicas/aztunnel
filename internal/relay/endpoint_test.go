@@ -23,8 +23,8 @@ func TestParseRelayEndpoint(t *testing.T) {
 		{"empty string", "", DefaultRelaySuffix, ""},
 		{"whitespace only", "   ", DefaultRelaySuffix, ""},
 		{"bare name with dot", "my.relay", DefaultRelaySuffix, "my.relay"},
-		{"sb:// no host", "sb://", DefaultRelaySuffix, "sb://" + DefaultRelaySuffix},
-		{"malformed scheme", "://invalid", DefaultRelaySuffix, "://invalid" + DefaultRelaySuffix},
+		{"sb:// no host", "sb://", DefaultRelaySuffix, ""},
+		{"malformed scheme", "://invalid", DefaultRelaySuffix, ""},
 		{"uri with path", "https://my-relay.servicebus.windows.net:443/some/path", DefaultRelaySuffix, "my-relay.servicebus.windows.net"},
 	}
 

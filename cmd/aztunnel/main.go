@@ -91,6 +91,7 @@ func resolveMetrics(ctx context.Context, cmd *cobra.Command, logger *slog.Logger
 	}()
 	return m, nil
 }
+
 // resolveHyco returns the hybrid connection name from --hyco flag, env var, or positional arg.
 func resolveHyco(cmd *cobra.Command, args []string) (string, error) {
 	if hyco, _ := cmd.Flags().GetString("hyco"); hyco != "" {
@@ -134,6 +135,9 @@ func resolveAuth(cmd *cobra.Command) (endpoint string, tp relay.TokenProvider, e
 		suffix = relay.DefaultRelaySuffix
 	}
 	endpoint = relay.ParseRelayEndpoint(ns, suffix)
+	if endpoint == "" {
+		return "", nil, fmt.Errorf("invalid relay endpoint: %q", ns)
+	}
 
 	keyName := os.Getenv("AZTUNNEL_KEY_NAME")
 	key := os.Getenv("AZTUNNEL_KEY")
