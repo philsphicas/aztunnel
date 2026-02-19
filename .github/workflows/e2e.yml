@@ -1,0 +1,48 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-tests
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    environment: e2e-azure
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build
+        run: make build
+
+      - name: Run E2E Tests
+        env:
+          AZTUNNEL_RELAY_NAME: ${{ vars.AZTUNNEL_RELAY_NAME }}
+          AZTUNNEL_HYCO_NAME: ${{ vars.AZTUNNEL_HYCO_NAME }}
+          AZTUNNEL_SAS_HYCO_NAME: ${{ vars.AZTUNNEL_SAS_HYCO_NAME }}
+          AZTUNNEL_SAS_LISTENER_KEY_NAME: ${{ secrets.AZTUNNEL_SAS_LISTENER_KEY_NAME }}
+          AZTUNNEL_SAS_LISTENER_KEY: ${{ secrets.AZTUNNEL_SAS_LISTENER_KEY }}
+          AZTUNNEL_SAS_SENDER_KEY_NAME: ${{ secrets.AZTUNNEL_SAS_SENDER_KEY_NAME }}
+          AZTUNNEL_SAS_SENDER_KEY: ${{ secrets.AZTUNNEL_SAS_SENDER_KEY }}
+        run: make e2e

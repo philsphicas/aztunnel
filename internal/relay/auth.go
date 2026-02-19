@@ -77,7 +77,7 @@ func GenerateSASToken(resourceURI, keyName, key string, expiry time.Duration) (s
 	exp := time.Now().Add(expiry).Unix()
 	sig := sign(uri, exp, key)
 	return fmt.Sprintf("SharedAccessSignature sr=%s&sig=%s&se=%d&skn=%s",
-		uri, url.QueryEscape(sig), exp, keyName), nil
+		uri, url.QueryEscape(sig), exp, url.QueryEscape(keyName)), nil
 }
 
 func sign(uri string, expiry int64, key string) string {
@@ -110,14 +110,24 @@ func ResourceURI(fqdn, entityPath string) string {
 // to avoid leaking credentials in log output.
 func sanitizeErr(err error) error {
 	s := err.Error()
-	// Strip sb-hc-token=... from URLs in the error message.
-	if i := strings.Index(s, "sb-hc-token="); i != -1 {
-		end := strings.IndexAny(s[i:], "\" ")
-		if end == -1 {
-			s = s[:i] + "sb-hc-token=REDACTED"
-		} else {
-			s = s[:i] + "sb-hc-token=REDACTED" + s[i+end:]
+	// Strip all occurrences of sb-hc-token=... from URLs in the error message.
+	const marker = "sb-hc-token="
+	const redacted = "sb-hc-token=REDACTED"
+	pos := 0
+	for pos < len(s) {
+		i := strings.Index(s[pos:], marker)
+		if i == -1 {
+			break
 		}
+		i += pos // absolute position
+		valStart := i + len(marker)
+		end := strings.IndexAny(s[valStart:], "\" &")
+		if end == -1 {
+			s = s[:valStart] + "REDACTED"
+		} else {
+			s = s[:valStart] + "REDACTED" + s[valStart+end:]
+		}
+		pos = i + len(redacted)
 	}
 	return fmt.Errorf("%s", s)
 }
