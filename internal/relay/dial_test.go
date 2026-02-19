@@ -59,8 +59,8 @@ func TestDial(t *testing.T) {
 		}))
 
 		tp := &mockTokenProvider{token: "test-sas-token"}
-		// Convert https:// to sb:// so EndpointToWSS produces wss://.
-		endpoint := strings.Replace(srv.URL, "https://", "sb://", 1)
+		// Strip scheme so EndpointToWSS prepends wss://.
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -89,7 +89,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := Dial(ctx, "sb://test.servicebus.windows.net", "my-entity", tp)
+		_, err := Dial(ctx, "test.servicebus.windows.net", "my-entity", tp)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -104,7 +104,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := Dial(ctx, "sb://127.0.0.1:1", "my-entity", tp)
+		_, err := Dial(ctx, "127.0.0.1:1", "my-entity", tp)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -119,7 +119,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // cancel immediately
 
-		_, err := Dial(ctx, "sb://127.0.0.1:1", "my-entity", tp)
+		_, err := Dial(ctx, "127.0.0.1:1", "my-entity", tp)
 		if err == nil {
 			t.Fatal("expected error for cancelled context, got nil")
 		}
@@ -143,7 +143,7 @@ func TestDial(t *testing.T) {
 		}))
 
 		tp := &mockTokenProvider{token: "tok"}
-		endpoint := strings.Replace(srv.URL, "https://", "sb://", 1)
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -176,7 +176,7 @@ func TestDialWithLogger(t *testing.T) {
 		}))
 
 		tp := &mockTokenProvider{token: "test-token"}
-		endpoint := strings.Replace(srv.URL, "https://", "sb://", 1)
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -205,7 +205,7 @@ func TestDialWithLogger(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := DialWithLogger(ctx, "sb://127.0.0.1:1", "test-entity", tp, logger)
+		_, err := DialWithLogger(ctx, "127.0.0.1:1", "test-entity", tp, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}

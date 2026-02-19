@@ -41,10 +41,10 @@ az relay hyco create \
   --requires-client-authorization false
 ```
 
-Your relay endpoint is:
+Your relay endpoint (FQDN) is:
 
 ```
-sb://<RELAY_NAMESPACE>.servicebus.windows.net
+<RELAY_NAMESPACE>.servicebus.windows.net
 ```
 
 ### Hybrid connections and multiple listeners

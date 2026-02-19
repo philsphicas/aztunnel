@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -41,9 +42,28 @@ func (m *mockTokenProvider) getCalls() int {
 	return m.calls
 }
 
-// wsURL converts an httptest.Server URL to a ws:// URL.
-func wsURL(srv *httptest.Server) string {
-	return "ws" + strings.TrimPrefix(srv.URL, "http")
+// testEndpoint returns bare host:port from a httptest.Server URL.
+func testEndpoint(srv *httptest.Server) string {
+	return strings.TrimPrefix(strings.TrimPrefix(srv.URL, "https://"), "http://")
+}
+
+func tlsServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewTLSServer(handler)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func useInsecureTransport(t *testing.T) {
+	t.Helper()
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = &http.Transport{
+		TLSClientConfig: &tls.Config{
+			//nolint:gosec // G402: test-only, self-signed cert
+			InsecureSkipVerify: true,
+		},
+	}
+	t.Cleanup(func() { http.DefaultTransport = origTransport })
 }
 
 func discardLogger() *slog.Logger {
@@ -57,9 +77,11 @@ func (discard) Write(p []byte) (int, error) { return len(p), nil }
 // ---------- TestHandleAccept ----------
 
 func TestHandleAccept(t *testing.T) {
+	useInsecureTransport(t)
+
 	t.Run("dials rendezvous and calls handler", func(t *testing.T) {
 		handlerCalled := make(chan struct{})
-		rendezvousSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -71,7 +93,6 @@ func TestHandleAccept(t *testing.T) {
 				}
 			}
 		}))
-		defer rendezvousSrv.Close()
 
 		cfg := ControlConfig{
 			DialTimeout: 5 * time.Second,
@@ -84,7 +105,7 @@ func TestHandleAccept(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := handleAccept(ctx, wsURL(rendezvousSrv), cfg)
+		err := handleAccept(ctx, "wss://"+testEndpoint(rendezvousSrv), cfg)
 		if err != nil {
 			t.Fatalf("handleAccept returned error: %v", err)
 		}
@@ -122,9 +143,11 @@ func TestHandleAccept(t *testing.T) {
 // ---------- TestRenewOnce ----------
 
 func TestRenewOnce(t *testing.T) {
+	useInsecureTransport(t)
+
 	t.Run("successful renewal", func(t *testing.T) {
 		received := make(chan map[string]interface{}, 1)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -145,12 +168,11 @@ func TestRenewOnce(t *testing.T) {
 				}
 			}
 		}))
-		defer srv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, _, err := websocket.Dial(ctx, wsURL(srv), nil)
+		ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -179,7 +201,7 @@ func TestRenewOnce(t *testing.T) {
 
 	t.Run("retries on token failure then succeeds", func(t *testing.T) {
 		received := make(chan map[string]interface{}, 1)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -200,12 +222,11 @@ func TestRenewOnce(t *testing.T) {
 				}
 			}
 		}))
-		defer srv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		ws, _, err := websocket.Dial(ctx, wsURL(srv), nil)
+		ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -243,7 +264,7 @@ func TestRenewOnce(t *testing.T) {
 	})
 
 	t.Run("returns error after max retries", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -255,12 +276,11 @@ func TestRenewOnce(t *testing.T) {
 				}
 			}
 		}))
-		defer srv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		ws, _, err := websocket.Dial(ctx, wsURL(srv), nil)
+		ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -281,19 +301,18 @@ func TestRenewOnce(t *testing.T) {
 	})
 
 	t.Run("write failure returns immediately without retry", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
 			}
 			ws.Close(websocket.StatusNormalClosure, "bye")
 		}))
-		defer srv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, _, err := websocket.Dial(ctx, wsURL(srv), nil)
+		ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -317,12 +336,14 @@ func TestRenewOnce(t *testing.T) {
 // ---------- TestPingLoop ----------
 
 func TestPingLoop(t *testing.T) {
+	useInsecureTransport(t)
+
 	t.Run("ping failure calls cancel", func(t *testing.T) {
 		// Create a server that accepts the WS and then shuts down entirely,
 		// causing a network-level failure for the ping. The server must stay
 		// alive long enough for the client to establish the WebSocket.
 		srvReady := make(chan struct{})
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -340,7 +361,7 @@ func TestPingLoop(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), pingInterval+pingTimeout+10*time.Second)
 		defer cancel()
 
-		ws, _, err := websocket.Dial(ctx, wsURL(srv), nil)
+		ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -375,7 +396,7 @@ func TestPingLoop(t *testing.T) {
 	})
 
 	t.Run("context cancel stops loop", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -387,12 +408,11 @@ func TestPingLoop(t *testing.T) {
 				}
 			}
 		}))
-		defer srv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, _, err := websocket.Dial(ctx, wsURL(srv), nil)
+		ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -422,11 +442,13 @@ func TestPingLoop(t *testing.T) {
 // ---------- TestRenewLoop ----------
 
 func TestRenewLoop(t *testing.T) {
+	useInsecureTransport(t)
+
 	t.Run("exits on context cancel", func(t *testing.T) {
 		// renewLoop uses renewInterval (45min) for its ticker, so we can't
 		// easily trigger a tick in a test. Instead we verify that it exits
 		// promptly when the context is cancelled.
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -438,12 +460,11 @@ func TestRenewLoop(t *testing.T) {
 				}
 			}
 		}))
-		defer srv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, _, err := websocket.Dial(ctx, wsURL(srv), nil)
+		ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -478,10 +499,12 @@ func TestRenewLoop(t *testing.T) {
 // ---------- TestRunControlLoop ----------
 
 func TestRunControlLoop(t *testing.T) {
+	useInsecureTransport(t)
+
 	t.Run("reads accept messages and spawns handlers", func(t *testing.T) {
 		handlerCalls := make(chan string, 10)
 
-		rendezvousSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -493,12 +516,11 @@ func TestRunControlLoop(t *testing.T) {
 				}
 			}
 		}))
-		defer rendezvousSrv.Close()
 
-		rendezvousAddr := wsURL(rendezvousSrv)
+		rendezvousAddr := "wss://" + testEndpoint(rendezvousSrv)
 
 		// Control server sends accept messages, waits for handlers, then closes.
-		controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controlSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -534,7 +556,6 @@ func TestRunControlLoop(t *testing.T) {
 				}
 			}
 		}))
-		defer controlSrv.Close()
 
 		// Use a short context timeout. After the server closes the WS,
 		// runControlLoop's defer wg.Wait() blocks until the context
@@ -544,10 +565,9 @@ func TestRunControlLoop(t *testing.T) {
 
 		tp := &mockTokenProvider{token: "test-token"}
 
-		// Set Endpoint to ws://host:port so EndpointToWSS returns it unchanged
-		// (no "sb://" prefix to replace). The server accepts any path.
+		// Set Endpoint to bare host:port so EndpointToWSS prepends wss://.
 		cfg := ControlConfig{
-			Endpoint:      wsURL(controlSrv),
+			Endpoint:      testEndpoint(controlSrv),
 			EntityPath:    "test-entity",
 			TokenProvider: tp,
 			Handler: func(ctx context.Context, ws *websocket.Conn) {
@@ -576,7 +596,7 @@ func TestRunControlLoop(t *testing.T) {
 	t.Run("ignores non-accept messages", func(t *testing.T) {
 		handlerCalls := make(chan string, 10)
 
-		rendezvousSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -588,9 +608,8 @@ func TestRunControlLoop(t *testing.T) {
 				}
 			}
 		}))
-		defer rendezvousSrv.Close()
 
-		controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controlSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -606,7 +625,7 @@ func TestRunControlLoop(t *testing.T) {
 			// Valid accept.
 			msg := map[string]interface{}{
 				"accept": map[string]interface{}{
-					"address": wsURL(rendezvousSrv),
+					"address": "wss://" + testEndpoint(rendezvousSrv),
 					"id":      "valid-id",
 				},
 			}
@@ -628,14 +647,13 @@ func TestRunControlLoop(t *testing.T) {
 				}
 			}
 		}))
-		defer controlSrv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		tp := &mockTokenProvider{token: "test-token"}
 		cfg := ControlConfig{
-			Endpoint:      wsURL(controlSrv),
+			Endpoint:      testEndpoint(controlSrv),
 			EntityPath:    "test-entity",
 			TokenProvider: tp,
 			Handler: func(ctx context.Context, ws *websocket.Conn) {
@@ -660,7 +678,7 @@ func TestRunControlLoop(t *testing.T) {
 	t.Run("respects max connections", func(t *testing.T) {
 		handlerStarted := make(chan struct{}, 10)
 
-		rendezvousSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -672,9 +690,8 @@ func TestRunControlLoop(t *testing.T) {
 				}
 			}
 		}))
-		defer rendezvousSrv.Close()
 
-		controlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controlSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return
@@ -685,7 +702,7 @@ func TestRunControlLoop(t *testing.T) {
 			for i := range 3 {
 				msg := map[string]interface{}{
 					"accept": map[string]interface{}{
-						"address": wsURL(rendezvousSrv),
+						"address": "wss://" + testEndpoint(rendezvousSrv),
 						"id":      fmt.Sprintf("id-%d", i),
 					},
 				}
@@ -702,14 +719,13 @@ func TestRunControlLoop(t *testing.T) {
 			time.Sleep(500 * time.Millisecond)
 			ws.Close(websocket.StatusNormalClosure, "done")
 		}))
-		defer controlSrv.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
 		tp := &mockTokenProvider{token: "test-token"}
 		cfg := ControlConfig{
-			Endpoint:       wsURL(controlSrv),
+			Endpoint:       testEndpoint(controlSrv),
 			EntityPath:     "test-entity",
 			TokenProvider:  tp,
 			MaxConnections: 1,

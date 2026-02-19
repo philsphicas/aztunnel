@@ -47,9 +47,9 @@ type RelayInfo struct {
 	ServiceConfigurationToken string `json:"serviceConfigurationToken"` //nolint:gosec // G117: deserialized from Azure ARM API
 }
 
-// Endpoint returns the Azure Relay sb:// endpoint.
+// Endpoint returns the Azure Relay FQDN.
 func (r *RelayInfo) Endpoint() string {
-	return "sb://" + r.NamespaceName + "." + r.NamespaceNameSuffix
+	return r.NamespaceName + "." + r.NamespaceNameSuffix
 }
 
 // listCredentialsResponse is the top-level response from listCredentials.
