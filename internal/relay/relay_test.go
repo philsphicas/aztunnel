@@ -23,7 +23,7 @@ func TestGenerateSASToken(t *testing.T) {
 }
 
 func TestEndpointConversion(t *testing.T) {
-	ep := "sb://test.servicebus.windows.net"
+	ep := "test.servicebus.windows.net"
 	if got := EndpointToWSS(ep); got != "wss://test.servicebus.windows.net" {
 		t.Errorf("WSS = %q", got)
 	}
@@ -33,7 +33,7 @@ func TestEndpointConversion(t *testing.T) {
 }
 
 func TestResourceURI(t *testing.T) {
-	got := ResourceURI("sb://test.servicebus.windows.net", "myhc")
+	got := ResourceURI("test.servicebus.windows.net", "myhc")
 	want := "https://test.servicebus.windows.net/myhc"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)

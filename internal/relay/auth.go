@@ -87,19 +87,19 @@ func sign(uri string, expiry int64, key string) string {
 	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
-// EndpointToWSS converts an sb:// endpoint to a wss:// URL.
+// EndpointToWSS converts an endpoint (FQDN or host:port) to a wss:// URL.
 func EndpointToWSS(endpoint string) string {
-	return strings.Replace(endpoint, "sb://", "wss://", 1)
+	return "wss://" + endpoint
 }
 
-// EndpointToHTTPS converts an sb:// endpoint to an https:// URL.
+// EndpointToHTTPS converts an endpoint (FQDN or host:port) to an https:// URL.
 func EndpointToHTTPS(endpoint string) string {
-	return strings.Replace(endpoint, "sb://", "https://", 1)
+	return "https://" + endpoint
 }
 
 // ResourceURI returns the HTTPS resource URI for SAS token generation.
-func ResourceURI(endpoint, entityPath string) string {
-	base := EndpointToHTTPS(endpoint)
+func ResourceURI(fqdn, entityPath string) string {
+	base := EndpointToHTTPS(fqdn)
 	if entityPath != "" {
 		return base + "/" + entityPath
 	}

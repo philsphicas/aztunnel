@@ -53,7 +53,7 @@ func TestRelayInfoEndpoint(t *testing.T) {
 		NamespaceName:       "my-relay",
 		NamespaceNameSuffix: "servicebus.windows.net",
 	}
-	want := "sb://my-relay.servicebus.windows.net"
+	want := "my-relay.servicebus.windows.net"
 	if got := r.Endpoint(); got != want {
 		t.Errorf("Endpoint() = %q, want %q", got, want)
 	}

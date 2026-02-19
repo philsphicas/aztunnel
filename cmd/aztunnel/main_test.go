@@ -92,8 +92,8 @@ func TestResolveAuth_NamespaceFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
-	if endpoint != "sb://test.servicebus.windows.net" {
-		t.Errorf("endpoint = %q, want %q", endpoint, "sb://test.servicebus.windows.net")
+	if endpoint != "test.servicebus.windows.net" {
+		t.Errorf("endpoint = %q, want %q", endpoint, "test.servicebus.windows.net")
 	}
 	if tp == nil {
 		t.Fatal("token provider is nil")
@@ -113,8 +113,8 @@ func TestResolveAuth_SASCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
-	if endpoint != "sb://myns.servicebus.windows.net" {
-		t.Errorf("endpoint = %q, want %q", endpoint, "sb://myns.servicebus.windows.net")
+	if endpoint != "myns.servicebus.windows.net" {
+		t.Errorf("endpoint = %q, want %q", endpoint, "myns.servicebus.windows.net")
 	}
 
 	sas, ok := tp.(*relay.SASTokenProvider)
@@ -162,8 +162,124 @@ func TestResolveAuth_NamespaceFlagPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
-	if endpoint != "sb://from-flag.servicebus.windows.net" {
-		t.Errorf("endpoint = %q, want %q (flag should take priority over env)", endpoint, "sb://from-flag.servicebus.windows.net")
+	if endpoint != "from-flag.servicebus.windows.net" {
+		t.Errorf("endpoint = %q, want %q (flag should take priority over env)", endpoint, "from-flag.servicebus.windows.net")
+	}
+}
+
+func TestResolveAuth_FQDNInput(t *testing.T) {
+	t.Setenv("AZTUNNEL_RELAY_NAME", "my-relay.servicebus.windows.net")
+	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
+	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
+
+	cmd := makeAuthCmd()
+	cmd.SetArgs([]string{})
+	_ = cmd.Execute()
+
+	endpoint, _, err := resolveAuth(cmd)
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if endpoint != "my-relay.servicebus.windows.net" {
+		t.Errorf("endpoint = %q, want %q", endpoint, "my-relay.servicebus.windows.net")
+	}
+}
+
+func TestResolveAuth_URIInput(t *testing.T) {
+	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
+	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
+
+	cmd := makeAuthCmd()
+	cmd.SetArgs([]string{"--relay", "sb://my-relay.servicebus.windows.net"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	endpoint, _, err := resolveAuth(cmd)
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if endpoint != "my-relay.servicebus.windows.net" {
+		t.Errorf("endpoint = %q, want %q", endpoint, "my-relay.servicebus.windows.net")
+	}
+}
+
+func TestResolveAuth_CustomSuffixFlag(t *testing.T) {
+	t.Setenv("AZTUNNEL_RELAY_NAME", "my-relay")
+	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
+	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
+
+	cmd := makeAuthCmd()
+	cmd.SetArgs([]string{"--relay-suffix", ".servicebus.chinacloudapi.cn"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	endpoint, _, err := resolveAuth(cmd)
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if endpoint != "my-relay.servicebus.chinacloudapi.cn" {
+		t.Errorf("endpoint = %q, want %q", endpoint, "my-relay.servicebus.chinacloudapi.cn")
+	}
+}
+
+func TestResolveAuth_SuffixEnvVar(t *testing.T) {
+	t.Setenv("AZTUNNEL_RELAY_NAME", "my-relay")
+	t.Setenv("AZTUNNEL_RELAY_SUFFIX", ".servicebus.usgovcloudapi.net")
+	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
+	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
+
+	cmd := makeAuthCmd()
+	cmd.SetArgs([]string{})
+	_ = cmd.Execute()
+
+	endpoint, _, err := resolveAuth(cmd)
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if endpoint != "my-relay.servicebus.usgovcloudapi.net" {
+		t.Errorf("endpoint = %q, want %q", endpoint, "my-relay.servicebus.usgovcloudapi.net")
+	}
+}
+
+func TestResolveAuth_SuffixIgnoredForFQDN(t *testing.T) {
+	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
+	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
+
+	cmd := makeAuthCmd()
+	cmd.SetArgs([]string{"--relay", "my-relay.servicebus.chinacloudapi.cn", "--relay-suffix", ".should-be-ignored"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	endpoint, _, err := resolveAuth(cmd)
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if endpoint != "my-relay.servicebus.chinacloudapi.cn" {
+		t.Errorf("endpoint = %q, want %q (suffix should be ignored for FQDN)", endpoint, "my-relay.servicebus.chinacloudapi.cn")
+	}
+}
+
+func TestResolveAuth_SuffixFlagPrecedenceOverEnv(t *testing.T) {
+	t.Setenv("AZTUNNEL_RELAY_NAME", "my-relay")
+	t.Setenv("AZTUNNEL_RELAY_SUFFIX", ".servicebus.chinacloudapi.cn")
+	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
+	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
+
+	cmd := makeAuthCmd()
+	cmd.SetArgs([]string{"--relay-suffix", ".servicebus.usgovcloudapi.net"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	endpoint, _, err := resolveAuth(cmd)
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if endpoint != "my-relay.servicebus.usgovcloudapi.net" {
+		t.Errorf("endpoint = %q, want %q (flag should take precedence over env)", endpoint, "my-relay.servicebus.usgovcloudapi.net")
 	}
 }
 
