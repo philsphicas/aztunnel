@@ -283,6 +283,25 @@ func TestResolveAuth_SuffixFlagPrecedenceOverEnv(t *testing.T) {
 	}
 }
 
+func TestResolveAuth_InvalidURIInput(t *testing.T) {
+	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
+	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
+
+	cmd := makeAuthCmd()
+	cmd.SetArgs([]string{"--relay", "sb://"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	_, _, err := resolveAuth(cmd)
+	if err == nil {
+		t.Fatal("expected error for invalid URI input, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid relay endpoint") {
+		t.Errorf("error %q does not contain %q", err.Error(), "invalid relay endpoint")
+	}
+}
+
 func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 	t.Setenv("AZTUNNEL_RELAY_NAME", "test")
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")

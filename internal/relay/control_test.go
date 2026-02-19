@@ -763,7 +763,7 @@ func TestRunControlLoop(t *testing.T) {
 		tp := &mockTokenProvider{err: fmt.Errorf("auth failure")}
 
 		cfg := ControlConfig{
-			Endpoint:      "ws://127.0.0.1:1",
+			Endpoint:      "127.0.0.1:1",
 			EntityPath:    "test-entity",
 			TokenProvider: tp,
 			Handler:       func(ctx context.Context, ws *websocket.Conn) {},
@@ -787,7 +787,7 @@ func TestRunControlLoop(t *testing.T) {
 		tp := &mockTokenProvider{token: "test-token"}
 
 		cfg := ControlConfig{
-			Endpoint:      "ws://127.0.0.1:1",
+			Endpoint:      "127.0.0.1:1",
 			EntityPath:    "test-entity",
 			TokenProvider: tp,
 			Handler:       func(ctx context.Context, ws *websocket.Conn) {},
@@ -814,7 +814,7 @@ func TestListenAndServe(t *testing.T) {
 		tp := &mockTokenProvider{err: fmt.Errorf("fail")}
 
 		cfg := ControlConfig{
-			Endpoint:      "ws://127.0.0.1:1",
+			Endpoint:      "127.0.0.1:1",
 			EntityPath:    "test-entity",
 			TokenProvider: tp,
 			Handler:       func(ctx context.Context, ws *websocket.Conn) {},
@@ -859,7 +859,7 @@ func TestListenAndServe(t *testing.T) {
 
 		cfg := ControlConfig{
 			// Point to a port that refuses connections so dial fails fast.
-			Endpoint:      "ws://127.0.0.1:1",
+			Endpoint:      "127.0.0.1:1",
 			EntityPath:    "test-entity",
 			TokenProvider: tp,
 			Handler:       func(ctx context.Context, ws *websocket.Conn) {},
@@ -905,7 +905,7 @@ func TestListenAndServe(t *testing.T) {
 		tp := &mockTokenProvider{token: "test-token"}
 
 		cfg := ControlConfig{
-			Endpoint:      "ws://127.0.0.1:1",
+			Endpoint:      "127.0.0.1:1",
 			EntityPath:    "test-entity",
 			TokenProvider: tp,
 			Handler:       func(ctx context.Context, ws *websocket.Conn) {},

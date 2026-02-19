@@ -18,7 +18,7 @@ const DefaultRelaySuffix = ".servicebus.windows.net"
 //
 // Detection: if input contains "://", parse as URL and extract host.
 // If input contains ".", treat as FQDN. Otherwise append defaultSuffix.
-// Empty input is returned as-is (callers should validate before calling).
+// Returns "" for empty input or malformed URIs; callers should validate the result.
 func ParseRelayEndpoint(input, defaultSuffix string) string {
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -27,13 +27,14 @@ func ParseRelayEndpoint(input, defaultSuffix string) string {
 
 	if strings.Contains(input, "://") {
 		u, err := url.Parse(input)
-		if err == nil && u != nil && u.Hostname() != "" {
-			host := u.Hostname()
-			if strings.Contains(host, ".") {
-				return host
-			}
-			return host + defaultSuffix
+		if err != nil || u.Hostname() == "" {
+			return ""
 		}
+		host := u.Hostname()
+		if strings.Contains(host, ".") {
+			return host
+		}
+		return host + defaultSuffix
 	}
 
 	if strings.Contains(input, ".") {
