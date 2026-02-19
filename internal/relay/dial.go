@@ -10,7 +10,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-const defaultDialTimeout = 30 * time.Second
+const (
+	defaultDialTimeout = 30 * time.Second
+	dialRetryBase      = 1 * time.Second
+)
 
 // Dial connects to the Azure Relay as a sender, establishing a rendezvous
 // WebSocket connection that will be paired with a listener.
@@ -32,6 +35,38 @@ func Dial(ctx context.Context, endpoint, entityPath string, tp TokenProvider) (*
 		return nil, fmt.Errorf("dial relay: %w", sanitizeErr(err))
 	}
 	return ws, nil
+}
+
+// DialWithRetry dials the relay with up to retries additional attempts on
+// failure, using exponential backoff starting at 1s. retries=0 means a single
+// attempt (no retry). onRetry is called before each retry; it may be nil.
+func DialWithRetry(ctx context.Context, endpoint, entityPath string, tp TokenProvider, retries int, onRetry func(), logger *slog.Logger) (*websocket.Conn, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	delay := dialRetryBase
+	var lastErr error
+	for attempt := 0; attempt <= retries; attempt++ {
+		if attempt > 0 {
+			logger.Debug("retrying relay dial", "attempt", attempt, "delay", delay)
+			if onRetry != nil {
+				onRetry()
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+			delay *= 2
+		}
+		ws, err := Dial(ctx, endpoint, entityPath, tp)
+		if err == nil {
+			return ws, nil
+		}
+		lastErr = err
+		logger.Debug("relay dial attempt failed", "attempt", attempt+1, "error", err)
+	}
+	return nil, lastErr
 }
 
 // DialWithLogger is like Dial but logs the connection attempt.

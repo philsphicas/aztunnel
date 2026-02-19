@@ -24,6 +24,7 @@ Example:
 	}
 
 	addAuthFlags(cmd)
+	cmd.Flags().Int("dial-retries", 3, "number of relay dial retry attempts on failure (0 = no retries)")
 	return cmd
 }
 
@@ -41,6 +42,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 
 	logLevel, _ := cmd.Flags().GetString("log-level")
 	logger := newLogger(logLevel)
+	dialRetries, _ := cmd.Flags().GetInt("dial-retries")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -53,6 +55,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		Stdin:         os.Stdin,
 		Stdout:        os.Stdout,
 		Logger:        logger,
+		DialRetries:   dialRetries,
 	}
 	if cfg.Metrics, err = resolveMetrics(ctx, cmd, logger); err != nil {
 		return err

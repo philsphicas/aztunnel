@@ -30,6 +30,7 @@ func TestNew(t *testing.T) {
 	// Trigger all metrics so they appear in Gather output.
 	m.ConnectionError("test", "test")
 	m.ObserveDialDuration("test", 0.1)
+	m.IncrDialRetries("test")
 	m.SetControlChannelConnected(true)
 	tracker := m.ConnectionOpened("test", "test:22")
 	tracker.Done(1.0, 100, 200, nil)
@@ -47,6 +48,7 @@ func TestNew(t *testing.T) {
 		"aztunnel_control_channel_connected",
 		"aztunnel_connection_duration_seconds",
 		"aztunnel_dial_duration_seconds",
+		"aztunnel_dial_retries_total",
 	}
 	got := make(map[string]bool)
 	for _, f := range fams {
@@ -158,6 +160,22 @@ type timeoutError struct{}
 func (e *timeoutError) Error() string   { return "i/o timeout" }
 func (e *timeoutError) Timeout() bool   { return true }
 func (e *timeoutError) Temporary() bool { return true }
+
+func TestIncrDialRetries(t *testing.T) {
+	m := New()
+	m.IncrDialRetries("sender")
+	m.IncrDialRetries("sender")
+	m.IncrDialRetries("listener")
+
+	c := getCounter(t, m.dialRetriesTotal, "sender")
+	if c != 2 {
+		t.Errorf("dial_retries_total{sender} = %v, want 2", c)
+	}
+	c = getCounter(t, m.dialRetriesTotal, "listener")
+	if c != 1 {
+		t.Errorf("dial_retries_total{listener} = %v, want 1", c)
+	}
+}
 
 func TestObserveDialDuration(t *testing.T) {
 	m := New()
@@ -432,6 +450,7 @@ func TestNilMetrics(t *testing.T) {
 
 	m.ConnectionError("sender", ReasonDialFailed)
 	m.ObserveDialDuration("sender", 0.1)
+	m.IncrDialRetries("sender")
 	m.SetControlChannelConnected(true)
 
 	// Calling Done on a nil *ConnectionTracker must not panic.

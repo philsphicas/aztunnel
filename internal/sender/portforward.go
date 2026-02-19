@@ -28,6 +28,7 @@ type PortForwardConfig struct {
 	TCPKeepAlive  time.Duration
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
+	DialRetries   int              // number of retry attempts on dial failure (0 = no retries)
 }
 
 // PortForward starts a local TCP listener and forwards each connection
@@ -75,7 +76,7 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	// Set TCP keepalive on the incoming connection.
 	relay.SetTCPKeepAlive(conn, cfg.TCPKeepAlive)
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender")
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.DialRetries, cfg.Logger)
 	if err != nil {
 		return err
 	}

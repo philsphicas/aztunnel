@@ -25,6 +25,7 @@ is determined from the SOCKS5 handshake and forwarded through the relay.`,
 	cmd.Flags().StringP("bind", "b", "127.0.0.1:1080", "local bind address:port")
 	cmd.Flags().Bool("gateway", false, "bind to 0.0.0.0 instead of 127.0.0.1")
 	cmd.Flags().Duration("tcp-keepalive", 30*time.Second, "TCP keepalive interval")
+	cmd.Flags().Int("dial-retries", 3, "number of relay dial retry attempts on failure (0 = no retries)")
 
 	return cmd
 }
@@ -52,6 +53,7 @@ func runSOCKS5Proxy(cmd *cobra.Command, args []string) error {
 	tcpKeepAlive, _ := cmd.Flags().GetDuration("tcp-keepalive")
 	logLevel, _ := cmd.Flags().GetString("log-level")
 	logger := newLogger(logLevel)
+	dialRetries, _ := cmd.Flags().GetInt("dial-retries")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -62,6 +64,7 @@ func runSOCKS5Proxy(cmd *cobra.Command, args []string) error {
 		BindAddress:  bind,
 		TCPKeepAlive: tcpKeepAlive,
 		Logger:       logger,
+		DialRetries:  dialRetries,
 	}
 	if cfg.Metrics, err = resolveMetrics(ctx, cmd, logger); err != nil {
 		return err

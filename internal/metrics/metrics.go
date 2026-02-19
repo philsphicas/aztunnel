@@ -4,6 +4,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,7 @@ type Metrics struct {
 	controlChannelUp   prometheus.Gauge
 	connectionDuration *prometheus.HistogramVec
 	dialDuration       *prometheus.HistogramVec
+	dialRetriesTotal   *prometheus.CounterVec
 
 	targetCount atomic.Int64
 	targets     sync.Map // map[string]struct{}
@@ -103,6 +105,12 @@ func New() *Metrics {
 			Help:      "Time to establish outbound connections in seconds.",
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
 		}, []string{"role"}),
+
+		dialRetriesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "dial_retries_total",
+			Help:      "Total number of relay dial retry attempts.",
+		}, []string{"role"}),
 	}
 
 	reg.MustRegister(
@@ -113,6 +121,7 @@ func New() *Metrics {
 		m.controlChannelUp,
 		m.connectionDuration,
 		m.dialDuration,
+		m.dialRetriesTotal,
 	)
 
 	return m
@@ -254,11 +263,25 @@ func (m *Metrics) TrackedBridge(ctx context.Context, ws *websocket.Conn, rwc net
 	return stats, err
 }
 
-// InstrumentedDial wraps relay.Dial with duration and error metrics.
-// Safe to call on a nil receiver (falls through to raw Dial).
-func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, role string) (*websocket.Conn, error) {
+// IncrDialRetries increments the retry counter for a role.
+func (m *Metrics) IncrDialRetries(role string) {
+	if m == nil {
+		return
+	}
+	m.dialRetriesTotal.WithLabelValues(role).Inc()
+}
+
+// InstrumentedDial wraps relay.DialWithRetry with duration and error metrics.
+// retries controls how many additional attempts to make on failure (0 = one
+// attempt, no retries). Safe to call on a nil receiver (falls through to
+// relay.DialWithRetry directly).
+func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, role string, retries int, logger *slog.Logger) (*websocket.Conn, error) {
 	start := time.Now()
-	ws, err := relay.Dial(ctx, endpoint, entityPath, tp)
+	var onRetry func()
+	if m != nil {
+		onRetry = func() { m.IncrDialRetries(role) }
+	}
+	ws, err := relay.DialWithRetry(ctx, endpoint, entityPath, tp, retries, onRetry, logger)
 	m.ObserveDialDuration(role, time.Since(start).Seconds())
 	if err != nil {
 		m.ConnectionError(role, DialReason(err, ReasonRelayFailed))
