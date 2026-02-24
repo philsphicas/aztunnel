@@ -172,7 +172,7 @@ func handleAccept(ctx context.Context, addr string, cfg ControlConfig) error {
 	defer dialCancel()
 	ws, _, err := websocket.Dial(dialCtx, addr, nil)
 	if err != nil {
-		return fmt.Errorf("dial rendezvous: %w", err)
+		return fmt.Errorf("dial rendezvous: %w", sanitizeErr(err))
 	}
 	defer func() { _ = ws.CloseNow() }()
 
