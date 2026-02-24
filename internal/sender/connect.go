@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
@@ -19,7 +20,7 @@ type ConnectConfig struct {
 	Stdout        io.WriteCloser
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
-	DialRetries   int              // number of retry attempts on dial failure (0 = no retries)
+	DialTimeout   time.Duration    // total retry budget for the relay dial (0 = single attempt)
 }
 
 // Connect performs a one-shot connection: dials the relay, sends the
@@ -30,7 +31,7 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 		cfg.Logger = slog.Default()
 	}
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.DialRetries, cfg.Logger)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.DialTimeout, cfg.Logger)
 	if err != nil {
 		return err
 	}

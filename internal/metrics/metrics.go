@@ -102,7 +102,7 @@ func New() *Metrics {
 		dialDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Name:      "dial_duration_seconds",
-			Help:      "Time to establish outbound connections in seconds.",
+			Help:      "Total time spent dialing the relay, including retry backoff intervals, in seconds.",
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
 		}, []string{"role"}),
 
@@ -271,17 +271,16 @@ func (m *Metrics) IncrDialRetries(role string) {
 	m.dialRetriesTotal.WithLabelValues(role).Inc()
 }
 
-// InstrumentedDial wraps relay.DialWithRetry with duration and error metrics.
-// retries controls how many additional attempts to make on failure (0 = one
-// attempt, no retries). Safe to call on a nil receiver (falls through to
-// relay.DialWithRetry directly).
-func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, role string, retries int, logger *slog.Logger) (*websocket.Conn, error) {
+// InstrumentedDial wraps relay.DialWithTimeout with duration and error metrics.
+// dialTimeout controls the total retry budget (0 = single attempt, no retries).
+// Safe to call on a nil receiver (falls through to relay.DialWithTimeout directly).
+func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, role string, dialTimeout time.Duration, logger *slog.Logger) (*websocket.Conn, error) {
 	start := time.Now()
 	var onRetry func()
 	if m != nil {
 		onRetry = func() { m.IncrDialRetries(role) }
 	}
-	ws, err := relay.DialWithRetry(ctx, endpoint, entityPath, tp, retries, onRetry, logger)
+	ws, err := relay.DialWithTimeout(ctx, endpoint, entityPath, tp, dialTimeout, onRetry, logger)
 	m.ObserveDialDuration(role, time.Since(start).Seconds())
 	if err != nil {
 		m.ConnectionError(role, DialReason(err, ReasonRelayFailed))

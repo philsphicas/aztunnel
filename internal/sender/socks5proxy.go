@@ -21,7 +21,7 @@ type SOCKS5Config struct {
 	TCPKeepAlive  time.Duration
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
-	DialRetries   int              // number of retry attempts on dial failure (0 = no retries)
+	DialTimeout   time.Duration    // total retry budget for the relay dial (0 = single attempt)
 }
 
 // SOCKS5Proxy starts a local SOCKS5 proxy and forwards each connection
@@ -84,7 +84,7 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	cfg.Logger.Info("socks5 connect", "target", target)
 
 	// Dial the relay.
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.DialRetries, cfg.Logger)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.DialTimeout, cfg.Logger)
 	if err != nil {
 		_ = socks5.SendReply(conn, socks5.RepGeneralFailure, nil)
 		return err

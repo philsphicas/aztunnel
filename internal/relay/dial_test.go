@@ -163,66 +163,7 @@ func TestDial(t *testing.T) {
 	})
 }
 
-func TestDialWithLogger(t *testing.T) {
-	t.Run("success logs debug messages", func(t *testing.T) {
-		var logBuf strings.Builder
-		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ws, err := websocket.Accept(w, r, nil)
-			if err != nil {
-				return
-			}
-			defer ws.CloseNow()
-			<-r.Context().Done()
-		}))
-
-		tp := &mockTokenProvider{token: "test-token"}
-		endpoint := strings.TrimPrefix(srv.URL, "https://")
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		ws, err := DialWithLogger(ctx, endpoint, "test-entity", tp, logger)
-		if err != nil {
-			t.Fatalf("DialWithLogger: %v", err)
-		}
-		defer ws.CloseNow()
-
-		output := logBuf.String()
-		if !strings.Contains(output, "dialing relay") {
-			t.Errorf("log output missing %q: %s", "dialing relay", output)
-		}
-		if !strings.Contains(output, "relay connected") {
-			t.Errorf("log output missing %q: %s", "relay connected", output)
-		}
-	})
-
-	t.Run("failure logs warning", func(t *testing.T) {
-		var logBuf strings.Builder
-		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-		tp := &mockTokenProvider{err: fmt.Errorf("token error")}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		_, err := DialWithLogger(ctx, "127.0.0.1:1", "test-entity", tp, logger)
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-
-		output := logBuf.String()
-		if !strings.Contains(output, "dialing relay") {
-			t.Errorf("log output missing %q: %s", "dialing relay", output)
-		}
-		if !strings.Contains(output, "relay dial failed") {
-			t.Errorf("log output missing %q: %s", "relay dial failed", output)
-		}
-	})
-}
-
-func TestDialWithRetry(t *testing.T) {
+func TestDialWithTimeout(t *testing.T) {
 	t.Run("succeeds on first attempt", func(t *testing.T) {
 		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
@@ -243,9 +184,9 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, err := DialWithRetry(ctx, endpoint, "my-entity", tp, 3, onRetry, logger)
+		ws, err := DialWithTimeout(ctx, endpoint, "my-entity", tp, 5*time.Second, onRetry, logger)
 		if err != nil {
-			t.Fatalf("DialWithRetry: %v", err)
+			t.Fatalf("DialWithTimeout: %v", err)
 		}
 		defer ws.CloseNow()
 
@@ -254,8 +195,8 @@ func TestDialWithRetry(t *testing.T) {
 		}
 	})
 
-	t.Run("succeeds after retries", func(t *testing.T) {
-		// Server that rejects the first two connections and accepts the third.
+	t.Run("succeeds after retries within budget", func(t *testing.T) {
+		// Server rejects the first two connections and accepts the third.
 		var connCount atomic.Int32
 		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			n := connCount.Add(1)
@@ -280,16 +221,14 @@ func TestDialWithRetry(t *testing.T) {
 		var retryCalls int
 		onRetry := func() { retryCalls++ }
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		// The retry delays are hardcoded exponential backoff (1s, 2s, ...),
-		// so this test is designed to succeed on the 3rd attempt after two
-		// automatic retries. With retries=3 (4 total attempts), the test
-		// verifies both retry count and eventual success.
-		ws, err := DialWithRetry(ctx, endpoint, "my-entity", tp, 3, onRetry, logger)
+		// With dialTimeout=10s and instant failures, the loop retries with 1s
+		// then 2s backoff and succeeds on the 3rd attempt (~3s total).
+		ws, err := DialWithTimeout(ctx, endpoint, "my-entity", tp, 10*time.Second, onRetry, logger)
 		if err != nil {
-			t.Fatalf("DialWithRetry: %v", err)
+			t.Fatalf("DialWithTimeout: %v", err)
 		}
 		defer ws.CloseNow()
 
@@ -301,27 +240,29 @@ func TestDialWithRetry(t *testing.T) {
 		}
 	})
 
-	t.Run("fails after all retries exhausted", func(t *testing.T) {
+	t.Run("fails when budget exhausted", func(t *testing.T) {
 		tp := &mockTokenProvider{token: "test-token"}
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 		var retryCalls int
 		onRetry := func() { retryCalls++ }
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 2, onRetry, logger)
+		// dialTimeout=500ms: attempt 0 fails instantly, onRetry called,
+		// then the 1s backoff sleep outlasts the budget and we return.
+		_, err := DialWithTimeout(ctx, "127.0.0.1:1", "my-entity", tp, 500*time.Millisecond, onRetry, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
-		if retryCalls != 2 {
-			t.Errorf("onRetry called %d times, want 2", retryCalls)
+		if retryCalls != 1 {
+			t.Errorf("onRetry called %d times, want 1", retryCalls)
 		}
 	})
 
-	t.Run("zero retries means one attempt only", func(t *testing.T) {
+	t.Run("zero timeout means single attempt", func(t *testing.T) {
 		tp := &mockTokenProvider{token: "test-token"}
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -331,13 +272,13 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 0, onRetry, logger)
+		_, err := DialWithTimeout(ctx, "127.0.0.1:1", "my-entity", tp, 0, onRetry, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
 
 		if retryCalls != 0 {
-			t.Errorf("onRetry called %d times, want 0 for zero retries", retryCalls)
+			t.Errorf("onRetry called %d times, want 0 for zero dialTimeout", retryCalls)
 		}
 	})
 
@@ -350,16 +291,16 @@ func TestDialWithRetry(t *testing.T) {
 		var retryCalls int
 		onRetry := func() {
 			retryCalls++
-			// Cancel after first retry is triggered.
+			// Cancel the outer context after the first retry is triggered.
 			cancel()
 		}
 
-		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 5, onRetry, logger)
+		_, err := DialWithTimeout(ctx, "127.0.0.1:1", "my-entity", tp, 30*time.Second, onRetry, logger)
 		if err == nil {
 			t.Fatal("expected error for cancelled context, got nil")
 		}
 
-		// Should have triggered exactly one retry before context was cancelled.
+		// onRetry fires, then the select sees the cancelled context immediately.
 		if retryCalls != 1 {
 			t.Errorf("onRetry called %d times, want 1", retryCalls)
 		}
@@ -372,8 +313,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Should not panic with nil onRetry.
-		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 1, nil, logger)
+		_, err := DialWithTimeout(ctx, "127.0.0.1:1", "my-entity", tp, 500*time.Millisecond, nil, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -385,8 +325,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// Should not panic with nil logger.
-		_, err := DialWithRetry(ctx, "127.0.0.1:1", "my-entity", tp, 0, nil, nil)
+		_, err := DialWithTimeout(ctx, "127.0.0.1:1", "my-entity", tp, 0, nil, nil)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}

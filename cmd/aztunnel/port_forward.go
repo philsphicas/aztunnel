@@ -25,7 +25,7 @@ Azure Relay to the specified target host:port.`,
 	cmd.Flags().StringP("bind", "b", "127.0.0.1:0", "local bind address:port")
 	cmd.Flags().Bool("gateway", false, "bind to 0.0.0.0 instead of 127.0.0.1")
 	cmd.Flags().Duration("tcp-keepalive", 30*time.Second, "TCP keepalive interval")
-	cmd.Flags().Int("dial-retries", 3, "number of relay dial retry attempts on failure (0 = no retries)")
+	cmd.Flags().Duration("dial-timeout", 30*time.Second, "total time budget for relay dial retries (0 = single attempt)")
 
 	return cmd
 }
@@ -54,7 +54,7 @@ func runPortForward(cmd *cobra.Command, args []string) error {
 	tcpKeepAlive, _ := cmd.Flags().GetDuration("tcp-keepalive")
 	logLevel, _ := cmd.Flags().GetString("log-level")
 	logger := newLogger(logLevel)
-	dialRetries, _ := cmd.Flags().GetInt("dial-retries")
+	dialTimeout, _ := cmd.Flags().GetDuration("dial-timeout")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -67,7 +67,7 @@ func runPortForward(cmd *cobra.Command, args []string) error {
 		BindAddress:   bind,
 		TCPKeepAlive:  tcpKeepAlive,
 		Logger:        logger,
-		DialRetries:   dialRetries,
+		DialTimeout:   dialTimeout,
 	}
 	if cfg.Metrics, err = resolveMetrics(ctx, cmd, logger); err != nil {
 		return err
