@@ -1,9 +1,9 @@
-VERSION ?= dev
-LDFLAGS := -ldflags "-X main.version=$(VERSION)"
+VERSION  ?= dev
+LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean help
 
 .DEFAULT_GOAL := help
 
@@ -63,6 +63,10 @@ fmt-check: ## Check formatting (same as CI)
 	npx --yes prettier --check .
 
 e2e: build ## Run end-to-end tests (requires Azure Relay credentials)
+	@if [ -z "$$E2E_RELAY_NAME" ]; then \
+		echo "Auto-discovering relay configuration..."; \
+		_envsh=$$(./e2e/infra/env.sh --show-secrets) || exit 1; eval "$$_envsh"; \
+	fi; \
 	go test -tags=e2e -timeout=10m -v ./e2e/...
 
 e2e-docker: ## Run container-to-container e2e tests
@@ -70,6 +74,15 @@ e2e-docker: ## Run container-to-container e2e tests
 	docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner || status=$$?; \
 	docker compose -f docker-compose.e2e.yml down; \
 	exit $$status
+
+e2e-infra-setup: ## Deploy e2e Azure infra + grant yourself access (SKIP_RBAC=1 to skip)
+	$(MAKE) -C e2e/infra setup
+
+e2e-infra-ci: ## Full CI setup: infra + identity + GitHub secrets (maintainer)
+	$(MAKE) -C e2e/infra ci
+
+e2e-infra-clean: ## Delete e2e Azure resource group
+	$(MAKE) -C e2e/infra clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
