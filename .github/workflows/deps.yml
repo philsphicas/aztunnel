@@ -1,0 +1,56 @@
+name: Update Dependencies
+
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Monday 8am UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Update Go dependencies
+        run: |
+          go get -u -t ./...
+          go get go@latest
+          go mod tidy
+
+      - name: Check for changes
+        id: diff
+        run: |
+          if git diff --quiet go.mod go.sum; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # PRs created with GITHUB_TOKEN don't trigger CI workflows.
+      # Set the GH_AUTOMATION_TOKEN repo secret (fine-grained PAT with
+      # contents:write and pull_requests:write) to enable CI on these PRs.
+      - name: Create pull request
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GH_AUTOMATION_TOKEN || secrets.GITHUB_TOKEN }}
+          commit-message: "chore(deps): update Go dependencies"
+          title: "chore(deps): update Go dependencies"
+          body: |
+            Automated weekly update of Go dependencies.
+
+            ```
+            go get -u -t ./...
+            go get go@latest
+            go mod tidy
+            ```
+          branch: deps/go-update
+          labels: dependencies
