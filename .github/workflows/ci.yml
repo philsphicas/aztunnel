@@ -64,3 +64,32 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.10
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build image
+        run: docker build -t aztunnel .
+
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.30.0
+        with:
+          image-ref: aztunnel
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

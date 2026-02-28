@@ -3,7 +3,7 @@ LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker vuln scan help
 
 .DEFAULT_GOAL := help
 
@@ -70,6 +70,22 @@ e2e-docker: ## Run container-to-container e2e tests
 	docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner || status=$$?; \
 	docker compose -f docker-compose.e2e.yml down; \
 	exit $$status
+
+vuln: ## Check Go dependencies for known vulnerabilities
+	@if command -v govulncheck >/dev/null 2>&1; then \
+		govulncheck ./...; \
+	else \
+		echo "govulncheck not in PATH, using go run..."; \
+		go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...; \
+	fi
+
+scan: docker ## Scan container image for CVEs
+	@if command -v trivy >/dev/null 2>&1; then \
+		trivy image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 aztunnel; \
+	else \
+		echo "error: trivy not found (install: https://aquasecurity.github.io/trivy/)" >&2; \
+		exit 1; \
+	fi
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
