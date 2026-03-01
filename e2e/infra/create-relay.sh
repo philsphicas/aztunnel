@@ -50,7 +50,6 @@ if ! output=$(az relay namespace create \
   -g "$RESOURCE_GROUP" \
   -n "$RELAY_NAME" \
   -l "$LOCATION" \
-  --sku Standard \
   -o json); then
   die "Failed to create relay namespace"
 fi
