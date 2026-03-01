@@ -12,7 +12,7 @@ aztunnel with proper authentication. It covers two auth methods:
 
 ## 1. Provision Azure Relay resources
 
-All examples use the Azure CLI. Adjust names, regions, and SKU as needed.
+All examples use the Azure CLI. Adjust names and regions as needed.
 
 ```bash
 # Variables — change these
@@ -26,12 +26,11 @@ az group create \
   --name "$RESOURCE_GROUP" \
   --location "$LOCATION"
 
-# Create a Relay namespace (Standard SKU required for Hybrid Connections)
+# Create a Relay namespace
 az relay namespace create \
   --resource-group "$RESOURCE_GROUP" \
   --name "$RELAY_NAMESPACE" \
-  --location "$LOCATION" \
-  --sku Standard
+  --location "$LOCATION"
 
 # Create a Hybrid Connection (no client auth required — aztunnel handles auth)
 az relay hyco create \
