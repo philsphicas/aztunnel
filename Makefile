@@ -3,7 +3,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean vulncheck help
 
 .DEFAULT_GOAL := help
 
@@ -83,6 +83,9 @@ e2e-infra-ci: ## Full CI setup: infra + identity + GitHub secrets (maintainer)
 
 e2e-infra-clean: ## Delete e2e Azure resource group
 	$(MAKE) -C e2e/infra clean
+
+vulncheck: ## Check Go dependencies for known vulnerabilities
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
