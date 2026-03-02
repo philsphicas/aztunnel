@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -309,7 +310,7 @@ func TestDialWithRetry(t *testing.T) {
 		}
 	})
 
-	t.Run("context cancelled during retry returns last error", func(t *testing.T) {
+	t.Run("context cancelled during retry returns context error", func(t *testing.T) {
 		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
@@ -325,8 +326,8 @@ func TestDialWithRetry(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !strings.Contains(err.Error(), "dial relay") {
-			t.Errorf("error %q should contain 'dial relay'", err.Error())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("error should wrap context.DeadlineExceeded, got: %v", err)
 		}
 	})
 

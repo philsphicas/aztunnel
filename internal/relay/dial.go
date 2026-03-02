@@ -88,7 +88,7 @@ func DialWithRetry(ctx context.Context, endpoint, entityPath string, tp TokenPro
 
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("dial relay: %w", sanitizeErr(dialErr))
+			return nil, fmt.Errorf("dial relay: %w", ctx.Err())
 		case <-time.After(delay):
 		}
 

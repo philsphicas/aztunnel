@@ -258,7 +258,7 @@ func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog
 
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("dial arc relay: %w", sanitizeErr(err))
+			return nil, fmt.Errorf("dial arc relay: %w", ctx.Err())
 		case <-time.After(delay):
 		}
 

@@ -3,6 +3,7 @@ package arc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -519,7 +520,7 @@ func TestDialWithLoggerRetry(t *testing.T) {
 		}
 	})
 
-	t.Run("context cancelled during retry returns error", func(t *testing.T) {
+	t.Run("context cancelled during retry returns context error", func(t *testing.T) {
 		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
@@ -549,8 +550,8 @@ func TestDialWithLoggerRetry(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
-		if !strings.Contains(err.Error(), "dial arc relay") {
-			t.Errorf("error %q should contain 'dial arc relay'", err.Error())
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("error should wrap context.DeadlineExceeded, got: %v", err)
 		}
 	})
 }
