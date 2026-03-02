@@ -910,6 +910,149 @@ func TestMetricsDialDuration(t *testing.T) {
 	}
 }
 
+// --- retry / resilience tests ---
+
+// TestSenderRetriesUntilListenerReady verifies that the sender connect mode
+// retries on 404 and succeeds once the listener becomes available.
+func TestSenderRetriesUntilListenerReady(t *testing.T) {
+	env := requireRelayEnv(t)
+
+	for _, auth := range availableAuths(t, env) {
+		t.Run(auth.name, func(t *testing.T) {
+			echo := startEchoServer(t)
+
+			// Start the sender FIRST — no listener is running yet.
+			binary := aztunnelBinary(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			cmd := exec.CommandContext(ctx, binary,
+				"relay-sender", "connect", echo.Addr(),
+				"--relay", env.relayName,
+				"--hyco", auth.hyco,
+				"--log-level", "debug",
+			)
+			setAztunnelEnv(cmd, env, auth.senderSAS)
+			stdin, err := cmd.StdinPipe()
+			if err != nil {
+				t.Fatalf("stdin pipe: %v", err)
+			}
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
+				t.Fatalf("stdout pipe: %v", err)
+			}
+			connectLogs := &logBuffer{}
+			cmd.Stderr = connectLogs
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start connect: %v", err)
+			}
+			t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+			// Wait for at least one retry (404).
+			if _, ok := connectLogs.waitFor("retrying", 15*time.Second); !ok {
+				t.Fatal("timed out waiting for sender to retry on 404")
+			}
+
+			// NOW start the listener.
+			listener := startListener(t, env, auth,
+				"--allow", echo.Addr(),
+				"--log-level", "debug",
+			)
+			waitForLog(t, listener, "control channel connected", 30*time.Second)
+
+			// The sender should eventually connect.
+			if _, ok := connectLogs.waitFor("connected", 15*time.Second); !ok {
+				t.Fatal("timed out waiting for sender to connect after listener started")
+			}
+
+			// Verify data flows through.
+			payload := []byte("retry test\n")
+			if _, err := stdin.Write(payload); err != nil {
+				t.Fatalf("write stdin: %v", err)
+			}
+			buf := make([]byte, len(payload))
+			if _, err := io.ReadFull(stdout, buf); err != nil {
+				t.Fatalf("read stdout: %v", err)
+			}
+			if !bytes.Equal(payload, buf) {
+				t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
+			}
+		})
+	}
+}
+
+// TestPortForwardRecoveryAfterListenerRestart verifies that port-forward
+// mode recovers after the listener restarts.
+func TestPortForwardRecoveryAfterListenerRestart(t *testing.T) {
+	env := requireRelayEnv(t)
+
+	for _, auth := range availableAuths(t, env) {
+		t.Run(auth.name, func(t *testing.T) {
+			echo := startEchoServer(t)
+
+			// Start listener and sender.
+			listener := startListener(t, env, auth,
+				"--allow", echo.Addr(),
+				"--log-level", "debug",
+			)
+			sender := startPortForwardSender(t, env, auth, echo.Addr(),
+				"--log-level", "debug",
+			)
+
+			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
+
+			// Verify traffic works.
+			conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
+			if err != nil {
+				t.Fatalf("dial sender: %v", err)
+			}
+			payload := []byte("before restart\n")
+			if _, err := conn.Write(payload); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			buf := make([]byte, len(payload))
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if !bytes.Equal(payload, buf) {
+				t.Fatalf("pre-restart echo mismatch: got %q, want %q", buf, payload)
+			}
+			conn.Close()
+
+			// Kill the listener.
+			listener.cmd.Process.Kill()
+			listener.cmd.Wait()
+
+			// Restart the listener.
+			listener2 := startListener(t, env, auth,
+				"--allow", echo.Addr(),
+				"--log-level", "debug",
+			)
+			waitForLog(t, listener2, "control channel connected", 30*time.Second)
+
+			// Traffic should work again.
+			conn2, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
+			if err != nil {
+				t.Fatalf("dial sender after restart: %v", err)
+			}
+			defer conn2.Close()
+
+			payload2 := []byte("after restart\n")
+			if _, err := conn2.Write(payload2); err != nil {
+				t.Fatalf("write after restart: %v", err)
+			}
+			buf2 := make([]byte, len(payload2))
+			if _, err := io.ReadFull(conn2, buf2); err != nil {
+				t.Fatalf("read after restart: %v", err)
+			}
+			if !bytes.Equal(payload2, buf2) {
+				t.Fatalf("post-restart echo mismatch: got %q, want %q", buf2, payload2)
+			}
+		})
+	}
+}
+
 // --- negative tests ---
 
 // runExpectFail runs an aztunnel command expecting non-zero exit. Returns stderr output.
@@ -949,7 +1092,8 @@ func assertNoUsageDump(t *testing.T, output string) {
 	}
 }
 
-// TestConnectNoListener verifies a sender gets a clean error when no listener is running.
+// TestConnectNoListener verifies that a sender retries on 404 when no listener
+// is running, and is terminated by the test timeout.
 func TestConnectNoListener(t *testing.T) {
 	env := requireRelayEnv(t)
 
@@ -959,12 +1103,15 @@ func TestConnectNoListener(t *testing.T) {
 				"relay-sender", "connect", "127.0.0.1:9999",
 				"--relay", env.relayName,
 				"--hyco", auth.hyco,
+				"--log-level", "warn",
 			)
 
 			assertNoUsageDump(t, output)
 			assertNoTokenLeak(t, output)
-			if !strings.Contains(output, "Error:") {
-				t.Error("expected 'Error:' prefix in output")
+			// The sender retries on 404 (no listener), so we expect
+			// retry log messages rather than an immediate error exit.
+			if !strings.Contains(output, "retrying") && !strings.Contains(output, "Error:") {
+				t.Errorf("expected retry log or error in output, got: %s", output)
 			}
 		})
 	}

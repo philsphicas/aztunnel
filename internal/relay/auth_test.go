@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -33,6 +35,14 @@ func TestSanitizeErr(t *testing.T) {
 		err := sanitizeErr(fmt.Errorf("connection refused"))
 		if err.Error() != "connection refused" {
 			t.Errorf("expected unchanged error, got %q", err.Error())
+		}
+	})
+
+	t.Run("preserves error chain", func(t *testing.T) {
+		orig := fmt.Errorf("outer: %w", context.DeadlineExceeded)
+		err := sanitizeErr(orig)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Error("sanitizeErr should preserve error chain for errors.Is")
 		}
 	})
 }

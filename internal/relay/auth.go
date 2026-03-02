@@ -106,8 +106,19 @@ func ResourceURI(fqdn, entityPath string) string {
 	return base
 }
 
+// sanitizedError wraps an error with a redacted message while preserving
+// the original error chain for errors.Is/As.
+type sanitizedError struct {
+	msg string
+	err error
+}
+
+func (e *sanitizedError) Error() string { return e.msg }
+func (e *sanitizedError) Unwrap() error { return e.err }
+
 // sanitizeErr strips token query parameters from WebSocket dial errors
-// to avoid leaking credentials in log output.
+// to avoid leaking credentials in log output. The returned error preserves
+// the original error chain for errors.Is/As.
 func sanitizeErr(err error) error {
 	s := err.Error()
 	// Strip all occurrences of sb-hc-token=... from URLs in the error message.
@@ -129,5 +140,5 @@ func sanitizeErr(err error) error {
 		}
 		pos = i + len(redacted)
 	}
-	return fmt.Errorf("%s", s)
+	return &sanitizedError{msg: s, err: err}
 }

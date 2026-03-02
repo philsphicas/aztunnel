@@ -4,6 +4,7 @@ package metrics
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -254,11 +255,11 @@ func (m *Metrics) TrackedBridge(ctx context.Context, ws *websocket.Conn, rwc net
 	return stats, err
 }
 
-// InstrumentedDial wraps relay.Dial with duration and error metrics.
-// Safe to call on a nil receiver (falls through to raw Dial).
-func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, role string) (*websocket.Conn, error) {
+// InstrumentedDial wraps relay.DialWithRetry with duration and error metrics.
+// Safe to call on a nil receiver (falls through to raw DialWithRetry).
+func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, role string, logger *slog.Logger) (*websocket.Conn, error) {
 	start := time.Now()
-	ws, err := relay.Dial(ctx, endpoint, entityPath, tp)
+	ws, err := relay.DialWithRetry(ctx, endpoint, entityPath, tp, logger)
 	m.ObserveDialDuration(role, time.Since(start).Seconds())
 	if err != nil {
 		m.ConnectionError(role, DialReason(err, ReasonRelayFailed))

@@ -83,7 +83,7 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	cfg.Logger.Info("socks5 connect", "target", target)
 
 	// Dial the relay.
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender")
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.Logger)
 	if err != nil {
 		_ = socks5.SendReply(conn, socks5.RepGeneralFailure, nil)
 		return err
