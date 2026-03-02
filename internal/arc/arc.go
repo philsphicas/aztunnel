@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -172,6 +173,8 @@ func (c *Client) GetRelayCredentials(ctx context.Context, resourceID, serviceNam
 // Unlike relay.Dial, this does NOT perform the aztunnel envelope exchange —
 // the Arc agent on the VM handles the local TCP connection directly.
 //
+// Dial makes a single attempt. Use DialWithLogger for retry support.
+//
 // Authentication uses three HTTP headers on the WebSocket upgrade:
 //   - Servicebusauthorization: the SAS access key
 //   - Service-Configuration-Token: the JWT from listCredentials
@@ -201,19 +204,66 @@ func Dial(ctx context.Context, info *RelayInfo, port int) (*websocket.Conn, erro
 	return ws, nil
 }
 
-// DialWithLogger is like Dial but logs the connection attempt.
+// Retry parameters for DialWithLogger.
+const (
+	retryInitial    = 1 * time.Second
+	retryMax        = 5 * time.Second
+	retryMultiplier = 2
+	dialTimeout     = 30 * time.Second
+)
+
+// DialWithLogger is like Dial but logs the connection attempt and retries
+// on transient 404/503 errors (no active listener) with exponential backoff
+// until ctx expires.
 func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog.Logger) (*websocket.Conn, error) {
+	if port == 0 {
+		port = defaultPort
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	logger.Debug("dialing arc relay",
 		"namespace", info.NamespaceName,
 		"hybridConnection", info.HybridConnectionName,
 		"port", port)
-	ws, err := Dial(ctx, info, port)
-	if err != nil {
-		logger.Warn("arc relay dial failed", "error", err)
-		return nil, err
+
+	wssHost := info.NamespaceName + "." + info.NamespaceNameSuffix
+	headers := http.Header{}
+	headers.Set("Servicebusauthorization", info.AccessKey)
+	headers.Set("Service-Configuration-Token", info.ServiceConfigurationToken)
+	headers.Set("Microsoft-Guestgateway-Target", fmt.Sprintf("localhost:%d", port))
+
+	delay := retryInitial
+	for {
+		connectURL := fmt.Sprintf("wss://%s/$hc/%s?sb-hc-action=connect&sb-hc-id=%s",
+			wssHost, info.HybridConnectionName, newUUID())
+
+		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+		ws, resp, err := websocket.Dial(dialCtx, connectURL, &websocket.DialOptions{
+			HTTPHeader: headers,
+		})
+		cancel()
+
+		if err == nil {
+			logger.Debug("arc relay connected")
+			return ws, nil
+		}
+
+		if resp == nil || !relay.IsRetryableStatus(resp.StatusCode) {
+			logger.Warn("arc relay dial failed", "error", sanitizeErr(err))
+			return nil, fmt.Errorf("dial arc relay: %w", sanitizeErr(err))
+		}
+
+		logger.Warn("arc relay dial failed (retrying)", "status", resp.StatusCode, "delay", delay, "error", sanitizeErr(err))
+
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("dial arc relay: %w", sanitizeErr(err))
+		case <-time.After(delay):
+		}
+
+		delay = min(delay*retryMultiplier, retryMax)
 	}
-	logger.Debug("arc relay connected")
-	return ws, nil
 }
 
 func (c *Client) armPUT(ctx context.Context, rawURL, body string) error {

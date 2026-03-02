@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -196,7 +198,7 @@ func TestDialWithLogger(t *testing.T) {
 		}
 	})
 
-	t.Run("failure logs warning", func(t *testing.T) {
+	t.Run("non-retryable failure logs warning", func(t *testing.T) {
 		var logBuf strings.Builder
 		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -216,6 +218,243 @@ func TestDialWithLogger(t *testing.T) {
 		}
 		if !strings.Contains(output, "relay dial failed") {
 			t.Errorf("log output missing %q: %s", "relay dial failed", output)
+		}
+	})
+}
+
+func TestDialWithRetry(t *testing.T) {
+	t.Run("retries on 404 then succeeds", func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			n := attempts
+			mu.Unlock()
+
+			if n <= 2 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		if err != nil {
+			t.Fatalf("DialWithRetry: %v", err)
+		}
+		defer ws.CloseNow()
+
+		mu.Lock()
+		got := attempts
+		mu.Unlock()
+		if got < 3 {
+			t.Errorf("expected at least 3 attempts, got %d", got)
+		}
+	})
+
+	t.Run("retries on 503 then succeeds", func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			n := attempts
+			mu.Unlock()
+
+			if n == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		if err != nil {
+			t.Fatalf("DialWithRetry: %v", err)
+		}
+		defer ws.CloseNow()
+
+		mu.Lock()
+		got := attempts
+		mu.Unlock()
+		if got != 2 {
+			t.Errorf("expected 2 attempts, got %d", got)
+		}
+	})
+
+	t.Run("context cancelled during retry returns last error", func(t *testing.T) {
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "dial relay") {
+			t.Errorf("error %q should contain 'dial relay'", err.Error())
+		}
+	})
+
+	t.Run("401 fails immediately without retry", func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			mu.Unlock()
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+
+		mu.Lock()
+		got := attempts
+		mu.Unlock()
+		if got != 1 {
+			t.Errorf("expected exactly 1 attempt (no retry), got %d", got)
+		}
+	})
+
+	t.Run("connection refused fails immediately without retry", func(t *testing.T) {
+		tp := &mockTokenProvider{token: "test-token"}
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err := DialWithRetry(ctx, "127.0.0.1:1", "test-entity", tp, logger)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "dial relay") {
+			t.Errorf("error %q should contain 'dial relay'", err.Error())
+		}
+	})
+
+	t.Run("logs retry attempts", func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			n := attempts
+			mu.Unlock()
+
+			if n == 1 {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		if err != nil {
+			t.Fatalf("DialWithRetry: %v", err)
+		}
+		defer ws.CloseNow()
+
+		output := logBuf.String()
+		if !strings.Contains(output, "retrying") {
+			t.Errorf("log output missing retry message: %s", output)
+		}
+		if !strings.Contains(output, "relay connected") {
+			t.Errorf("log output missing connected message: %s", output)
+		}
+	})
+
+	t.Run("GetToken failure on retry returns immediately", func(t *testing.T) {
+		var mu sync.Mutex
+		attempts := 0
+
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+
+		tp := &mockTokenProvider{
+			tokenFn: func(_ context.Context, _ string) (string, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				attempts++
+				if attempts > 1 {
+					return "", fmt.Errorf("token renewal failed")
+				}
+				return "test-token", nil
+			},
+		}
+
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "get token") {
+			t.Errorf("error %q should contain 'get token'", err.Error())
 		}
 	})
 }
