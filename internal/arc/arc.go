@@ -311,7 +311,18 @@ func newARMError(resp *http.Response) error {
 	return fmt.Errorf("ARM API error (HTTP %d): %s", resp.StatusCode, string(body))
 }
 
+// sanitizedError wraps an error with a redacted message while preserving
+// the original error chain for errors.Is/As.
+type sanitizedError struct {
+	msg string
+	err error
+}
+
+func (e *sanitizedError) Error() string { return e.msg }
+func (e *sanitizedError) Unwrap() error { return e.err }
+
 // sanitizeErr strips sensitive tokens from WebSocket dial errors.
+// The returned error preserves the original error chain for errors.Is/As.
 func sanitizeErr(err error) error {
 	s := err.Error()
 	// Query-param tokens are delimited by & or whitespace.
@@ -343,7 +354,7 @@ func sanitizeErr(err error) error {
 			s = s[:idx] + p.prefix + "REDACTED" + s[afterPrefix+end:]
 		}
 	}
-	return fmt.Errorf("%s", s)
+	return &sanitizedError{msg: s, err: err}
 }
 
 // newUUID generates a random UUID v4 string without external dependencies.
