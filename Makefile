@@ -1,4 +1,5 @@
-VERSION  ?= dev
+VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GOFLAGS  := -trimpath
 LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
@@ -8,7 +9,7 @@ RACE   := $(if $(filter 1,$(CGO)),-race,)
 .DEFAULT_GOAL := help
 
 build: ## Build the aztunnel binary
-	go build $(LDFLAGS) -o bin/aztunnel ./cmd/aztunnel
+	go build $(GOFLAGS) $(LDFLAGS) -o bin/aztunnel ./cmd/aztunnel
 
 test: ## Run tests (with -race if CGO is available)
 ifneq ($(RACE),)
@@ -39,7 +40,7 @@ clean: ## Remove build artifacts
 	rm -rf bin/ coverage.txt
 
 install: ## Install to $$GOPATH/bin
-	go install $(LDFLAGS) ./cmd/aztunnel
+	go install $(GOFLAGS) $(LDFLAGS) ./cmd/aztunnel
 
 docker: ## Build Docker image (scratch)
 	docker build --build-arg VERSION=$(VERSION) -t aztunnel .

@@ -251,7 +251,8 @@ func TestSASKeyAuth(t *testing.T) {
 	// Start listener with Listen-only SAS key.
 	listenerSAS := &sasCredentials{keyName: env.sasListenerKeyName, key: env.sasListenerKey}
 	listener := startAztunnelWithSAS(t, &sasEnv, listenerSAS,
-		"relay-listener", sasEnv.hyco,
+		"relay-listener",
+		"--hyco", sasEnv.hyco,
 		"--relay", sasEnv.relayName,
 		"--allow", echo.Addr(),
 		"--log-level", "debug",
@@ -1084,11 +1085,11 @@ func assertNoTokenLeak(t *testing.T, output string) {
 	}
 }
 
-// assertNoUsageDump checks that stderr doesn't contain cobra usage output.
+// assertNoUsageDump checks that stderr doesn't contain CLI usage output.
 func assertNoUsageDump(t *testing.T, output string) {
 	t.Helper()
 	if strings.Contains(output, "Usage:") && strings.Contains(output, "Flags:") {
-		t.Error("stderr contains cobra usage dump; expected clean error only")
+		t.Error("stderr contains usage dump; expected clean error only")
 	}
 }
 
@@ -1169,7 +1170,8 @@ func TestBadSASKey(t *testing.T) {
 
 	proc := startAztunnelWithSAS(t, &sasEnv,
 		&sasCredentials{keyName: env.sasListenerKeyName, key: badKey},
-		"relay-listener", env.sasHyco,
+		"relay-listener",
+		"--hyco", env.sasHyco,
 		"--relay", env.relayName,
 	)
 
@@ -1210,7 +1212,7 @@ func TestMissingRequiredArgs(t *testing.T) {
 	}
 
 	t.Run("listener_no_relay", func(t *testing.T) {
-		output := runClean(t, "relay-listener", "some-hyco")
+		output := runClean(t, "relay-listener", "--hyco", "some-hyco")
 		if !strings.Contains(output, "relay") {
 			t.Errorf("expected error mentioning 'relay', got: %s", output)
 		}
@@ -1226,7 +1228,8 @@ func TestMissingRequiredArgs(t *testing.T) {
 
 	t.Run("sender_no_target", func(t *testing.T) {
 		output := runClean(t, "relay-sender", "connect")
-		if !strings.Contains(output, "accepts") || !strings.Contains(output, "arg") {
+		wantAny := strings.Contains(output, "arg") || strings.Contains(output, "expected")
+		if !wantAny {
 			t.Errorf("expected error about missing argument, got: %s", output)
 		}
 	})
@@ -1294,7 +1297,8 @@ func TestWrongSASClaim(t *testing.T) {
 		// Use sender (Send-only) key for listening — should fail.
 		proc := startAztunnelWithSAS(t, &sasEnv,
 			&sasCredentials{keyName: env.sasSenderKeyName, key: env.sasSenderKey},
-			"relay-listener", env.sasHyco,
+			"relay-listener",
+			"--hyco", env.sasHyco,
 			"--relay", env.relayName,
 			"--log-level", "debug",
 		)

@@ -96,7 +96,8 @@ func availableAuths(t *testing.T, env *relayEnv) []authConfig {
 func startListener(t *testing.T, env *relayEnv, auth authConfig, extraArgs ...string) *aztunnelProcess {
 	t.Helper()
 	args := append([]string{
-		"relay-listener", auth.hyco,
+		"relay-listener",
+		"--hyco", auth.hyco,
 		"--relay", env.relayName,
 	}, extraArgs...)
 	return startAztunnelWithSAS(t, env, auth.listenerSAS, args...)

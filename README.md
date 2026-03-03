@@ -132,14 +132,14 @@ ssh -p 2222 user@127.0.0.1
 
 ### SOCKS5 proxy
 
-Run a local SOCKS5 proxy on port 1080, forwarding any target through the relay:
+Run a local SOCKS5 proxy, forwarding any target through the relay:
 
 ```sh
 # Remote:
 aztunnel relay-listener --relay my-ns --hyco my-hyco --allow "10.0.0.0/8:*"
 
 # Local:
-aztunnel relay-sender socks5-proxy --relay my-ns --hyco my-hyco
+aztunnel relay-sender socks5-proxy --relay my-ns --hyco my-hyco -b 127.0.0.1:1080
 
 # Use it:
 curl --socks5 127.0.0.1:1080 http://10.0.0.5:8080/health
@@ -215,9 +215,9 @@ Commands:
   relay-sender connect                  One-shot stdin/stdout connection (ProxyCommand)
   arc connect                           One-shot connection through an Arc relay (ProxyCommand)
   arc port-forward                      Forward a local port through an Arc relay
-  version                               Print the version
 
 Global flags:
+  --version                 Print the version and exit
   --log-level string          Log level: debug, info, warn, error (default "info")
   --metrics-addr string       Address for Prometheus metrics server (e.g. :9090); disabled if empty
   --metrics-max-targets int   Max unique target labels in metrics (default 500, 0 = unlimited)
@@ -226,7 +226,7 @@ Global flags:
 ### relay-listener
 
 ```
-aztunnel relay-listener [hyco] [flags]
+aztunnel relay-listener [flags]
 
 Flags:
   --relay string         Azure Relay namespace name
@@ -253,12 +253,12 @@ Flags:
 ### relay-sender socks5-proxy
 
 ```
-aztunnel relay-sender socks5-proxy [hyco] [flags]
+aztunnel relay-sender socks5-proxy [flags]
 
 Flags:
   --relay string       Azure Relay namespace name
   --hyco string            Hybrid connection name
-  -b, --bind string        Local bind address:port (default "127.0.0.1:1080")
+  -b, --bind string        Local bind address:port (default "127.0.0.1:0")
   --gateway                Bind to 0.0.0.0 instead of 127.0.0.1
   --tcp-keepalive duration TCP keepalive interval (default 30s)
 ```
