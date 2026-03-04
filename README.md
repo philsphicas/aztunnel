@@ -113,6 +113,13 @@ export AZTUNNEL_RELAY_NAME="mynamespace"
 
 Or pass `--relay mynamespace` to any command.
 
+## Guides
+
+See **[docs/guides/](docs/guides/)** for detailed walkthroughs covering
+deployment patterns (Kubernetes sidecar, systemd, ad-hoc) and end-to-end
+scenarios (SSH to private VMs, kubectl to private clusters,
+cross-cluster connectivity, and more).
+
 ## Quick start
 
 ### Port forward
