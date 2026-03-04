@@ -6,15 +6,17 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 
 	// Automatically set GOMEMLIMIT based on cgroup memory limits (container
 	// or systemd MemoryMax=). If no cgroup limit is detected, GOMEMLIMIT is
 	// left at the Go default.
 	"github.com/KimMachineGun/automemlimit/memlimit"
 
+	"github.com/alecthomas/kong"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
-	"github.com/spf13/cobra"
+	"github.com/willabides/kongplete"
 )
 
 var version = "dev"
@@ -24,69 +26,42 @@ func init() {
 }
 
 func main() {
-	rootCmd := &cobra.Command{
-		Use:          "aztunnel",
-		Short:        "Azure Relay Hybrid Connection tunnel",
-		Long:         "Tunnel TCP connections through Azure Relay Hybrid Connections.",
-		SilenceUsage: true,
-	}
+	parser := kong.Must(&CLI,
+		kong.Name("aztunnel"),
+		kong.Description("Tunnel TCP connections through Azure Relay Hybrid Connections."),
+		kong.UsageOnError(),
+		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
+		kong.Help(customHelpPrinter),
+	)
 
-	// Global flags.
-	rootCmd.PersistentFlags().String("log-level", "info", "log level (debug, info, warn, error)")
-	rootCmd.PersistentFlags().String("metrics-addr", "", "address for Prometheus metrics server (e.g. :9090); disabled if empty")
-	rootCmd.PersistentFlags().Int("metrics-max-targets", 500, "max unique target labels in metrics (0 = unlimited)")
+	kongplete.Complete(parser)
 
-	rootCmd.AddCommand(relayListenerCmd())
-	rootCmd.AddCommand(relaySenderCmd())
-	rootCmd.AddCommand(arcCmd())
-	rootCmd.AddCommand(versionCmd())
+	ctx, err := parser.Parse(os.Args[1:])
+	parser.FatalIfErrorf(err)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func versionCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: "Print the version",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println(version)
-		},
-	}
-}
-
-// addAuthFlags adds the credential flags to a command.
-func addAuthFlags(cmd *cobra.Command) {
-	cmd.Flags().String("relay", "", "Azure Relay namespace name, FQDN, or URI")
-	cmd.Flags().String("namespace", "", "Azure Relay namespace name (alias for --relay)")
-	_ = cmd.Flags().MarkHidden("namespace")
-	cmd.Flags().String("hyco", "", "hybrid connection name")
-	cmd.Flags().String("relay-suffix", "", "namespace suffix for sovereign clouds (default: .servicebus.windows.net)")
+	parser.FatalIfErrorf(ctx.Run(&CLI.Globals))
 }
 
 // resolveMetrics creates a Metrics instance and starts the HTTP server if
-// --metrics-addr or AZTUNNEL_METRICS_ADDR is set. Returns nil if metrics are
+// metricsAddr or AZTUNNEL_METRICS_ADDR is set. Returns nil if metrics are
 // disabled. The provided context controls the server's lifetime — when
 // cancelled the server shuts down gracefully.
-func resolveMetrics(ctx context.Context, cmd *cobra.Command, logger *slog.Logger) (*metrics.Metrics, error) {
-	addr, _ := cmd.Flags().GetString("metrics-addr")
+func resolveMetrics(ctx context.Context, metricsAddr string, maxTargets int, logger *slog.Logger) (*metrics.Metrics, error) {
+	addr := metricsAddr
 	if addr == "" {
 		addr = os.Getenv("AZTUNNEL_METRICS_ADDR")
 	}
 	if addr == "" {
 		return nil, nil
 	}
+	if maxTargets < 0 {
+		return nil, fmt.Errorf("--metrics-max-targets must be >= 0, got %d", maxTargets)
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("metrics listen on %s: %w", addr, err)
 	}
 	m := metrics.New()
-	maxTargets, _ := cmd.Flags().GetInt("metrics-max-targets")
-	if maxTargets < 0 {
-		return nil, fmt.Errorf("--metrics-max-targets must be >= 0, got %d", maxTargets)
-	}
 	m.MaxTargets = maxTargets
 	go func() {
 		if err := m.Serve(ctx, ln, logger); err != nil {
@@ -96,13 +71,10 @@ func resolveMetrics(ctx context.Context, cmd *cobra.Command, logger *slog.Logger
 	return m, nil
 }
 
-// resolveHyco returns the hybrid connection name from --hyco flag, env var, or positional arg.
-func resolveHyco(cmd *cobra.Command, args []string) (string, error) {
-	if hyco, _ := cmd.Flags().GetString("hyco"); hyco != "" {
-		return hyco, nil
-	}
-	if len(args) > 0 {
-		return args[0], nil
+// resolveHyco returns the hybrid connection name from flag or env var.
+func resolveHyco(hycoFlag string) (string, error) {
+	if hycoFlag != "" {
+		return hycoFlag, nil
 	}
 	if hyco := os.Getenv("AZTUNNEL_HYCO_NAME"); hyco != "" {
 		return hyco, nil
@@ -110,20 +82,20 @@ func resolveHyco(cmd *cobra.Command, args []string) (string, error) {
 	return "", fmt.Errorf("hybrid connection name is required: use --hyco or set AZTUNNEL_HYCO_NAME")
 }
 
-// resolveAuth determines the endpoint and token provider from CLI flags
-// and environment variables.
+// resolveAuth determines the endpoint and token provider from flags and
+// environment variables.
 //
 // Resolution order for namespace:
-//  1. --relay flag (or hidden --namespace alias)
+//  1. relay flag (or hidden namespace alias)
 //  2. AZTUNNEL_RELAY_NAME env var
 //
 // Resolution order for auth:
-//  1. AZTUNNEL_KEY_NAME + AZTUNNEL_KEY → SAS auth
-//  2. Otherwise → Entra ID auth (DefaultAzureCredential)
-func resolveAuth(cmd *cobra.Command) (endpoint string, tp relay.TokenProvider, err error) {
-	ns, _ := cmd.Flags().GetString("relay")
+//  1. AZTUNNEL_KEY_NAME + AZTUNNEL_KEY → SAS auth (explicit override)
+//  2. Otherwise → Entra ID auth via DefaultAzureCredential (default)
+func resolveAuth(relayFlag, namespaceAlias, suffixFlag string) (endpoint string, tp relay.TokenProvider, err error) {
+	ns := relayFlag
 	if ns == "" {
-		ns, _ = cmd.Flags().GetString("namespace")
+		ns = namespaceAlias
 	}
 	if ns == "" {
 		ns = os.Getenv("AZTUNNEL_RELAY_NAME")
@@ -131,7 +103,7 @@ func resolveAuth(cmd *cobra.Command) (endpoint string, tp relay.TokenProvider, e
 	if ns == "" {
 		return "", nil, fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
 	}
-	suffix, _ := cmd.Flags().GetString("relay-suffix")
+	suffix := suffixFlag
 	if suffix == "" {
 		suffix = os.Getenv("AZTUNNEL_RELAY_SUFFIX")
 	}
@@ -155,4 +127,30 @@ func resolveAuth(cmd *cobra.Command) (endpoint string, tp relay.TokenProvider, e
 		return "", nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
 	}
 	return endpoint, entra, nil
+}
+
+// resolveResourceID returns the resource ID from flag or AZTUNNEL_ARC_RESOURCE_ID env var.
+func resolveResourceID(resourceID string) (string, error) {
+	if resourceID != "" {
+		return resourceID, nil
+	}
+	if rid := os.Getenv("AZTUNNEL_ARC_RESOURCE_ID"); rid != "" {
+		return rid, nil
+	}
+	return "", fmt.Errorf("resource ID is required: use --resource-id or set AZTUNNEL_ARC_RESOURCE_ID")
+}
+
+func newLogger(level string) *slog.Logger {
+	var lvl slog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 }

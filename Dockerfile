@@ -9,7 +9,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=${CGO_ENABLED} go build -ldflags "-X main.version=${VERSION}" -o /aztunnel ./cmd/aztunnel
+RUN CGO_ENABLED=${CGO_ENABLED} go build -trimpath -ldflags "-X main.version=${VERSION}" -o /aztunnel ./cmd/aztunnel
 
 FROM ${RUNTIME_IMAGE}
 # Copy CA certificates from the builder for runtime images that may lack them

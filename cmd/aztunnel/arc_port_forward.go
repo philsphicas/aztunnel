@@ -11,53 +11,36 @@ import (
 	"github.com/philsphicas/aztunnel/internal/arc"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
-	"github.com/spf13/cobra"
 )
 
-func arcPortForwardCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "port-forward",
-		Short: "Forward a local port through an Arc relay",
-		Long: `Start a local TCP listener and forward each connection through the
-Azure Arc managed relay to the remote service.
-
-Example:
-  aztunnel arc port-forward --resource-id /subscriptions/.../machines/myVM -b 127.0.0.1:2222
-  ssh -p 2222 user@127.0.0.1`,
-		RunE: runArcPortForward,
-	}
-
-	cmd.Flags().StringP("bind", "b", "127.0.0.1:0", "local bind address:port")
-	cmd.Flags().Bool("gateway", false, "bind to 0.0.0.0 instead of 127.0.0.1")
-	cmd.Flags().Duration("tcp-keepalive", 30*time.Second, "TCP keepalive interval")
-
-	return cmd
+// ArcPortForwardCmd forwards a local port through an Arc relay.
+type ArcPortForwardCmd struct {
+	BindFlags
 }
 
-func runArcPortForward(cmd *cobra.Command, _ []string) error {
-	resourceID, err := resolveResourceID(cmd)
+// Run executes the arc port-forward command.
+func (p *ArcPortForwardCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
+	resourceID, err := resolveResourceID(arcCmd.ResourceID)
 	if err != nil {
 		return err
 	}
-	port, _ := cmd.Flags().GetInt("port")
-	service, _ := cmd.Flags().GetString("service")
-	bind, _ := cmd.Flags().GetString("bind")
-	gateway, _ := cmd.Flags().GetBool("gateway")
-	if gateway {
-		_, p, _ := net.SplitHostPort(bind)
-		if p == "" {
-			p = "0"
+	bind := p.Bind
+	if p.Gateway {
+		_, port, err := net.SplitHostPort(bind)
+		if err != nil {
+			return fmt.Errorf("invalid --bind address %q: %w", bind, err)
 		}
-		bind = "0.0.0.0:" + p
+		if port == "" {
+			port = "0"
+		}
+		bind = "0.0.0.0:" + port
 	}
-	tcpKeepAlive, _ := cmd.Flags().GetDuration("tcp-keepalive")
-	logLevel, _ := cmd.Flags().GetString("log-level")
-	logger := newLogger(logLevel)
+	logger := newLogger(globals.LogLevel)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	m, err := resolveMetrics(ctx, cmd, logger)
+	m, err := resolveMetrics(ctx, globals.MetricsAddr, globals.MetricsMaxTargets, logger)
 	if err != nil {
 		return err
 	}
@@ -70,9 +53,9 @@ func runArcPortForward(cmd *cobra.Command, _ []string) error {
 	// Try to get relay credentials directly. If the endpoint doesn't exist
 	// yet, create it. EnsureHybridConnectivity is only called on first
 	// failure to avoid disrupting the Arc agent's relay listener.
-	if _, err := client.GetRelayCredentials(ctx, resourceID, service); err != nil {
+	if _, err := client.GetRelayCredentials(ctx, resourceID, arcCmd.Service); err != nil {
 		logger.Debug("initial credential request failed, ensuring hybrid connectivity", "error", err)
-		if ensureErr := client.EnsureHybridConnectivity(ctx, resourceID, service, port); ensureErr != nil {
+		if ensureErr := client.EnsureHybridConnectivity(ctx, resourceID, arcCmd.Service, arcCmd.Port); ensureErr != nil {
 			return ensureErr
 		}
 	}
@@ -82,14 +65,14 @@ func runArcPortForward(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("listen %s: %w", bind, err)
 	}
 	defer func() { _ = ln.Close() }()
-	logger.Info("arc port-forward listening", "bind", ln.Addr(), "resource", resourceID, "port", port)
+	logger.Info("arc port-forward listening", "bind", ln.Addr(), "resource", resourceID, "port", arcCmd.Port)
 
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
 
-	target := fmt.Sprintf("%s:%d", resourceID, port)
+	target := fmt.Sprintf("%s:%d", resourceID, arcCmd.Port)
 
 	for {
 		conn, err := ln.Accept()
@@ -103,10 +86,10 @@ func runArcPortForward(cmd *cobra.Command, _ []string) error {
 
 		go func() {
 			defer func() { _ = conn.Close() }()
-			relay.SetTCPKeepAlive(conn, tcpKeepAlive)
+			relay.SetTCPKeepAlive(conn, p.TCPKeepAlive)
 
 			// Get fresh credentials for each connection to avoid SAS expiry.
-			info, err := client.GetRelayCredentials(ctx, resourceID, service)
+			info, err := client.GetRelayCredentials(ctx, resourceID, arcCmd.Service)
 			if err != nil {
 				logger.Warn("get relay credentials failed", "error", err)
 				m.ConnectionError("sender", metrics.ReasonAuthFailed)
@@ -114,7 +97,7 @@ func runArcPortForward(cmd *cobra.Command, _ []string) error {
 			}
 
 			dialStart := time.Now()
-			ws, err := arc.DialWithLogger(ctx, info, port, logger)
+			ws, err := arc.DialWithLogger(ctx, info, arcCmd.Port, logger)
 			m.ObserveDialDuration("sender", time.Since(dialStart).Seconds())
 			if err != nil {
 				logger.Warn("arc relay dial failed", "error", err)

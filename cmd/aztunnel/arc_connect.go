@@ -9,37 +9,23 @@ import (
 
 	"github.com/philsphicas/aztunnel/internal/arc"
 	"github.com/philsphicas/aztunnel/internal/metrics"
-	"github.com/spf13/cobra"
 )
 
-func arcConnectCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "connect",
-		Short: "One-shot stdin/stdout connection through an Arc relay",
-		Long: `Connect to an Azure Arc-enrolled machine through the automatically
-provisioned Azure Relay. Bridges stdin/stdout with the tunnel, then exits
-when the connection closes. Designed for use as an SSH ProxyCommand.
+// ArcConnectCmd connects stdin/stdout through an Arc relay.
+type ArcConnectCmd struct{}
 
-Example:
-  ssh -o ProxyCommand="aztunnel arc connect --resource-id /subscriptions/.../machines/myVM" user@host`,
-		RunE: runArcConnect,
-	}
-}
-
-func runArcConnect(cmd *cobra.Command, _ []string) error {
-	resourceID, err := resolveResourceID(cmd)
+// Run executes the arc connect command.
+func (c *ArcConnectCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
+	resourceID, err := resolveResourceID(arcCmd.ResourceID)
 	if err != nil {
 		return err
 	}
-	port, _ := cmd.Flags().GetInt("port")
-	service, _ := cmd.Flags().GetString("service")
-	logLevel, _ := cmd.Flags().GetString("log-level")
-	logger := newLogger(logLevel)
+	logger := newLogger(globals.LogLevel)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	m, err := resolveMetrics(ctx, cmd, logger)
+	m, err := resolveMetrics(ctx, globals.MetricsAddr, globals.MetricsMaxTargets, logger)
 	if err != nil {
 		return err
 	}
@@ -51,22 +37,22 @@ func runArcConnect(cmd *cobra.Command, _ []string) error {
 
 	// Try to get relay credentials directly. If the endpoint doesn't exist
 	// yet, create it and retry.
-	info, err := client.GetRelayCredentials(ctx, resourceID, service)
+	info, err := client.GetRelayCredentials(ctx, resourceID, arcCmd.Service)
 	if err != nil {
 		logger.Debug("initial credential request failed, ensuring hybrid connectivity", "error", err)
-		if ensureErr := client.EnsureHybridConnectivity(ctx, resourceID, service, port); ensureErr != nil {
+		if ensureErr := client.EnsureHybridConnectivity(ctx, resourceID, arcCmd.Service, arcCmd.Port); ensureErr != nil {
 			return ensureErr
 		}
-		info, err = client.GetRelayCredentials(ctx, resourceID, service)
+		info, err = client.GetRelayCredentials(ctx, resourceID, arcCmd.Service)
 		if err != nil {
 			return err
 		}
 	}
 
-	target := fmt.Sprintf("%s:%d", resourceID, port)
+	target := fmt.Sprintf("%s:%d", resourceID, arcCmd.Port)
 
 	dialStart := time.Now()
-	ws, err := arc.DialWithLogger(ctx, info, port, logger)
+	ws, err := arc.DialWithLogger(ctx, info, arcCmd.Port, logger)
 	m.ObserveDialDuration("sender", time.Since(dialStart).Seconds())
 	if err != nil {
 		m.ConnectionError("sender", metrics.DialReason(err, metrics.ReasonRelayFailed))

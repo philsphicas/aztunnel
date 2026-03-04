@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/philsphicas/aztunnel/internal/relay"
-	"github.com/spf13/cobra"
 )
 
 func TestAutomemlimitActive(t *testing.T) {
@@ -67,28 +66,12 @@ func TestNewLogger(t *testing.T) {
 	}
 }
 
-// makeAuthCmd creates a cobra.Command with auth flags for testing resolveAuth.
-func makeAuthCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use: "test",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return nil
-		},
-	}
-	addAuthFlags(cmd)
-	return cmd
-}
-
 func TestResolveAuth_NamespaceFromEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_RELAY_NAME", "test")
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{})
-	_ = cmd.Execute()
-
-	endpoint, tp, err := resolveAuth(cmd)
+	endpoint, tp, err := resolveAuth("", "", "")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -105,11 +88,7 @@ func TestResolveAuth_SASCredentials(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "RootManageSharedAccessKey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{})
-	_ = cmd.Execute()
-
-	endpoint, tp, err := resolveAuth(cmd)
+	endpoint, tp, err := resolveAuth("", "", "")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -134,11 +113,7 @@ func TestResolveAuth_MissingNamespace(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{})
-	_ = cmd.Execute()
-
-	_, _, err := resolveAuth(cmd)
+	_, _, err := resolveAuth("", "", "")
 	if err == nil {
 		t.Fatal("expected error when namespace is missing, got nil")
 	}
@@ -152,13 +127,7 @@ func TestResolveAuth_NamespaceFlagPriority(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{"--relay", "from-flag"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	endpoint, _, err := resolveAuth(cmd)
+	endpoint, _, err := resolveAuth("from-flag", "", "")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -172,11 +141,7 @@ func TestResolveAuth_FQDNInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{})
-	_ = cmd.Execute()
-
-	endpoint, _, err := resolveAuth(cmd)
+	endpoint, _, err := resolveAuth("", "", "")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -189,13 +154,7 @@ func TestResolveAuth_URIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{"--relay", "sb://my-relay.servicebus.windows.net"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	endpoint, _, err := resolveAuth(cmd)
+	endpoint, _, err := resolveAuth("sb://my-relay.servicebus.windows.net", "", "")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -209,13 +168,7 @@ func TestResolveAuth_CustomSuffixFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{"--relay-suffix", ".servicebus.chinacloudapi.cn"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	endpoint, _, err := resolveAuth(cmd)
+	endpoint, _, err := resolveAuth("", "", ".servicebus.chinacloudapi.cn")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -230,11 +183,7 @@ func TestResolveAuth_SuffixEnvVar(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{})
-	_ = cmd.Execute()
-
-	endpoint, _, err := resolveAuth(cmd)
+	endpoint, _, err := resolveAuth("", "", "")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -247,13 +196,7 @@ func TestResolveAuth_SuffixIgnoredForFQDN(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{"--relay", "my-relay.servicebus.chinacloudapi.cn", "--relay-suffix", ".should-be-ignored"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	endpoint, _, err := resolveAuth(cmd)
+	endpoint, _, err := resolveAuth("my-relay.servicebus.chinacloudapi.cn", "", ".should-be-ignored")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -268,13 +211,7 @@ func TestResolveAuth_SuffixFlagPrecedenceOverEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{"--relay-suffix", ".servicebus.usgovcloudapi.net"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	endpoint, _, err := resolveAuth(cmd)
+	endpoint, _, err := resolveAuth("", "", ".servicebus.usgovcloudapi.net")
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -287,13 +224,7 @@ func TestResolveAuth_InvalidURIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{"--relay", "sb://"})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	_, _, err := resolveAuth(cmd)
+	_, _, err := resolveAuth("sb://", "", "")
 	if err == nil {
 		t.Fatal("expected error for invalid URI input, got nil")
 	}
@@ -307,11 +238,7 @@ func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	cmd := makeAuthCmd()
-	cmd.SetArgs([]string{})
-	_ = cmd.Execute()
-
-	_, tp, err := resolveAuth(cmd)
+	_, tp, err := resolveAuth("", "", "")
 	// Either it succeeds with Entra or fails because no Azure creds available.
 	// Either way, tp should NOT be a SASTokenProvider.
 	if err == nil {
@@ -326,6 +253,42 @@ func TestVersion(t *testing.T) {
 	// Verify the version variable is set (compile-time default is "dev").
 	if version == "" {
 		t.Error("version should not be empty")
+	}
+}
+
+func TestResolveResourceID_FromFlag(t *testing.T) {
+	t.Setenv("AZTUNNEL_ARC_RESOURCE_ID", "from-env")
+
+	rid, err := resolveResourceID("from-flag")
+	if err != nil {
+		t.Fatalf("resolveResourceID: %v", err)
+	}
+	if rid != "from-flag" {
+		t.Errorf("got %q, want %q (flag should take priority over env)", rid, "from-flag")
+	}
+}
+
+func TestResolveResourceID_FromEnv(t *testing.T) {
+	t.Setenv("AZTUNNEL_ARC_RESOURCE_ID", "from-env")
+
+	rid, err := resolveResourceID("")
+	if err != nil {
+		t.Fatalf("resolveResourceID: %v", err)
+	}
+	if rid != "from-env" {
+		t.Errorf("got %q, want %q", rid, "from-env")
+	}
+}
+
+func TestResolveResourceID_Missing(t *testing.T) {
+	t.Setenv("AZTUNNEL_ARC_RESOURCE_ID", "")
+
+	_, err := resolveResourceID("")
+	if err == nil {
+		t.Fatal("expected error when resource ID is missing")
+	}
+	if !strings.Contains(err.Error(), "resource ID is required") {
+		t.Errorf("error %q does not contain %q", err.Error(), "resource ID is required")
 	}
 }
 
