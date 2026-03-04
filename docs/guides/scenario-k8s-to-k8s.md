@@ -21,7 +21,7 @@ a sender — and they meet in the middle through Azure Relay.
 | Component    | Cluster                                   | Configuration | Guide                                                   |
 | ------------ | ----------------------------------------- | ------------- | ------------------------------------------------------- |
 | **Listener** | Cluster B (where the target service runs) | K8s sidecar   | [Listener: K8s sidecar](listener-kubernetes-sidecar.md) |
-| **Sender**   | Cluster A (where the client runs)         | K8s sidecar   | [Sender: port forward](sender-port-forward.md)          |
+| **Sender**   | Cluster A (where the client runs)         | K8s sidecar   | [Sender: K8s sidecar](sender-kubernetes-sidecar.md)     |
 
 ## Prerequisites
 
@@ -106,7 +106,7 @@ spec:
         - --hyco
         - cross-cluster
         - --bind
-        - "0.0.0.0:8080"
+        - "127.0.0.1:8080"
       envFrom:
         - secretRef:
             name: aztunnel-sender-creds
@@ -200,7 +200,7 @@ spec:
         - --hyco
         - cross-cluster
         - --bind
-        - "0.0.0.0:8080"
+        - "127.0.0.1:8080"
       envFrom:
         - secretRef:
             name: aztunnel-sender-creds
@@ -228,7 +228,7 @@ SOCKS5 instead of port-forward:
     - --hyco
     - cross-cluster
     - --bind
-    - "0.0.0.0:1080"
+    - "127.0.0.1:1080"
   envFrom:
     - secretRef:
         name: aztunnel-sender-creds

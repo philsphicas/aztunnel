@@ -157,7 +157,7 @@ Host myvm
     HostName 10.0.0.5
     User azureuser
     ForwardAgent yes
-    ProxyCommand aztunnel relay-sender connect %h:%p
+    ProxyCommand aztunnel relay-sender connect --relay my-relay-ns --hyco my-tunnel %h:%p
 ```
 
 ## Debugging
@@ -165,7 +165,7 @@ Host myvm
 If the connection fails, increase the log level:
 
 ```sh
-ssh -o ProxyCommand="aztunnel relay-sender connect --log-level debug %h:%p" user@10.0.0.5
+ssh -o ProxyCommand="aztunnel relay-sender connect --relay my-relay-ns --hyco my-tunnel --log-level debug %h:%p" user@10.0.0.5
 ```
 
 aztunnel logs to stderr, so SSH still works (it reads stdout). Common issues:

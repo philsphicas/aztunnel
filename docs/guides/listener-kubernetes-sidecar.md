@@ -233,7 +233,7 @@ kubectl logs my-service -c aztunnel
 You should see:
 
 ```
-level=INFO msg="listening on relay" endpoint=my-relay-ns.servicebus.windows.net entity=my-tunnel
+level=INFO msg="control channel connected" entityPath=my-tunnel
 ```
 
 ## Connecting from the sender side

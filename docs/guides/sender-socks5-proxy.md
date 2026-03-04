@@ -70,9 +70,8 @@ resolution is done during allowlist checking:
 
 > **Watch out for `localhost`**: If a client resolves `localhost` locally, it
 > may send `127.0.0.1` or `[::1]` depending on the platform. An allowlist
-> with `--allow "127.0.0.1:80"` won't match `[::1]:80`. To be safe, either
-> use `--socks5h` so the listener receives the hostname `localhost`, or allow
-> both addresses: `--allow "127.0.0.1:80" --allow "[::1]:80"`.
+> with `--allow "127.0.0.1:80"` won't match `[::1]:80`. Use `--socks5h`
+> so the listener receives the hostname `localhost` instead of a resolved IP.
 
 If your allowlist uses CIDR ranges, clients must send IPs (use `--socks5`).
 If your allowlist uses hostnames, clients must send hostnames (use
@@ -154,7 +153,7 @@ aztunnel relay-sender socks5-proxy --relay my-relay-ns --hyco my-tunnel
 aztunnel logs the assigned port:
 
 ```
-level=INFO msg="SOCKS5 proxy listening" bind=127.0.0.1:52431
+level=INFO msg="socks5-proxy listening" bind=127.0.0.1:52431
 ```
 
 If you're running it as a [bgtask](https://github.com/philsphicas/bgtask),

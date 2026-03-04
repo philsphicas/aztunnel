@@ -59,21 +59,25 @@ This works for any Arc machine without per-host configuration:
 
 ```
 Host /subscriptions/*
-    StrictHostKeyChecking no
-    UserKnownHostsFile /dev/null
-    Hostname localhost
     ProxyCommand aztunnel arc connect --resource-id %n --port %p
 ```
 
 Then connect using the resource ID directly:
 
 ```sh
-ssh -p 22 user@/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/myVM
+ssh user@/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/myVM
 ```
 
 `%n` passes the original hostname (the resource ID) to aztunnel, and `%p`
-passes the port. `StrictHostKeyChecking no` is needed because the hostname
-doesn't match a real DNS name.
+passes the port. No `Hostname` directive is needed — the Arc agent always
+connects to `localhost:{port}` on the target machine regardless of what
+hostname the SSH client uses. SSH stores the host key under the resource
+ID, so each machine gets its own entry in known_hosts and you'll be warned
+if a VM is reprovisioned with a different host key.
+
+> **Optional refinements**: Add `UserKnownHostsFile ~/.ssh/arc_known_hosts`
+> to keep Arc host keys separate from your regular known_hosts. Add
+> `StrictHostKeyChecking accept-new` to skip the first-connect prompt.
 
 ### Per-machine aliases
 
@@ -151,14 +155,15 @@ refreshes credentials for each new connection to avoid expiry.
 ## Testing with a kind node
 
 You can enroll a kind cluster node as an Arc-connected server for local
-testing. This uses `docker exec` to install the Arc agent inside the
-kind node's container:
+testing. This uses `docker exec` to install SSH, provision your SSH key,
+and install the Arc agent inside the kind node's container:
 
 ```sh
 KIND_CLUSTER_NAME="arctest"
 RESOURCE_GROUP="arctest-rg"
 SUBSCRIPTION_ID="$(az account show -o json | jq -r .id)"
 ACCESS_TOKEN="$(az account get-access-token -o json | jq -r .accessToken)"
+SSH_PUBKEY="$(cat ~/.ssh/id_rsa.pub)"
 
 # Create the kind cluster
 kind create cluster --name "$KIND_CLUSTER_NAME"
@@ -166,7 +171,10 @@ kind create cluster --name "$KIND_CLUSTER_NAME"
 # Install SSH + Arc agent inside the node
 docker exec -i "${KIND_CLUSTER_NAME}-control-plane" bash <<SCRIPT
 apt-get update && apt-get install -y wget openssh-server sudo
-systemctl start ssh
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+echo "${SSH_PUBKEY}" > /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+service ssh start
 wget https://aka.ms/azcmagent -qO- | bash
 azcmagent connect \
   -g "$RESOURCE_GROUP" \
@@ -179,9 +187,7 @@ SCRIPT
 Then connect via Arc:
 
 ```sh
-RESOURCE_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.HybridCompute/machines/${KIND_CLUSTER_NAME}-control-plane"
-
-ssh -o ProxyCommand="aztunnel arc connect --resource-id $RESOURCE_ID" root@arctest
+ssh root@/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.HybridCompute/machines/${KIND_CLUSTER_NAME}-control-plane
 ```
 
 ## SOCKS5 proxy over Arc SSH
@@ -201,21 +207,22 @@ deploying an aztunnel listener or relay namespace.
 └─────────────┘       └──────────────┘       └──────────────────┘
 ```
 
-Start the SSH SOCKS proxy as a background task:
+Start the SSH SOCKS proxy as a background task. With the wildcard SSH
+config from above, you can use the resource ID directly:
+
+```sh
+bgtask run --name socks-over-arc -- \
+  ssh -D 1080 -N \
+    user@/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/myVM
+```
+
+Or without the SSH config, pass the ProxyCommand explicitly:
 
 ```sh
 bgtask run --name socks-over-arc -- \
   ssh -D 1080 -N \
     -o ProxyCommand="aztunnel arc connect --resource-id /subscriptions/SUB/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/myVM" \
     user@myVM
-```
-
-Or with the wildcard SSH config from above:
-
-```sh
-bgtask run --name socks-over-arc -- \
-  ssh -D 1080 -N -p 22 \
-    user@/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/myVM
 ```
 
 Then use the proxy to reach anything on the VM's network:

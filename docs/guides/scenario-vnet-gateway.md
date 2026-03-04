@@ -89,11 +89,6 @@ aztunnel relay-sender socks5-proxy --hyco network-gateway -b 127.0.0.1:1080
 ## 3. Access services
 
 ```sh
-# Database
-psql -h 10.0.0.5 -p 5432 -U myuser mydb \
-  --set=PGSSLMODE=disable \
-  -o "socks5://127.0.0.1:1080"
-
 # HTTP APIs
 curl --socks5h 127.0.0.1:1080 http://10.0.0.6:8080/api/health
 curl --socks5h 127.0.0.1:1080 http://10.0.0.7:3000/dashboard
@@ -105,6 +100,10 @@ ssh -o ProxyCommand="nc -x 127.0.0.1:1080 %h %p" user@10.0.0.8
 export ALL_PROXY=socks5h://127.0.0.1:1080
 curl http://10.0.0.6:8080/api/health
 ```
+
+> **Databases**: Most database clients (psql, mysql) don't support SOCKS5
+> natively. Use [port-forward mode](sender-port-forward.md) instead, or
+> wrap the client with `proxychains4`.
 
 ## Allowlist design
 

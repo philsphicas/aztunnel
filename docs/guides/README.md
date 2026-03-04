@@ -41,14 +41,14 @@ concrete problem end-to-end.
 Each scenario pairs a listener configuration with a sender configuration and
 walks through the end-to-end setup.
 
-| Scenario                                                            | Listener                                      | Sender                                        | Description                                                              |
-| ------------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------ |
-| [SSH into a private VM](scenario-ssh-private-vm.md)                 | [systemd](listener-systemd.md)                | [ProxyCommand](sender-ssh-proxycommand.md)    | SSH to a VM with no public IP, using `~/.ssh/config` for seamless access |
-| [Browse internal web apps](scenario-browse-internal-apps.md)        | [K8s sidecar](listener-kubernetes-sidecar.md) | [SOCKS5](sender-socks5-proxy.md)              | Access dashboards and internal HTTP APIs from your laptop                |
-| [kubectl to a private cluster](scenario-kubectl-private-cluster.md) | [K8s sidecar](listener-kubernetes-sidecar.md) | [port forward](sender-port-forward.md)        | Reach a private Kubernetes API server without a VPN                      |
-| [VNet gateway](scenario-vnet-gateway.md)                            | [K8s sidecar](listener-kubernetes-sidecar.md) | [SOCKS5](sender-socks5-proxy.md)              | One listener as a tunnel gateway to an entire network                    |
-| [Kubernetes-to-Kubernetes](scenario-k8s-to-k8s.md)                  | [K8s sidecar](listener-kubernetes-sidecar.md) | [K8s sidecar](listener-kubernetes-sidecar.md) | Cross-cluster connectivity without VPN or peering                        |
-| [Multi-hop tunneling](scenario-multi-hop.md)                        | [systemd](listener-systemd.md)                | [SOCKS5](sender-socks5-proxy.md)              | Chain aztunnel with SSH jump hosts for complex topologies                |
+| Scenario                                                            | Listener                                      | Sender                                      | Description                                                              |
+| ------------------------------------------------------------------- | --------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------ |
+| [SSH into a private VM](scenario-ssh-private-vm.md)                 | [systemd](listener-systemd.md)                | [ProxyCommand](sender-ssh-proxycommand.md)  | SSH to a VM with no public IP, using `~/.ssh/config` for seamless access |
+| [Browse internal web apps](scenario-browse-internal-apps.md)        | [K8s sidecar](listener-kubernetes-sidecar.md) | [SOCKS5](sender-socks5-proxy.md)            | Access dashboards and internal HTTP APIs from your laptop                |
+| [kubectl to a private cluster](scenario-kubectl-private-cluster.md) | [K8s sidecar](listener-kubernetes-sidecar.md) | [port forward](sender-port-forward.md)      | Reach a private Kubernetes API server without a VPN                      |
+| [VNet gateway](scenario-vnet-gateway.md)                            | [K8s sidecar](listener-kubernetes-sidecar.md) | [SOCKS5](sender-socks5-proxy.md)            | One listener as a tunnel gateway to an entire network                    |
+| [Kubernetes-to-Kubernetes](scenario-k8s-to-k8s.md)                  | [K8s sidecar](listener-kubernetes-sidecar.md) | [K8s sidecar](sender-kubernetes-sidecar.md) | Cross-cluster connectivity without VPN or peering                        |
+| [Multi-hop tunneling](scenario-multi-hop.md)                        | [systemd](listener-systemd.md)                | [SOCKS5](sender-socks5-proxy.md)            | Chain aztunnel with SSH jump hosts for complex topologies                |
 
 ## [FAQ](faq.md)
 

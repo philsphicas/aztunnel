@@ -1,7 +1,7 @@
 # Scenario: kubectl to a Private Cluster
 
 Access a private Kubernetes API server from your workstation — no VPN, no
-public endpoint. The listener runs as a sidecar in the target cluster and
+public endpoint. The listener runs as a pod in the target cluster and
 forwards to the API server. You run a port-forward on your laptop.
 
 ```
@@ -45,7 +45,8 @@ kubectl create secret generic aztunnel-creds \
 Deploy a pod with the listener. The allowlist is locked down to the API
 server endpoint only:
 
-```yaml
+```sh
+kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: Pod
 metadata:
@@ -53,7 +54,7 @@ metadata:
 spec:
   containers:
     - name: aztunnel
-      image: ghcr.io/philsphicas/aztunnel:latest # use aztunnel:dev for local builds
+      image: ghcr.io/philsphicas/aztunnel:latest
       imagePullPolicy: IfNotPresent
       command:
         - aztunnel
@@ -62,15 +63,11 @@ spec:
         - kube-api
         - --allow
         - "kubernetes.default.svc:443"
-        - --log-level
-        - info
       envFrom:
         - secretRef:
             name: aztunnel-creds
-```
+EOF
 
-```sh
-kubectl apply -f kube-tunnel.yaml
 kubectl logs kube-tunnel -f
 ```
 
@@ -112,10 +109,11 @@ clusters:
       # keep the existing certificate-authority-data
 ```
 
-> **TLS**: The API server's TLS certificate won't match `127.0.0.1`. You may
-> need `insecure-skip-tls-verify: true` in the kubeconfig cluster entry, or
-> add the API server's CA to your trust store. For kind clusters, the CA is
-> already in the kubeconfig.
+> **TLS**: The API server's TLS certificate won't match `127.0.0.1`. The
+> preferred fix is to add the API server's CA to the kubeconfig (for kind
+> clusters, the CA is already included). As a last resort for testing,
+> `insecure-skip-tls-verify: true` disables certificate validation — do
+> not use this in production as it allows man-in-the-middle attacks.
 
 Use the modified kubeconfig:
 

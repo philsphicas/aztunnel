@@ -79,7 +79,7 @@ spec:
         - relay-sender
         - port-forward
         - --bind
-        - "0.0.0.0:8080"
+        - "127.0.0.1:8080"
         - remote-service:80
       envFrom:
         - configMapRef:
@@ -91,9 +91,9 @@ spec:
 Your app connects to `localhost:8080`, which the sender forwards through
 Azure Relay to `remote-service:80` on the listener side.
 
-> **Bind to 0.0.0.0**: Inside a pod, binding to `0.0.0.0` makes the port
-> accessible to other containers in the same pod via `localhost`. This is
-> different from binding on a host, where it exposes the port to the network.
+> All containers in a pod share the same network namespace, so binding to
+> `127.0.0.1` is sufficient — other containers reach it via `localhost`.
+> Use `0.0.0.0` only if you need the port reachable from outside the pod.
 
 ## SOCKS5 sidecar
 
@@ -107,7 +107,7 @@ If your app needs to reach multiple targets, use the SOCKS5 proxy mode:
     - relay-sender
     - socks5-proxy
     - --bind
-    - "0.0.0.0:1080"
+    - "127.0.0.1:1080"
   envFrom:
     - configMapRef:
         name: aztunnel-config
@@ -141,7 +141,7 @@ spec:
         - relay-sender
         - port-forward
         - --bind
-        - "0.0.0.0:8080"
+        - "127.0.0.1:8080"
         - api-server:80
       envFrom:
         - configMapRef:
@@ -156,7 +156,7 @@ spec:
         - relay-sender
         - port-forward
         - --bind
-        - "0.0.0.0:5432"
+        - "127.0.0.1:5432"
         - db-server:5432
       envFrom:
         - configMapRef:
@@ -177,7 +177,7 @@ kubectl logs my-app -c aztunnel
 You should see:
 
 ```
-level=INFO msg="port-forward listening" bind=0.0.0.0:8080 target=remote-service:80
+level=INFO msg="port-forward listening" bind=127.0.0.1:8080 target=remote-service:80
 ```
 
 Test from the app container:

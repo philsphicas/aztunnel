@@ -33,7 +33,7 @@ from there to the target:
 Host jump
     HostName 10.0.0.5
     User admin
-    ProxyCommand aztunnel relay-sender connect --hyco my-tunnel %h:%p
+    ProxyCommand aztunnel relay-sender connect --relay my-relay-ns --hyco my-tunnel %h:%p
 
 Host target
     HostName 10.1.0.5
@@ -82,7 +82,7 @@ A complete `~/.ssh/config` for a multi-hop setup:
 # Jump host — reachable via aztunnel relay
 Host jump-*
     User admin
-    ProxyCommand aztunnel relay-sender connect %h:%p
+    ProxyCommand aztunnel relay-sender connect --relay my-relay-ns --hyco my-tunnel %h:%p
 
 # Targets behind the jump host
 Host internal-web

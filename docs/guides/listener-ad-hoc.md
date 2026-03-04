@@ -112,5 +112,5 @@ connections to any target. This is convenient for testing but should never
 be used in production:
 
 ```
-level=WARN msg="no allowlist configured, all targets are permitted"
+level=WARN msg="no allowlist configured, all targets will be permitted"
 ```

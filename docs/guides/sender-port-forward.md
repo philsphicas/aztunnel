@@ -132,13 +132,13 @@ aztunnel relay-sender port-forward --bind 127.0.0.1:5432 10.0.0.5:5432
 
 ## Common use cases
 
-| Target     | Command                                   | Then use                     |
-| ---------- | ----------------------------------------- | ---------------------------- |
-| PostgreSQL | `port-forward --bind :5432 10.0.0.5:5432` | `psql -h 127.0.0.1`          |
-| MySQL      | `port-forward --bind :3306 10.0.0.5:3306` | `mysql -h 127.0.0.1`         |
-| Redis      | `port-forward --bind :6379 10.0.0.5:6379` | `redis-cli`                  |
-| HTTP API   | `port-forward --bind :8080 10.0.0.5:8080` | `curl http://127.0.0.1:8080` |
-| SSH        | `port-forward --bind :2222 10.0.0.5:22`   | `ssh -p 2222 user@127.0.0.1` |
+| Target     | Command                                            | Then use                     |
+| ---------- | -------------------------------------------------- | ---------------------------- |
+| PostgreSQL | `port-forward --bind 127.0.0.1:5432 10.0.0.5:5432` | `psql -h 127.0.0.1`          |
+| MySQL      | `port-forward --bind 127.0.0.1:3306 10.0.0.5:3306` | `mysql -h 127.0.0.1`         |
+| Redis      | `port-forward --bind 127.0.0.1:6379 10.0.0.5:6379` | `redis-cli`                  |
+| HTTP API   | `port-forward --bind 127.0.0.1:8080 10.0.0.5:8080` | `curl http://127.0.0.1:8080` |
+| SSH        | `port-forward --bind 127.0.0.1:2222 10.0.0.5:22`   | `ssh -p 2222 user@127.0.0.1` |
 
 > For SSH, [ProxyCommand mode](sender-ssh-proxycommand.md) is usually more
 > convenient — it integrates directly with your SSH config.
