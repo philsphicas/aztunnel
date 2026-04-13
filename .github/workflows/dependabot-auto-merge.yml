@@ -24,7 +24,7 @@ jobs:
           steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
           (steps.metadata.outputs.update-type == 'version-update:semver-major' &&
            steps.metadata.outputs.package-ecosystem == 'github_actions')
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             await github.rest.pulls.createReview({
