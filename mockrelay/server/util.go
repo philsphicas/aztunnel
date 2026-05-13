@@ -1,0 +1,88 @@
+package server
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"net/url"
+	"strings"
+)
+
+// parseEntity extracts the entity from the *escaped* path of a
+// /$hc/<entity> request. Callers must pass r.URL.EscapedPath() (not
+// r.URL.Path) so that a name containing a percent-encoded '/' is
+// preserved verbatim rather than splitting at the decoded slash.
+// Empty entity is rejected.
+func parseEntity(escapedPath string) (string, error) {
+	const prefix = "/$hc/"
+	if !strings.HasPrefix(escapedPath, prefix) {
+		return "", fmt.Errorf("path %q does not start with %q", escapedPath, prefix)
+	}
+	rest := strings.TrimPrefix(escapedPath, prefix)
+	// Split on raw '/' on the wire — a '/' inside the entity name
+	// appears as %2F here and survives this split.
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	entity, err := url.PathUnescape(rest)
+	if err != nil {
+		return "", fmt.Errorf("decode entity: %w", err)
+	}
+	if entity == "" {
+		return "", fmt.Errorf("empty entity")
+	}
+	return entity, nil
+}
+
+// validatePublicURL checks that a configured PublicURL is absolute, has
+// a supported scheme, and includes a host.
+func validatePublicURL(s string) error {
+	u, err := url.Parse(s)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "ws", "wss":
+	default:
+		return fmt.Errorf("scheme %q not one of http, https, ws, wss", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("missing host")
+	}
+	return nil
+}
+
+// newRendezvousID returns a 128-bit cryptographically random ID encoded
+// as a 32-character lowercase hex string. Used for accept message IDs.
+// Note this is *not* RFC-4122 UUID formatting (no dashes), just an opaque
+// random identifier.
+func newRendezvousID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// redactURL strips sb-hc-token from a URL string before logging.
+func redactURL(s string) string {
+	const marker = "sb-hc-token="
+	const replacement = "REDACTED"
+	var out strings.Builder
+	out.Grow(len(s))
+	for {
+		i := strings.Index(s, marker)
+		if i < 0 {
+			out.WriteString(s)
+			return out.String()
+		}
+		out.WriteString(s[:i+len(marker)])
+		out.WriteString(replacement)
+		rest := s[i+len(marker):]
+		end := strings.IndexAny(rest, "& ")
+		if end < 0 {
+			return out.String()
+		}
+		s = rest[end:]
+	}
+}

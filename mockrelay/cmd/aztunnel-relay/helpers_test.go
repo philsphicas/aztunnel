@@ -1,0 +1,444 @@
+package main_test
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// Singleton-built binaries shared across all subprocess tests. Built
+// lazily on first use; subsequent callers reuse the same path. Go's
+// build cache makes the underlying go-build invocation fast even on
+// the first call when the workspace hasn't changed.
+var (
+	binsOnce    sync.Once
+	binsDir     string
+	aztunnelBin string
+	relayBin    string
+	binsErr     error
+)
+
+// TestMain runs the subprocess tests and removes the temp directory
+// holding the built binaries on exit. Each test run otherwise leaves
+// ~60 MiB behind in TMPDIR.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if binsDir != "" {
+		_ = os.RemoveAll(binsDir)
+	}
+	os.Exit(code)
+}
+
+// binaries returns paths to freshly-built aztunnel and aztunnel-relay
+// binaries. The first call performs the build; later calls return the
+// cached paths.
+func binaries(t *testing.T) (aztunnelPath, relayPath string) {
+	t.Helper()
+	binsOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "mockrelay-e2e-bin-")
+		if err != nil {
+			binsErr = err
+			return
+		}
+		binsDir = dir
+		aztunnelBin, binsErr = buildPkg(dir, "aztunnel", "github.com/philsphicas/aztunnel/cmd/aztunnel")
+		if binsErr != nil {
+			return
+		}
+		relayBin, binsErr = buildPkg(dir, "aztunnel-relay", ".")
+	})
+	if binsErr != nil {
+		t.Fatalf("build binaries: %v", binsErr)
+	}
+	return aztunnelBin, relayBin
+}
+
+func buildPkg(binDir, name, pkgPath string) (string, error) {
+	exe := filepath.Join(binDir, name)
+	cmd := exec.Command("go", "build", "-o", exe, pkgPath) //nolint:gosec // test-only build of in-tree packages
+	cmd.Env = os.Environ()
+	var out bytes.Buffer
+	cmd.Stderr = &out
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("go build %s: %w\n%s", pkgPath, err, out.String())
+	}
+	return exe, nil
+}
+
+// relayProc is a running aztunnel-relay subprocess.
+type relayProc struct {
+	cmd      *exec.Cmd
+	addr     string // 127.0.0.1:PORT
+	relayURL string // ws://127.0.0.1:PORT (plain HTTP)
+	out      *lockedBuffer
+}
+
+// clientProc is a running aztunnel client subprocess (listener or
+// sender). Output is captured into out (combined stderr+stdout).
+type clientProc struct {
+	cmd *exec.Cmd
+	out *lockedBuffer
+}
+
+// startRelay starts an aztunnel-relay process on a free 127.0.0.1 port
+// with plain HTTP, waits for it to accept TCP, and registers cleanup.
+// extraArgs are appended after the default flags.
+func startRelay(t *testing.T, ctx context.Context, extraArgs ...string) *relayProc {
+	t.Helper()
+	_, relay := binaries(t)
+
+	port := pickFreePort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	args := append([]string{
+		"--bind", addr,
+		"--log-level", "warn",
+		"--rendezvous-timeout", "10s",
+	}, extraArgs...)
+
+	cmd := exec.CommandContext(ctx, relay, args...) //nolint:gosec // test-only paths
+	out := &lockedBuffer{}
+	cmd.Stderr = out
+	cmd.Stdout = out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+
+	proc := &relayProc{
+		cmd:      cmd,
+		addr:     addr,
+		relayURL: "ws://" + addr,
+		out:      out,
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("relay output:\n%s", out.String())
+		}
+	})
+
+	waitForTCP(t, addr, 5*time.Second)
+	return proc
+}
+
+// startListener starts `aztunnel relay-listener` against the given
+// relay and entity, using --relay-auth=none. extraArgs are appended.
+func startListener(t *testing.T, ctx context.Context, relayURL, entity string, extraArgs ...string) *clientProc {
+	t.Helper()
+	aztunnel, _ := binaries(t)
+
+	args := append([]string{
+		"relay-listener",
+		"--relay", relayURL,
+		"--hyco", entity,
+		"--relay-auth=none",
+		"--log-level", "info",
+	}, extraArgs...)
+	return startClient(t, ctx, aztunnel, "listener", args)
+}
+
+// startPortForwardSender starts `aztunnel relay-sender port-forward`
+// bound to bindAddr, forwarding to target.
+func startPortForwardSender(t *testing.T, ctx context.Context, relayURL, entity, bindAddr, target string, extraArgs ...string) *clientProc {
+	t.Helper()
+	aztunnel, _ := binaries(t)
+
+	args := append([]string{
+		"relay-sender", "port-forward",
+		"--relay", relayURL,
+		"--hyco", entity,
+		"--relay-auth=none",
+		"--bind", bindAddr,
+		"--log-level", "info",
+	}, extraArgs...)
+	args = append(args, target)
+	return startClient(t, ctx, aztunnel, "port-forward", args)
+}
+
+// startSOCKS5Sender starts `aztunnel relay-sender socks5-proxy` bound
+// to bindAddr.
+func startSOCKS5Sender(t *testing.T, ctx context.Context, relayURL, entity, bindAddr string, extraArgs ...string) *clientProc {
+	t.Helper()
+	aztunnel, _ := binaries(t)
+
+	args := append([]string{
+		"relay-sender", "socks5-proxy",
+		"--relay", relayURL,
+		"--hyco", entity,
+		"--relay-auth=none",
+		"--bind", bindAddr,
+		"--log-level", "info",
+	}, extraArgs...)
+	return startClient(t, ctx, aztunnel, "socks5", args)
+}
+
+// startConnectSender starts `aztunnel relay-sender connect <target>`
+// and wires up stdin/stdout pipes. Stderr is captured into the proc's
+// log buffer. The caller is responsible for closing stdin when done
+// writing.
+func startConnectSender(t *testing.T, ctx context.Context, relayURL, entity, target string) (*clientProc, io.WriteCloser, io.ReadCloser) {
+	t.Helper()
+	aztunnel, _ := binaries(t)
+
+	args := []string{
+		"relay-sender", "connect",
+		"--relay", relayURL,
+		"--hyco", entity,
+		"--relay-auth=none",
+		"--log-level", "info",
+		target,
+	}
+	cmd := exec.CommandContext(ctx, aztunnel, args...) //nolint:gosec // test-only paths
+	cmd.Env = os.Environ()
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("connect stdin pipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("connect stdout pipe: %v", err)
+	}
+	out := &lockedBuffer{}
+	cmd.Stderr = out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start connect: %v", err)
+	}
+	proc := &clientProc{cmd: cmd, out: out}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("connect output:\n%s", out.String())
+		}
+	})
+	return proc, stdin, stdout
+}
+
+// startClient is the common subprocess setup for listener/port-forward/
+// socks5 clients. Stderr+stdout are merged into a lockedBuffer.
+func startClient(t *testing.T, ctx context.Context, binary, label string, args []string) *clientProc {
+	t.Helper()
+	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // test-only paths
+	cmd.Env = os.Environ()
+	out := &lockedBuffer{}
+	cmd.Stderr = out
+	cmd.Stdout = out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s: %v", label, err)
+	}
+	proc := &clientProc{cmd: cmd, out: out}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(os.Interrupt)
+		_ = cmd.Wait()
+		if t.Failed() {
+			t.Logf("%s output:\n%s", label, out.String())
+		}
+	})
+	return proc
+}
+
+// stopAndWait sends SIGINT and waits for the process to exit. Used
+// when a test needs deterministic teardown earlier than t.Cleanup.
+func (p *clientProc) stopAndWait() {
+	_ = p.cmd.Process.Signal(os.Interrupt)
+	_ = p.cmd.Wait()
+}
+
+// waitForLog blocks until substr appears in the captured output or
+// timeout elapses, polling at 50ms.
+func waitForLog(t *testing.T, p *clientProc, substr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(p.out.String(), substr) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for log %q\n--- output ---\n%s", substr, p.out.String())
+}
+
+// dialSOCKS5 performs a SOCKS5 no-auth CONNECT to target via proxyAddr
+// and returns the established connection. Mirrors the implementation
+// from e2e/helpers_test.go in spirit.
+func dialSOCKS5(t *testing.T, proxyAddr, target string) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", proxyAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial socks5 proxy: %v", err)
+	}
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		_ = conn.Close()
+		t.Fatalf("parse target: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil || port <= 0 || port > 65535 {
+		_ = conn.Close()
+		t.Fatalf("parse port %q: invalid", portStr)
+	}
+
+	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		_ = conn.Close()
+		t.Fatalf("socks5 auth write: %v", err)
+	}
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		_ = conn.Close()
+		t.Fatalf("socks5 auth response: %v", err)
+	}
+	if resp[0] != 0x05 || resp[1] != 0x00 {
+		_ = conn.Close()
+		t.Fatalf("socks5 auth: unexpected %v", resp)
+	}
+
+	req := []byte{0x05, 0x01, 0x00}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			req = append(req, 0x01)
+			req = append(req, ip4...)
+		} else {
+			req = append(req, 0x04)
+			req = append(req, ip...)
+		}
+	} else {
+		req = append(req, 0x03, byte(len(host)))
+		req = append(req, []byte(host)...)
+	}
+	req = append(req, byte(port>>8), byte(port&0xff))
+	if _, err := conn.Write(req); err != nil {
+		_ = conn.Close()
+		t.Fatalf("socks5 connect write: %v", err)
+	}
+	hdr := make([]byte, 4)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		_ = conn.Close()
+		t.Fatalf("socks5 connect header: %v", err)
+	}
+	if hdr[1] != 0x00 {
+		_ = conn.Close()
+		t.Fatalf("socks5 connect rejected: code=0x%02x", hdr[1])
+	}
+	switch hdr[3] {
+	case 0x01:
+		_, _ = io.ReadFull(conn, make([]byte, 4+2))
+	case 0x04:
+		_, _ = io.ReadFull(conn, make([]byte, 16+2))
+	case 0x03:
+		lenBuf := make([]byte, 1)
+		if _, err := io.ReadFull(conn, lenBuf); err != nil {
+			_ = conn.Close()
+			t.Fatalf("socks5 read domain len: %v", err)
+		}
+		_, _ = io.ReadFull(conn, make([]byte, int(lenBuf[0])+2))
+	default:
+		_ = conn.Close()
+		t.Fatalf("socks5 unknown atyp: 0x%02x", hdr[3])
+	}
+	return conn
+}
+
+func pickFreePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pick port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+func waitForTCP(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s to accept TCP", addr)
+}
+
+func dialWithRetry(addr string, timeout time.Duration) (net.Conn, error) {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			return c, nil
+		}
+		lastErr = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	if lastErr == nil {
+		lastErr = errors.New("timeout")
+	}
+	return nil, lastErr
+}
+
+func runEcho(ctx context.Context, ln net.Listener) {
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close() //nolint:errcheck
+			_, _ = io.Copy(c, c)
+		}(c)
+	}
+}
+
+// startEcho runs a local TCP echo server bound to 127.0.0.1:0,
+// stopping when ctx is canceled. Returns the listen address.
+func startEcho(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	go runEcho(ctx, ln)
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().String()
+}
+
+// lockedBuffer is a thread-safe bytes.Buffer for capturing subprocess
+// stderr/stdout from multiple goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return strings.TrimSpace(b.buf.String())
+}
