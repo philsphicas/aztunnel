@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"net"
 	"net/url"
 	"strings"
 )
@@ -8,38 +9,98 @@ import (
 // DefaultRelaySuffix is the Azure Relay namespace suffix for the public cloud.
 const DefaultRelaySuffix = ".servicebus.windows.net"
 
-// ParseRelayEndpoint normalizes a relay input to a bare FQDN.
+// SchemeWSS is the secure WebSocket scheme used by real Azure Relay.
+const SchemeWSS = "wss"
+
+// SchemeWS is the insecure WebSocket scheme, useful for mock/self-hosted relays.
+const SchemeWS = "ws"
+
+// ParseRelay normalizes a relay input to (host[:port], scheme).
 //
 // Accepted input formats:
-//   - Bare namespace name: "my-relay" → "my-relay" + defaultSuffix
-//   - FQDN: "my-relay.servicebus.windows.net" → used as-is
-//   - URI with scheme: "sb://my-relay.servicebus.windows.net" → host extracted
-//   - URI with port: "https://my-relay.servicebus.windows.net:443/" → host extracted
+//   - Bare namespace name: "my-relay" → "my-relay" + defaultSuffix, scheme=wss
+//   - FQDN: "my-relay.servicebus.windows.net" → used as-is, scheme=wss
+//   - Bare host:port: "localhost:8080" → used as-is (no suffix), scheme=wss
+//   - URI with scheme: "sb://my-relay" → host extracted, suffix applied if bare, scheme=wss
+//   - URI with scheme + FQDN: "wss://my-relay.servicebus.windows.net" → scheme=wss
+//   - URI with insecure scheme: "ws://localhost:8080" or "http://..." → scheme=ws
+//   - URI with port: "https://relay.example.com:8443/" → port preserved, scheme=wss
 //
-// Detection: if input contains "://", parse as URL and extract host.
-// If input contains ".", treat as FQDN. Otherwise append defaultSuffix.
-// Returns "" for empty input or malformed URIs; callers should validate the result.
-func ParseRelayEndpoint(input, defaultSuffix string) string {
+// The scheme is derived from URI form: "http"/"ws" → "ws", anything else
+// ("https"/"wss"/"sb"/"") → "wss". For bare inputs the default is "wss".
+//
+// Suffix is appended only to bare hostnames with no dot AND no colon (port).
+//
+// Default ports are stripped (443 for wss/https, 80 for ws/http) so the
+// returned host matches the canonical form Azure Relay's SAS audience
+// validation expects (a SAS token signed for "https://host/entity" must
+// not include the default port).
+//
+// Returns "" for endpoint and scheme on empty input or malformed URIs.
+// Callers should validate the result.
+func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
 	input = strings.TrimSpace(input)
 	if input == "" {
-		return ""
+		return "", ""
 	}
 
 	if strings.Contains(input, "://") {
 		u, err := url.Parse(input)
-		if err != nil || u.Hostname() == "" {
-			return ""
+		if err != nil || u.Host == "" {
+			return "", ""
 		}
-		host := u.Hostname()
-		if strings.Contains(host, ".") {
-			return host
+		scheme = SchemeWSS
+		switch strings.ToLower(u.Scheme) {
+		case "http", "ws":
+			scheme = SchemeWS
 		}
-		return host + defaultSuffix
+		host := u.Host
+		// Apply suffix only to bare hostnames (no dot, no colon). This is
+		// decided BEFORE stripping default ports so an explicit URL like
+		// "http://localhost:80/" is not treated as a bare name after the
+		// port is stripped.
+		if !strings.ContainsAny(host, ".:") {
+			host += defaultSuffix
+		}
+		host = stripDefaultPort(host, scheme)
+		return host, scheme
 	}
 
-	if strings.Contains(input, ".") {
-		return input
+	// Bare form: suffix applies only if no dot AND no colon (port).
+	if strings.ContainsAny(input, ".:") {
+		return input, SchemeWSS
 	}
+	return input + defaultSuffix, SchemeWSS
+}
 
-	return input + defaultSuffix
+// stripDefaultPort removes the default port for the given scheme from
+// host (443 for wss, 80 for ws). Returns host unchanged if the port is
+// absent or non-default. Preserves IPv6 bracket form.
+func stripDefaultPort(host, scheme string) string {
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
+	}
+	defaultPort := ""
+	switch scheme {
+	case SchemeWSS:
+		defaultPort = "443"
+	case SchemeWS:
+		defaultPort = "80"
+	}
+	if defaultPort == "" || p != defaultPort {
+		return host
+	}
+	// Re-bracket IPv6 literals (SplitHostPort strips the brackets).
+	if strings.Contains(h, ":") {
+		return "[" + h + "]"
+	}
+	return h
+}
+
+// ParseRelayEndpoint is the host-only equivalent of ParseRelay, retained
+// for backward compatibility with code that does not need the scheme.
+func ParseRelayEndpoint(input, defaultSuffix string) string {
+	endpoint, _ := ParseRelay(input, defaultSuffix)
+	return endpoint
 }

@@ -23,7 +23,9 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	endpoint, tp, err := resolveAuth(s.Relay, s.Namespace, s.RelaySuffix)
+	logger := newLogger(globals.LogLevel)
+
+	endpoint, opts, tp, err := resolveAuth(s.AuthFlags, logger)
 	if err != nil {
 		return err
 	}
@@ -39,22 +41,22 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 		}
 		bind = "0.0.0.0:" + port
 	}
-	logger := newLogger(globals.LogLevel)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	cfg := sender.SOCKS5Config{
-		Endpoint:     endpoint,
-		EntityPath:   hyco,
-		BindAddress:  bind,
-		TCPKeepAlive: s.TCPKeepAlive,
-		Logger:       logger,
+		Endpoint:      endpoint,
+		EntityPath:    hyco,
+		TokenProvider: tp,
+		ClientOptions: opts,
+		BindAddress:   bind,
+		TCPKeepAlive:  s.TCPKeepAlive,
+		Logger:        logger,
 	}
 	if cfg.Metrics, err = resolveMetrics(ctx, globals.MetricsAddr, globals.MetricsMaxTargets, logger); err != nil {
 		return err
 	}
-	cfg.TokenProvider = tp
 
 	return sender.SOCKS5Proxy(ctx, cfg)
 }

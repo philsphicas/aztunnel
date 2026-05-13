@@ -38,10 +38,12 @@ func (v VersionFlag) BeforeApply(app *kong.Kong) error {
 
 // AuthFlags holds Azure Relay authentication flags shared across relay commands.
 type AuthFlags struct {
-	Relay       string `help:"Azure Relay namespace name, FQDN, or URI."`
-	Namespace   string `name:"namespace" help:"Azure Relay namespace name (alias for --relay)." hidden:""`
-	Hyco        string `help:"Hybrid connection name."`
-	RelaySuffix string `name:"relay-suffix" help:"Namespace suffix for sovereign clouds." default:""`
+	Relay            string `help:"Azure Relay namespace name, FQDN, or URI (e.g. wss://host:port). Port present → suffix not appended."`
+	Namespace        string `name:"namespace" help:"Azure Relay namespace name (alias for --relay)." hidden:""`
+	Hyco             string `help:"Hybrid connection name."`
+	RelaySuffix      string `name:"relay-suffix" help:"Namespace suffix for sovereign clouds." default:""`
+	RelayAuth        string `name:"relay-auth" help:"Auth method: auto (default), none, sas, entra." enum:"auto,none,sas,entra" default:"auto" env:"AZTUNNEL_RELAY_AUTH"`
+	RelayInsecureTLS bool   `name:"relay-insecure-tls" help:"Skip TLS certificate verification (mock/self-hosted only)."`
 }
 
 // BindFlags holds local bind flags shared across port-forward and socks5 commands.

@@ -37,6 +37,10 @@ type ControlConfig struct {
 	MaxConnections int // 0 = unlimited
 	DialTimeout    time.Duration
 	Logger         *slog.Logger
+	// Options controls transport (scheme, TLS) for the control channel
+	// dial and the listener's outbound rendezvous dial. The zero value
+	// is real-Azure-compatible (wss + http.DefaultClient).
+	Options ClientOptions
 	// OnConnect is called when the control channel connects. Optional.
 	OnConnect func()
 	// OnDisconnect is called when the control channel disconnects. Optional.
@@ -89,13 +93,13 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 		return false, fmt.Errorf("get token: %w", err)
 	}
 
-	wssBase := EndpointToWSS(cfg.Endpoint)
+	wssBase := cfg.Options.wssBase(cfg.Endpoint)
 	listenURL := fmt.Sprintf("%s/$hc/%s?sb-hc-action=listen&sb-hc-token=%s",
 		wssBase, url.PathEscape(cfg.EntityPath), url.QueryEscape(token))
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer dialCancel()
-	ws, _, err := websocket.Dial(dialCtx, listenURL, nil)
+	ws, _, err := websocket.Dial(dialCtx, listenURL, cfg.Options.dialOptions())
 	if err != nil {
 		return false, fmt.Errorf("dial control: %w", sanitizeErr(err))
 	}
@@ -170,7 +174,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 func handleAccept(ctx context.Context, addr string, cfg ControlConfig) error {
 	dialCtx, dialCancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer dialCancel()
-	ws, _, err := websocket.Dial(dialCtx, addr, nil)
+	ws, _, err := websocket.Dial(dialCtx, addr, cfg.Options.dialOptions())
 	if err != nil {
 		return fmt.Errorf("dial rendezvous: %w", sanitizeErr(err))
 	}

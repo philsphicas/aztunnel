@@ -14,6 +14,7 @@ type ConnectConfig struct {
 	Endpoint      string
 	EntityPath    string
 	TokenProvider relay.TokenProvider
+	ClientOptions relay.ClientOptions
 	Target        string // host:port
 	Stdin         io.ReadCloser
 	Stdout        io.WriteCloser
@@ -29,7 +30,7 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 		cfg.Logger = slog.Default()
 	}
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.Logger)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", cfg.Logger)
 	if err != nil {
 		return err
 	}

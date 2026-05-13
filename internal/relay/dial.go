@@ -22,20 +22,19 @@ const (
 
 // Dial connects to the Azure Relay as a sender, establishing a rendezvous
 // WebSocket connection that will be paired with a listener.
-func Dial(ctx context.Context, endpoint, entityPath string, tp TokenProvider) (*websocket.Conn, error) {
+func Dial(ctx context.Context, endpoint, entityPath string, tp TokenProvider, opts ClientOptions) (*websocket.Conn, error) {
 	resURI := ResourceURI(endpoint, entityPath)
 	token, err := tp.GetToken(ctx, resURI)
 	if err != nil {
 		return nil, fmt.Errorf("get token: %w", err)
 	}
 
-	wssBase := EndpointToWSS(endpoint)
 	connectURL := fmt.Sprintf("%s/$hc/%s?sb-hc-action=connect&sb-hc-token=%s",
-		wssBase, url.PathEscape(entityPath), url.QueryEscape(token))
+		opts.wssBase(endpoint), url.PathEscape(entityPath), url.QueryEscape(token))
 
 	dialCtx, cancel := context.WithTimeout(ctx, defaultDialTimeout)
 	defer cancel()
-	ws, _, err := websocket.Dial(dialCtx, connectURL, nil)
+	ws, _, err := websocket.Dial(dialCtx, connectURL, opts.dialOptions())
 	if err != nil {
 		return nil, fmt.Errorf("dial relay: %w", sanitizeErr(err))
 	}
@@ -50,7 +49,7 @@ func IsRetryableStatus(code int) bool {
 
 // DialWithRetry is like Dial but retries on transient HTTP 404/503 errors
 // (no active listener) with exponential backoff until ctx expires.
-func DialWithRetry(ctx context.Context, endpoint, entityPath string, tp TokenProvider, logger *slog.Logger) (*websocket.Conn, error) {
+func DialWithRetry(ctx context.Context, endpoint, entityPath string, tp TokenProvider, opts ClientOptions, logger *slog.Logger) (*websocket.Conn, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -65,12 +64,11 @@ func DialWithRetry(ctx context.Context, endpoint, entityPath string, tp TokenPro
 			return nil, fmt.Errorf("get token: %w", err)
 		}
 
-		wssBase := EndpointToWSS(endpoint)
 		connectURL := fmt.Sprintf("%s/$hc/%s?sb-hc-action=connect&sb-hc-token=%s",
-			wssBase, url.PathEscape(entityPath), url.QueryEscape(token))
+			opts.wssBase(endpoint), url.PathEscape(entityPath), url.QueryEscape(token))
 
 		dialCtx, cancel := context.WithTimeout(ctx, defaultDialTimeout)
-		ws, resp, dialErr := websocket.Dial(dialCtx, connectURL, nil)
+		ws, resp, dialErr := websocket.Dial(dialCtx, connectURL, opts.dialOptions())
 		cancel()
 
 		if dialErr == nil {
@@ -98,6 +96,6 @@ func DialWithRetry(ctx context.Context, endpoint, entityPath string, tp TokenPro
 
 // DialWithLogger is like Dial but logs the connection attempt and retries
 // on transient 404/503 errors.
-func DialWithLogger(ctx context.Context, endpoint, entityPath string, tp TokenProvider, logger *slog.Logger) (*websocket.Conn, error) {
-	return DialWithRetry(ctx, endpoint, entityPath, tp, logger)
+func DialWithLogger(ctx context.Context, endpoint, entityPath string, tp TokenProvider, opts ClientOptions, logger *slog.Logger) (*websocket.Conn, error) {
+	return DialWithRetry(ctx, endpoint, entityPath, tp, opts, logger)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -82,51 +83,99 @@ func resolveHyco(hycoFlag string) (string, error) {
 	return "", fmt.Errorf("hybrid connection name is required: use --hyco or set AZTUNNEL_HYCO_NAME")
 }
 
-// resolveAuth determines the endpoint and token provider from flags and
-// environment variables.
+// resolveAuth determines the endpoint, transport options, and token
+// provider from flags and environment variables.
 //
-// Resolution order for namespace:
-//  1. relay flag (or hidden namespace alias)
-//  2. AZTUNNEL_RELAY_NAME env var
+// Endpoint precedence: --relay > AZTUNNEL_RELAY_NAME (env). The hidden
+// --namespace alias is honored as a synonym for --relay.
 //
-// Resolution order for auth:
-//  1. AZTUNNEL_KEY_NAME + AZTUNNEL_KEY → SAS auth (explicit override)
-//  2. Otherwise → Entra ID auth via DefaultAzureCredential (default)
-func resolveAuth(relayFlag, namespaceAlias, suffixFlag string) (endpoint string, tp relay.TokenProvider, err error) {
-	ns := relayFlag
+// Suffix precedence: --relay-suffix > AZTUNNEL_RELAY_SUFFIX (env) >
+// DefaultRelaySuffix. Suffix is only applied to bare hostnames with no
+// dot AND no colon (port). Inputs that include a port — typical for
+// mock/self-hosted relays — are used verbatim.
+//
+// Transport scheme is derived from the --relay value: URL form
+// (ws://, http://) → ws; URL form with https/wss/sb or bare host →
+// wss. --relay-insecure-tls (or AZTUNNEL_RELAY_INSECURE_TLS=1) skips
+// TLS verification when scheme is wss.
+//
+// Auth precedence for --relay-auth: CLI flag > AZTUNNEL_RELAY_AUTH (env,
+// bound by kong) > "auto" default. Modes:
+//   - auto: SAS env vars (AZTUNNEL_KEY_NAME + AZTUNNEL_KEY) → SAS;
+//     otherwise → Entra via DefaultAzureCredential. This is the
+//     historical default.
+//   - none: NoOpTokenProvider (server must not validate tokens).
+//   - sas: require AZTUNNEL_KEY_NAME and AZTUNNEL_KEY.
+//   - entra: force Entra; fail if credentials are unavailable.
+func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, err error) {
+	ns := af.Relay
 	if ns == "" {
-		ns = namespaceAlias
+		ns = af.Namespace
 	}
 	if ns == "" {
 		ns = os.Getenv("AZTUNNEL_RELAY_NAME")
 	}
 	if ns == "" {
-		return "", nil, fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
 	}
-	suffix := suffixFlag
+	suffix := af.RelaySuffix
 	if suffix == "" {
 		suffix = os.Getenv("AZTUNNEL_RELAY_SUFFIX")
 	}
 	if suffix == "" {
 		suffix = relay.DefaultRelaySuffix
 	}
-	endpoint = relay.ParseRelayEndpoint(ns, suffix)
-	if endpoint == "" {
-		return "", nil, fmt.Errorf("invalid relay endpoint: %q", ns)
+
+	host, scheme := relay.ParseRelay(ns, suffix)
+	if host == "" {
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("invalid relay endpoint: %q", ns)
+	}
+	endpoint = host
+	opts.Scheme = scheme
+
+	if af.RelayInsecureTLS || os.Getenv("AZTUNNEL_RELAY_INSECURE_TLS") == "1" {
+		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in by user for mock/self-hosted
+		logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
+	}
+
+	mode := strings.ToLower(af.RelayAuth)
+	if mode == "" {
+		// Defense in depth: kong's env: tag and default:"auto" already
+		// guarantee a non-empty value here, but fall back if the field
+		// is cleared programmatically (e.g. by a test).
+		mode = "auto"
 	}
 
 	keyName := os.Getenv("AZTUNNEL_KEY_NAME")
 	key := os.Getenv("AZTUNNEL_KEY")
 
-	if keyName != "" && key != "" {
-		return endpoint, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
+	switch mode {
+	case "none":
+		logger.Warn("relay auth disabled (--relay-auth=none) — do NOT use against production Azure Relay")
+		return endpoint, opts, relay.NoOpTokenProvider{}, nil
+	case "sas":
+		if keyName == "" || key == "" {
+			return "", relay.ClientOptions{}, nil, fmt.Errorf("--relay-auth=sas requires AZTUNNEL_KEY_NAME and AZTUNNEL_KEY")
+		}
+		return endpoint, opts, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
+	case "entra":
+		entra, err := relay.NewEntraTokenProvider()
+		if err != nil {
+			return "", relay.ClientOptions{}, nil, fmt.Errorf("--relay-auth=entra: %w", err)
+		}
+		return endpoint, opts, entra, nil
+	case "auto":
+		if keyName != "" && key != "" {
+			return endpoint, opts, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
+		}
+		entra, err := relay.NewEntraTokenProvider()
+		if err != nil {
+			return "", relay.ClientOptions{}, nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
+		}
+		return endpoint, opts, entra, nil
+	default:
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("unknown --relay-auth value: %q (want auto, none, sas, or entra)", mode)
 	}
-
-	entra, err := relay.NewEntraTokenProvider()
-	if err != nil {
-		return "", nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
-	}
-	return endpoint, entra, nil
 }
 
 // resolveResourceID returns the resource ID from flag or AZTUNNEL_ARC_RESOURCE_ID env var.
