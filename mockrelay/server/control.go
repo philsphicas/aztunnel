@@ -166,6 +166,7 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 			s.log.Debug("listener renewed token", "entity", entity)
 			continue
 		}
+		s.log.Debug("listener sent unrecognized control message", "entity", entity, "len", len(data))
 	}
 }
 
