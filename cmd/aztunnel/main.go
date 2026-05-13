@@ -108,6 +108,9 @@ func resolveHyco(hycoFlag string) (string, error) {
 //   - sas: require AZTUNNEL_KEY_NAME and AZTUNNEL_KEY.
 //   - entra: force Entra; fail if credentials are unavailable.
 func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, err error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	ns := af.Relay
 	if ns == "" {
 		ns = af.Namespace
@@ -134,8 +137,16 @@ func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay
 	opts.Scheme = scheme
 
 	if af.RelayInsecureTLS || os.Getenv("AZTUNNEL_RELAY_INSECURE_TLS") == "1" {
-		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in by user for mock/self-hosted
-		logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
+		// Only meaningful for wss: plain ws:// doesn't do TLS at all,
+		// so attaching a TLSConfig is a no-op and the warning would be
+		// misleading.
+		if opts.Scheme == relay.SchemeWSS {
+			opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in by user for mock/self-hosted
+			logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
+		} else {
+			logger.Debug("ignoring --relay-insecure-tls because scheme is not wss",
+				"scheme", opts.Scheme)
+		}
 	}
 
 	mode := strings.ToLower(af.RelayAuth)

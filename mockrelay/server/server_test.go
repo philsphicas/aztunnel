@@ -414,6 +414,20 @@ func TestServe_RejectsEmptyTLSCertFile(t *testing.T) {
 	}
 }
 
+func TestServe_RejectsNilListener(t *testing.T) {
+	s, err := NewServer(Config{})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	err = s.Serve(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("Serve(nil listener) returned nil error; want non-nil")
+	}
+	if !strings.Contains(err.Error(), "listener") {
+		t.Errorf("error %q does not mention listener", err.Error())
+	}
+}
+
 func TestHandler_EntityWithSlash(t *testing.T) {
 	// Encoded slashes in the entity path must survive routing and reach
 	// parseEntity intact. A `with%2Fslash` entity should produce a 400

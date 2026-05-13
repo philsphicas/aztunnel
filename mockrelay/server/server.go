@@ -133,6 +133,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener, tlsOpts *TLSOptions
 			return fmt.Errorf("TLSOptions.CertFile and TLSOptions.KeyFile must both be set; use LoadTLSFromFiles or SelfSignedTLS")
 		}
 	}
+	if ln == nil {
+		return fmt.Errorf("Serve: listener must not be nil")
+	}
 	srv := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 30 * time.Second,

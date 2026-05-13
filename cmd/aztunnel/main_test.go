@@ -313,6 +313,42 @@ func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
 	}
 }
 
+func TestResolveAuth_InsecureTLSIgnoredForWS(t *testing.T) {
+	t.Setenv("AZTUNNEL_RELAY_INSECURE_TLS", "")
+	t.Setenv("AZTUNNEL_KEY_NAME", "")
+	t.Setenv("AZTUNNEL_KEY", "")
+
+	_, opts, _, err := resolveAuth(AuthFlags{
+		Relay:            "ws://localhost:8080",
+		RelayAuth:        "none",
+		RelayInsecureTLS: true,
+	}, discardLogger())
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if opts.Scheme != relay.SchemeWS {
+		t.Fatalf("scheme = %q, want ws (precondition)", opts.Scheme)
+	}
+	if opts.TLSConfig != nil {
+		t.Error("expected nil TLSConfig for ws scheme (insecure-tls is a no-op)")
+	}
+}
+
+func TestResolveAuth_NilLoggerDoesNotPanic(t *testing.T) {
+	t.Setenv("AZTUNNEL_KEY_NAME", "")
+	t.Setenv("AZTUNNEL_KEY", "")
+	// resolveAuth must internally default a nil logger to slog.Default().
+	// The --relay-auth=none branch logs a warning, so this exercises a
+	// real *slog.Logger call site.
+	_, _, _, err := resolveAuth(AuthFlags{
+		Relay:     "localhost:8080",
+		RelayAuth: "none",
+	}, nil)
+	if err != nil {
+		t.Fatalf("resolveAuth(nil logger): %v", err)
+	}
+}
+
 func TestResolveAuth_AuthModeSAS_MissingCreds(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY", "")

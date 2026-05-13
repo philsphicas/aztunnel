@@ -41,6 +41,11 @@ func TestParseRelayEndpoint(t *testing.T) {
 		{"bare ipv6 ::1", "::1", DefaultRelaySuffix, "[::1]"},
 		{"bare ipv6 2001:db8::1", "2001:db8::1", DefaultRelaySuffix, "[2001:db8::1]"},
 		{"bare ipv4 unchanged", "127.0.0.1", DefaultRelaySuffix, "127.0.0.1"},
+		// Default port stripped on bare host:port too (implicit wss).
+		// Matters for SAS audience canonicalization: a token signed
+		// for "https://host/entity" must not include the default port.
+		{"bare host:443 default port stripped", "host:443", DefaultRelaySuffix, "host"},
+		{"bare ipv4:443 default port stripped", "127.0.0.1:443", DefaultRelaySuffix, "127.0.0.1"},
 		// Invalid ports must be rejected — url.Parse rejects non-numeric
 		// ports for URI inputs, but empty / zero / out-of-range numerics
 		// pass and would later fail at dial time with a worse error.
@@ -90,6 +95,9 @@ func TestParseRelay(t *testing.T) {
 		{"ipv6 default port stripped", "wss://[::1]:443/", DefaultRelaySuffix, "[::1]", SchemeWSS},
 		{"empty → empty", "", DefaultRelaySuffix, "", ""},
 		{"malformed → empty", "://nope", DefaultRelaySuffix, "", ""},
+		// Default port stripped on bare host:port too (implicit wss).
+		{"bare host:443 stripped", "host:443", DefaultRelaySuffix, "host", SchemeWSS},
+		{"bare ipv4:443 stripped", "127.0.0.1:443", DefaultRelaySuffix, "127.0.0.1", SchemeWSS},
 		// Invalid ports / userinfo: same expectations as ParseRelayEndpoint.
 		{"url trailing colon → empty", "https://host:", DefaultRelaySuffix, "", ""},
 		{"url port zero → empty", "https://host:0", DefaultRelaySuffix, "", ""},

@@ -107,7 +107,10 @@ func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
 				return "", ""
 			}
 		}
-		return input, SchemeWSS
+		// Strip default port (443 for the implicit wss scheme) so the
+		// returned host matches the URL-form behaviour and the SAS
+		// audience canonicalisation. E.g. "host:443" → "host".
+		return stripDefaultPort(input, SchemeWSS), SchemeWSS
 	}
 	return input + defaultSuffix, SchemeWSS
 }
