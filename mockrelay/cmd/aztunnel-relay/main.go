@@ -8,8 +8,8 @@
 //   - Self-hosted alternative to Azure Relay for air-gapped or
 //     cost-constrained environments.
 //
-// See docs/guides/self-hosted-relay.md for deployment notes and the
-// security model (v1 has no token validation).
+// See mockrelay/README.md for deployment notes, flag reference, and
+// the security model (v1 has no token validation).
 package main
 
 import (

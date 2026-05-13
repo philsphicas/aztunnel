@@ -36,6 +36,11 @@ func TestParseRelayEndpoint(t *testing.T) {
 		{"ws:// default port stripped", "ws://localhost:80/", DefaultRelaySuffix, "localhost"},
 		{"ipv6 bracketed url", "ws://[::1]:9000/", DefaultRelaySuffix, "[::1]:9000"},
 		{"ipv6 bracketed default port", "wss://[::1]:443/", DefaultRelaySuffix, "[::1]"},
+		// Bare IPv6 literals must be bracketed so they can be embedded
+		// in a URL host. IPv4 literals pass through.
+		{"bare ipv6 ::1", "::1", DefaultRelaySuffix, "[::1]"},
+		{"bare ipv6 2001:db8::1", "2001:db8::1", DefaultRelaySuffix, "[2001:db8::1]"},
+		{"bare ipv4 unchanged", "127.0.0.1", DefaultRelaySuffix, "127.0.0.1"},
 	}
 
 	for _, tt := range tests {

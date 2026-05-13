@@ -35,7 +35,9 @@ func parseEntity(escapedPath string) (string, error) {
 }
 
 // validatePublicURL checks that a configured PublicURL is absolute, has
-// a supported scheme, and includes a host.
+// a supported scheme, and includes a host. It also rejects URLs with a
+// non-trivial path, query, or fragment, since rendezvousURL only honors
+// the scheme+host pair and would silently drop a configured base path.
 func validatePublicURL(s string) error {
 	u, err := url.Parse(s)
 	if err != nil {
@@ -48,6 +50,18 @@ func validatePublicURL(s string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("missing host")
+	}
+	// Empty or single-slash paths are normal artifacts of url.Parse on
+	// "https://host" vs "https://host/"; anything else would be silently
+	// dropped by publicSchemeHost, which is worse than failing fast.
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("path %q not supported in PublicURL (only scheme+host are honored)", u.Path)
+	}
+	if u.RawQuery != "" {
+		return fmt.Errorf("query string not supported in PublicURL")
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("fragment not supported in PublicURL")
 	}
 	return nil
 }

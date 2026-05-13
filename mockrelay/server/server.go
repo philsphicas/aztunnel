@@ -31,8 +31,11 @@ import (
 	"time"
 )
 
-// Config holds parameters for a relay Server. The zero value is not
-// usable; at minimum Logger should be set.
+// Config holds parameters for a relay Server. The zero value is usable
+// for tests — NewServer fills in defaults for Logger, ListenerIdleTimeout,
+// and RendezvousTimeout, and MaxConnections=0 (unlimited) is a valid
+// production setting. PublicURL is the only field that may need to be
+// set explicitly when running behind a proxy or TLS terminator.
 type Config struct {
 	// Logger is used for server-side logging. If nil, slog.Default() is used.
 	Logger *slog.Logger

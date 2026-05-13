@@ -68,6 +68,12 @@ func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
 
 	// Bare form: suffix applies only if no dot AND no colon (port).
 	if strings.ContainsAny(input, ".:") {
+		// Detect a bare IPv6 literal like "::1" or "2001:db8::1" and
+		// wrap it in brackets so it can be embedded in a URL host.
+		// IPv4 literals (To4 != nil) and "host:port" forms pass through.
+		if ip := net.ParseIP(input); ip != nil && ip.To4() == nil {
+			return "[" + input + "]", SchemeWSS
+		}
 		return input, SchemeWSS
 	}
 	return input + defaultSuffix, SchemeWSS

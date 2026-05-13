@@ -48,6 +48,7 @@ func TestValidatePublicURL(t *testing.T) {
 		wantErr bool
 	}{
 		{"http://relay.example.com", false},
+		{"http://relay.example.com/", false},
 		{"https://relay.example.com:8443", false},
 		{"ws://localhost:8080", false},
 		{"wss://relay.example.com", false},
@@ -55,6 +56,13 @@ func TestValidatePublicURL(t *testing.T) {
 		{"https://", true},
 		{"not-a-url", true},
 		{"://nohost", true},
+		// path/query/fragment must be rejected — publicSchemeHost
+		// only honors scheme+host, so anything else is a silent
+		// misconfiguration.
+		{"https://relay.example.com/base", true},
+		{"https://relay.example.com/base/", true},
+		{"https://relay.example.com/?foo=bar", true},
+		{"https://relay.example.com/#frag", true},
 	}
 	for _, tc := range cases {
 		err := validatePublicURL(tc.s)

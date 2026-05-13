@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -154,3 +155,64 @@ func asCE(err error, target *websocket.CloseError) bool {
 type testDiscard struct{}
 
 func (testDiscard) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestHandleListen_WatchdogExitsOnClientClose verifies that the idle
+// watchdog goroutine exits promptly when the client closes the
+// connection — even when ListenerIdleTimeout is much larger than the
+// observation window. Regression for a bug where the watchdog only
+// observed r.Context() / timer, but r.Context() may not be cancelled
+// for a hijacked WebSocket after peer disconnect, so each disconnect
+// leaked a goroutine for up to ListenerIdleTimeout.
+func TestHandleListen_WatchdogExitsOnClientClose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping goroutine-leak test in -short mode")
+	}
+	// Long idle timeout — without the fix, watchdogs would survive
+	// until this elapses (30s) for every disconnect.
+	idle := 30 * time.Second
+	s, err := NewServer(Config{
+		ListenerIdleTimeout: idle,
+		Logger:              slog.New(slog.NewTextHandler(testDiscard{}, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Warmup connection so the runtime has stable goroutine state.
+	{
+		ws, c := dialListener(t, ctx, srv.URL, "warmup")
+		time.Sleep(50 * time.Millisecond)
+		_ = ws.CloseNow()
+		c()
+	}
+	time.Sleep(200 * time.Millisecond)
+	base := runtime.NumGoroutine()
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		ws, c := dialListener(t, ctx, srv.URL, "entity-leak")
+		time.Sleep(20 * time.Millisecond) // let server start its watchdog
+		_ = ws.CloseNow()
+		c()
+	}
+
+	// With the fix, watchdog goroutines exit when the handler returns
+	// (within ~the network close + httptest server cleanup). Allow a
+	// generous tolerance — httptest itself spawns per-connection
+	// goroutines that may also need to drain.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		delta := runtime.NumGoroutine() - base
+		if delta < n {
+			return // success: at least some watchdogs cleaned up
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("goroutines did not drop after %d disconnects: base=%d now=%d",
+		n, base, runtime.NumGoroutine())
+}

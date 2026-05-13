@@ -91,6 +91,11 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 	ctx := r.Context()
 
 	if s.cfg.ListenerIdleTimeout > 0 {
+		// handlerDone is closed when this handler returns. It signals
+		// the watchdog goroutine to exit promptly even when r.Context()
+		// is not cancelled (a hijacked WebSocket can outlive the
+		// underlying request context if the peer disconnects).
+		handlerDone := make(chan struct{})
 		watchdogDone := make(chan struct{})
 		go func() {
 			defer close(watchdogDone)
@@ -110,12 +115,20 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 						}
 					}
 					timer.Reset(s.cfg.ListenerIdleTimeout)
+				case <-handlerDone:
+					return
 				case <-ctx.Done():
 					return
 				}
 			}
 		}()
-		defer func() { <-watchdogDone }()
+		// Single defer that runs LIFO-first relative to subsequent
+		// defers in this scope. Sequencing inside guarantees the
+		// watchdog observes the signal before we wait on it.
+		defer func() {
+			close(handlerDone)
+			<-watchdogDone
+		}()
 	}
 
 	for {
