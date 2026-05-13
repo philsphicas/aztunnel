@@ -14,30 +14,17 @@ import (
 // The zero value uses the secure wss:// scheme via http.DefaultClient and
 // is compatible with real Azure Relay.
 type ClientOptions struct {
-	// Scheme overrides the WebSocket scheme used to build the listen and
-	// connect URLs. Must be "" (defaults to "wss"), "ws", or "wss".
-	// The rendezvous URL the listener receives from the server is dialed
-	// verbatim and is not affected by this field.
-	Scheme string
-
-	// TLSConfig, when non-nil, overrides the TLS settings used for wss
-	// dials. Typically used to set InsecureSkipVerify for mock/self-signed
-	// relays. Has no effect on ws:// scheme.
+	// TLSConfig, when non-nil, overrides the TLS settings used for the
+	// wss dial. Typically used to set InsecureSkipVerify for mock or
+	// self-signed relays.
 	TLSConfig *tls.Config
 }
 
-// scheme returns Scheme or the default ("wss").
-func (o ClientOptions) scheme() string {
-	if o.Scheme == "" {
-		return SchemeWSS
-	}
-	return o.Scheme
-}
-
 // wssBase returns the URL prefix for relay URLs given this client's
-// scheme override and the endpoint host[:port].
+// endpoint host[:port]. aztunnel only dials TLS-protected relays, so
+// the scheme is always "wss".
 func (o ClientOptions) wssBase(endpoint string) string {
-	return o.scheme() + "://" + endpoint
+	return "wss://" + endpoint
 }
 
 // dialOptions returns websocket.DialOptions suitable for the configured

@@ -94,10 +94,10 @@ func resolveHyco(hycoFlag string) (string, error) {
 // dot AND no colon (port). Inputs that include a port — typical for
 // mock/self-hosted relays — are used verbatim.
 //
-// Transport scheme is derived from the --relay value: URL form
-// (ws://, http://) → ws; URL form with https/wss/sb or bare host →
-// wss. --relay-insecure-tls (or AZTUNNEL_RELAY_INSECURE_TLS=1) skips
-// TLS verification when scheme is wss.
+// Transport is always TLS (wss). aztunnel rejects ws:// / http:// URLs
+// at parse time. --relay-insecure-tls (or AZTUNNEL_RELAY_INSECURE_TLS=1)
+// skips TLS verification — required for the mock relay's self-signed
+// certificate but never appropriate for real Azure Relay.
 //
 // Auth precedence for --relay-auth: CLI flag > AZTUNNEL_RELAY_AUTH (env,
 // bound by kong) > "auto" default. Modes:
@@ -132,24 +132,15 @@ func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay
 		suffix = relay.DefaultRelaySuffix
 	}
 
-	host, scheme := relay.ParseRelay(ns, suffix)
+	host := relay.ParseRelay(ns, suffix)
 	if host == "" {
 		return "", relay.ClientOptions{}, nil, fmt.Errorf("invalid relay endpoint: %q", ns)
 	}
 	endpoint = host
-	opts.Scheme = scheme
 
 	if af.RelayInsecureTLS || os.Getenv("AZTUNNEL_RELAY_INSECURE_TLS") == "1" {
-		// Only meaningful for wss: plain ws:// doesn't do TLS at all,
-		// so attaching a TLSConfig is a no-op and the warning would be
-		// misleading.
-		if opts.Scheme == relay.SchemeWSS {
-			opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in by user for mock/self-hosted
-			logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
-		} else {
-			logger.Debug("ignoring --relay-insecure-tls because scheme is not wss",
-				"scheme", opts.Scheme)
-		}
+		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in by user for mock/self-hosted
+		logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
 	}
 
 	mode := strings.ToLower(af.RelayAuth)

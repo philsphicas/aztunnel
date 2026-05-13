@@ -10,79 +10,83 @@ import (
 // DefaultRelaySuffix is the Azure Relay namespace suffix for the public cloud.
 const DefaultRelaySuffix = ".servicebus.windows.net"
 
-// SchemeWSS is the secure WebSocket scheme used by real Azure Relay.
+// SchemeWSS is the secure WebSocket scheme used to dial relays.
+// aztunnel only supports TLS-protected relay endpoints; plain ws://
+// is rejected at parse time.
 const SchemeWSS = "wss"
 
-// SchemeWS is the insecure WebSocket scheme, useful for mock/self-hosted relays.
-const SchemeWS = "ws"
-
-// ParseRelay normalizes a relay input to (host[:port], scheme).
+// ParseRelay normalizes a relay input to a host[:port] string ready to
+// concatenate after "wss://".
 //
 // Accepted input formats:
-//   - Bare namespace name: "my-relay" → "my-relay" + defaultSuffix, scheme=wss
-//   - FQDN: "my-relay.servicebus.windows.net" → used as-is, scheme=wss
-//   - Bare host:port: "localhost:8080" → used as-is (no suffix), scheme=wss
-//   - URI with scheme: "sb://my-relay" → host extracted, suffix applied if bare, scheme=wss
-//   - URI with scheme + FQDN: "wss://my-relay.servicebus.windows.net" → scheme=wss
-//   - URI with insecure scheme: "ws://localhost:8080" or "http://..." → scheme=ws
-//   - URI with port: "https://relay.example.com:8443/" → port preserved, scheme=wss
+//   - Bare namespace name: "my-relay" → "my-relay" + defaultSuffix
+//   - FQDN: "my-relay.servicebus.windows.net" → used as-is
+//   - Bare host:port: "localhost:8443" → used as-is (no suffix)
+//   - URI with sb/https/wss scheme: "wss://my-relay" → host extracted,
+//     suffix applied if bare; "https://relay.example.com:8443/" →
+//     port preserved
 //
-// The scheme is derived from URI form: "http"/"ws" → "ws", anything else
-// ("https"/"wss"/"sb"/"") → "wss". For bare inputs the default is "wss".
+// Inputs with any other scheme (ws://, http://, ftp://, …) are
+// rejected: aztunnel does not connect to plain-text relays. Use the
+// `wss://` form (or omit the scheme) for self-signed mock relays and
+// pair with --relay-insecure-tls.
 //
-// Suffix is appended only to bare hostnames with no dot AND no colon (port).
+// Suffix is appended only to bare hostnames with no dot AND no colon
+// (port).
 //
-// Default ports are stripped (443 for wss/https, 80 for ws/http) so the
-// returned host matches the canonical form Azure Relay's SAS audience
-// validation expects (a SAS token signed for "https://host/entity" must
-// not include the default port).
+// The default port (443) is stripped so the returned host matches the
+// canonical form Azure Relay's SAS audience validation expects (a SAS
+// token signed for "https://host/entity" must not include the default
+// port).
 //
-// Returns "" for endpoint and scheme on empty input or malformed URIs.
-// Callers should validate the result.
-func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
+// Returns "" on empty input, malformed URI, unknown scheme, or invalid
+// port. Callers should validate the result.
+func ParseRelay(input, defaultSuffix string) string {
 	input = strings.TrimSpace(input)
 	if input == "" {
-		return "", ""
+		return ""
 	}
 
 	if strings.Contains(input, "://") {
 		u, err := url.Parse(input)
 		if err != nil || u.Host == "" {
-			return "", ""
+			return ""
 		}
 		// Reject userinfo: publicSchemeHost/dial only use scheme+host,
 		// so credentials would be silently dropped — better to fail fast.
 		if u.User != nil {
-			return "", ""
+			return ""
 		}
 		// A trailing colon (e.g. "host:") parses cleanly but means an
 		// explicit-but-empty port. url.Parse already rejects non-numeric
 		// ports like "host:bad", but the empty form slips through.
 		if strings.HasSuffix(u.Host, ":") {
-			return "", ""
+			return ""
 		}
 		// Validate present port is in [1, 65535]. url.Parse accepts
 		// "0" and out-of-range numerics that would never dial.
 		if p := u.Port(); p != "" {
 			if n, err := strconv.ParseUint(p, 10, 16); err != nil || n == 0 {
-				return "", ""
+				return ""
 			}
 		}
-		scheme = SchemeWSS
+		// Allow only TLS-protected schemes (and Service Bus's sb://,
+		// which historically aliases to wss). Anything else — ws://,
+		// http://, ftp://, … — is rejected: see package docs.
 		switch strings.ToLower(u.Scheme) {
-		case "http", "ws":
-			scheme = SchemeWS
+		case "sb", "https", "wss":
+		default:
+			return ""
 		}
 		host := u.Host
 		// Apply suffix only to bare hostnames (no dot, no colon). This is
 		// decided BEFORE stripping default ports so an explicit URL like
-		// "http://localhost:80/" is not treated as a bare name after the
-		// port is stripped.
+		// "https://localhost:443/" is not treated as a bare name after
+		// the port is stripped.
 		if !strings.ContainsAny(host, ".:") {
 			host += defaultSuffix
 		}
-		host = stripDefaultPort(host, scheme)
-		return host, scheme
+		return stripDefaultPort(host)
 	}
 
 	// Bare form: suffix applies only if no dot AND no colon (port).
@@ -91,7 +95,7 @@ func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
 		// wrap it in brackets so it can be embedded in a URL host.
 		// IPv4 literals (To4 != nil) and "host:port" forms pass through.
 		if ip := net.ParseIP(input); ip != nil && ip.To4() == nil {
-			return "[" + input + "]", SchemeWSS
+			return "[" + input + "]"
 		}
 		// Bare host:port: a colon here is unambiguous because IPv6
 		// literals were handled above and IPv4 forms have no colon.
@@ -101,36 +105,29 @@ func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
 		if strings.ContainsRune(input, ':') {
 			_, port, err := net.SplitHostPort(input)
 			if err != nil || port == "" {
-				return "", ""
+				return ""
 			}
 			if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
-				return "", ""
+				return ""
 			}
 		}
-		// Strip default port (443 for the implicit wss scheme) so the
-		// returned host matches the URL-form behaviour and the SAS
-		// audience canonicalisation. E.g. "host:443" → "host".
-		return stripDefaultPort(input, SchemeWSS), SchemeWSS
+		// Strip default port (443) so the returned host matches the
+		// URL-form behaviour and the SAS audience canonicalisation.
+		// E.g. "host:443" → "host".
+		return stripDefaultPort(input)
 	}
-	return input + defaultSuffix, SchemeWSS
+	return input + defaultSuffix
 }
 
-// stripDefaultPort removes the default port for the given scheme from
-// host (443 for wss, 80 for ws). Returns host unchanged if the port is
-// absent or non-default. Preserves IPv6 bracket form.
-func stripDefaultPort(host, scheme string) string {
+// stripDefaultPort removes the default wss port (443) from host.
+// Returns host unchanged if the port is absent or non-default.
+// Preserves IPv6 bracket form.
+func stripDefaultPort(host string) string {
 	h, p, err := net.SplitHostPort(host)
 	if err != nil {
 		return host
 	}
-	defaultPort := ""
-	switch scheme {
-	case SchemeWSS:
-		defaultPort = "443"
-	case SchemeWS:
-		defaultPort = "80"
-	}
-	if defaultPort == "" || p != defaultPort {
+	if p != "443" {
 		return host
 	}
 	// Re-bracket IPv6 literals (SplitHostPort strips the brackets).
@@ -138,11 +135,4 @@ func stripDefaultPort(host, scheme string) string {
 		return "[" + h + "]"
 	}
 	return h
-}
-
-// ParseRelayEndpoint is the host-only equivalent of ParseRelay, retained
-// for backward compatibility with code that does not need the scheme.
-func ParseRelayEndpoint(input, defaultSuffix string) string {
-	endpoint, _ := ParseRelay(input, defaultSuffix)
-	return endpoint
 }

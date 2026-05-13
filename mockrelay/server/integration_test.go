@@ -61,12 +61,12 @@ func pickFreePort(t *testing.T) string {
 	return addr
 }
 
-// startMockRelay starts a server.Server backed by httptest. If tls
-// is true the server uses httptest.NewTLSServer; the returned host is
-// suitable to pass to relay.ClientOptions / the --relay flag. The
-// returned ClientOptions has the appropriate Scheme and (for TLS) a
-// TLSConfig with InsecureSkipVerify.
-func startMockRelay(t *testing.T, useTLS bool) (host string, opts relay.ClientOptions, srv *httptest.Server) {
+// startMockRelay starts a server.Server backed by httptest.NewTLSServer
+// (aztunnel only dials TLS-protected relays). The returned ClientOptions
+// includes a TLSConfig with InsecureSkipVerify so the in-process
+// listener and sender accept the test cert. The returned host is suitable
+// to pass to relay.ClientOptions / the --relay flag.
+func startMockRelay(t *testing.T) (host string, opts relay.ClientOptions, srv *httptest.Server) {
 	t.Helper()
 	rs, err := server.NewServer(server.Config{
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -75,19 +75,11 @@ func startMockRelay(t *testing.T, useTLS bool) (host string, opts relay.ClientOp
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
-	if useTLS {
-		srv = httptest.NewTLSServer(rs.Handler())
-	} else {
-		srv = httptest.NewServer(rs.Handler())
-	}
+	srv = httptest.NewTLSServer(rs.Handler())
 	u, _ := url.Parse(srv.URL)
 	host = u.Host
-	opts = relay.ClientOptions{}
-	if useTLS {
-		opts.Scheme = "wss"
-		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // test
-	} else {
-		opts.Scheme = "ws"
+	opts = relay.ClientOptions{
+		TLSConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test cert
 	}
 	t.Cleanup(srv.Close)
 	return host, opts, srv
@@ -113,24 +105,17 @@ func mintProbeToken(t *testing.T, host, entity string) string {
 // waitForControl polls until at least one listener has registered for
 // the given entity, or the timeout elapses. The listener's control loop
 // runs asynchronously after ListenAndServe is called.
-func waitForControl(t *testing.T, host, entity string, useTLS bool, timeout time.Duration) {
+func waitForControl(t *testing.T, srv *httptest.Server, entity string, timeout time.Duration) {
 	t.Helper()
-	scheme := "http"
-	if useTLS {
-		scheme = "https"
-	}
-	httpClient := &http.Client{
-		Timeout: 1 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test
-		},
-	}
+	httpClient := srv.Client()
+	httpClient.Timeout = 1 * time.Second
+	host := strings.TrimPrefix(srv.URL, "https://")
 	// We probe with sb-hc-action=connect, which returns 404 when no
 	// listener is registered (and would upgrade to WS otherwise — but
 	// without the Upgrade header it returns 400 instead, signaling the
 	// listener IS present). We watch for the transition from 404 to
 	// 400/500-ish.
-	probeURL := scheme + "://" + host + "/$hc/" + entity + "?sb-hc-action=connect&sb-hc-token=" + url.QueryEscape(mintProbeToken(t, host, entity))
+	probeURL := srv.URL + "/$hc/" + entity + "?sb-hc-action=connect&sb-hc-token=" + url.QueryEscape(mintProbeToken(t, host, entity))
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		resp, err := httpClient.Get(probeURL)
@@ -210,45 +195,35 @@ func runListener(t *testing.T, ctx context.Context, host, entity string, opts re
 // real aztunnel listener and sender wire through the mock relay and a
 // TCP echo round-trip succeeds.
 func TestIntegration_PortForwardEcho(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		useTLS bool
-	}{
-		{"plain_ws", false},
-		{"tls_wss", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-			echoAddr := startEchoServer(t, ctx)
-			host, opts, _ := startMockRelay(t, tc.useTLS)
-			entity := "test-entity"
+	echoAddr := startEchoServer(t, ctx)
+	host, opts, srv := startMockRelay(t)
+	entity := "test-entity"
 
-			runListener(t, ctx, host, entity, opts)
-			waitForControl(t, host, entity, tc.useTLS, 3*time.Second)
+	runListener(t, ctx, host, entity, opts)
+	waitForControl(t, srv, entity, 3*time.Second)
 
-			bind := runPortForward(t, ctx, host, entity, echoAddr, opts)
+	bind := runPortForward(t, ctx, host, entity, echoAddr, opts)
 
-			conn, err := net.Dial("tcp", bind)
-			if err != nil {
-				t.Fatalf("dial port-forward: %v", err)
-			}
-			defer conn.Close()
+	conn, err := net.Dial("tcp", bind)
+	if err != nil {
+		t.Fatalf("dial port-forward: %v", err)
+	}
+	defer conn.Close()
 
-			want := []byte("hello, mock relay!\n")
-			if _, err := conn.Write(want); err != nil {
-				t.Fatalf("write: %v", err)
-			}
-			got := make([]byte, len(want))
-			conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			if _, err := io.ReadFull(conn, got); err != nil {
-				t.Fatalf("read: %v", err)
-			}
-			if !bytes.Equal(got, want) {
-				t.Fatalf("echo mismatch:\n got=%q\nwant=%q", got, want)
-			}
-		})
+	want := []byte("hello, mock relay!\n")
+	if _, err := conn.Write(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(want))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("echo mismatch:\n got=%q\nwant=%q", got, want)
 	}
 }
 
@@ -256,9 +231,9 @@ func TestIntegration_PortForwardEcho(t *testing.T) {
 // is registered, the server returns 404 to the sender pre-upgrade —
 // this is the contract DialWithRetry depends on for backoff.
 func TestIntegration_NoListener_Returns404(t *testing.T) {
-	host, _, srv := startMockRelay(t, false)
+	host, _, srv := startMockRelay(t)
 	tok := mintProbeToken(t, host, "nobody")
-	resp, err := http.Get(srv.URL + "/$hc/nobody?sb-hc-action=connect&sb-hc-token=" + url.QueryEscape(tok))
+	resp, err := srv.Client().Get(srv.URL + "/$hc/nobody?sb-hc-action=connect&sb-hc-token=" + url.QueryEscape(tok))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -276,11 +251,11 @@ func TestIntegration_MultipleMessages(t *testing.T) {
 	defer cancel()
 
 	echoAddr := startEchoServer(t, ctx)
-	host, opts, _ := startMockRelay(t, false)
+	host, opts, srv := startMockRelay(t)
 	entity := "msg-bound"
 
 	runListener(t, ctx, host, entity, opts)
-	waitForControl(t, host, entity, false, 3*time.Second)
+	waitForControl(t, srv, entity, 3*time.Second)
 	bind := runPortForward(t, ctx, host, entity, echoAddr, opts)
 
 	conn, err := net.Dial("tcp", bind)

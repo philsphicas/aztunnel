@@ -278,23 +278,6 @@ func TestResolveAuth_RelayAuthNoneIsRejected(t *testing.T) {
 	}
 }
 
-func TestResolveAuth_WsSchemeFromURL(t *testing.T) {
-	t.Setenv("AZTUNNEL_RELAY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY_NAME", "k")
-	t.Setenv("AZTUNNEL_KEY", "v")
-
-	_, opts, _, err := resolveAuth(AuthFlags{
-		Relay:     "ws://localhost:8080",
-		RelayAuth: "sas",
-	}, discardLogger())
-	if err != nil {
-		t.Fatalf("resolveAuth: %v", err)
-	}
-	if opts.Scheme != relay.SchemeWS {
-		t.Errorf("scheme = %q, want %q", opts.Scheme, relay.SchemeWS)
-	}
-}
-
 func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_RELAY_INSECURE_TLS", "")
 	t.Setenv("AZTUNNEL_KEY_NAME", "k")
@@ -313,24 +296,34 @@ func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
 	}
 }
 
-func TestResolveAuth_InsecureTLSIgnoredForWS(t *testing.T) {
-	t.Setenv("AZTUNNEL_RELAY_INSECURE_TLS", "")
+func TestResolveAuth_RejectsPlainSchemes(t *testing.T) {
+	// aztunnel only dials TLS-protected relays, so any --relay value
+	// using ws://, http://, or another non-TLS scheme is rejected at
+	// parse time (not silently downgraded to wss).
+	t.Setenv("AZTUNNEL_RELAY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY_NAME", "k")
 	t.Setenv("AZTUNNEL_KEY", "v")
 
-	_, opts, _, err := resolveAuth(AuthFlags{
-		Relay:            "ws://localhost:8080",
-		RelayAuth:        "sas",
-		RelayInsecureTLS: true,
-	}, discardLogger())
-	if err != nil {
-		t.Fatalf("resolveAuth: %v", err)
-	}
-	if opts.Scheme != relay.SchemeWS {
-		t.Fatalf("scheme = %q, want ws (precondition)", opts.Scheme)
-	}
-	if opts.TLSConfig != nil {
-		t.Error("expected nil TLSConfig for ws scheme (insecure-tls is a no-op)")
+	for _, tc := range []struct {
+		name  string
+		relay string
+	}{
+		{"ws scheme", "ws://localhost:8080"},
+		{"http scheme", "http://localhost:8080"},
+		{"ftp scheme", "ftp://relay.example.com:8443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := resolveAuth(AuthFlags{
+				Relay:     tc.relay,
+				RelayAuth: "sas",
+			}, discardLogger())
+			if err == nil {
+				t.Fatalf("expected error for relay %q, got nil", tc.relay)
+			}
+			if !strings.Contains(err.Error(), "invalid relay endpoint") {
+				t.Errorf("error %q should mention 'invalid relay endpoint'", err.Error())
+			}
+		})
 	}
 }
 
@@ -369,7 +362,7 @@ func TestResolveAuth_AuthModeSAS_MissingCreds(t *testing.T) {
 func TestResolveAuth_BareHostPortKeepsNoSuffix(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "k")
 	t.Setenv("AZTUNNEL_KEY", "v")
-	endpoint, opts, _, err := resolveAuth(AuthFlags{
+	endpoint, _, _, err := resolveAuth(AuthFlags{
 		Relay:     "localhost:8080",
 		RelayAuth: "sas",
 	}, discardLogger())
@@ -378,9 +371,6 @@ func TestResolveAuth_BareHostPortKeepsNoSuffix(t *testing.T) {
 	}
 	if endpoint != "localhost:8080" {
 		t.Errorf("endpoint = %q, want %q (no suffix when port present)", endpoint, "localhost:8080")
-	}
-	if opts.Scheme != relay.SchemeWSS {
-		t.Errorf("scheme = %q, want default wss", opts.Scheme)
 	}
 }
 
