@@ -41,6 +41,19 @@ func TestParseRelayEndpoint(t *testing.T) {
 		{"bare ipv6 ::1", "::1", DefaultRelaySuffix, "[::1]"},
 		{"bare ipv6 2001:db8::1", "2001:db8::1", DefaultRelaySuffix, "[2001:db8::1]"},
 		{"bare ipv4 unchanged", "127.0.0.1", DefaultRelaySuffix, "127.0.0.1"},
+		// Invalid ports must be rejected — url.Parse rejects non-numeric
+		// ports for URI inputs, but empty / zero / out-of-range numerics
+		// pass and would later fail at dial time with a worse error.
+		{"url trailing colon", "https://host:", DefaultRelaySuffix, ""},
+		{"url port zero", "https://host:0", DefaultRelaySuffix, ""},
+		{"url port too large", "https://host:99999", DefaultRelaySuffix, ""},
+		{"url ipv6 trailing colon", "https://[::1]:", DefaultRelaySuffix, ""},
+		{"url ipv6 port too large", "https://[::1]:99999", DefaultRelaySuffix, ""},
+		{"url with userinfo", "https://user:pass@host:8080", DefaultRelaySuffix, ""},
+		{"bare trailing colon", "host:", DefaultRelaySuffix, ""},
+		{"bare port non-numeric", "host:bad", DefaultRelaySuffix, ""},
+		{"bare port zero", "host:0", DefaultRelaySuffix, ""},
+		{"bare port too large", "host:99999", DefaultRelaySuffix, ""},
 	}
 
 	for _, tt := range tests {
@@ -77,6 +90,14 @@ func TestParseRelay(t *testing.T) {
 		{"ipv6 default port stripped", "wss://[::1]:443/", DefaultRelaySuffix, "[::1]", SchemeWSS},
 		{"empty → empty", "", DefaultRelaySuffix, "", ""},
 		{"malformed → empty", "://nope", DefaultRelaySuffix, "", ""},
+		// Invalid ports / userinfo: same expectations as ParseRelayEndpoint.
+		{"url trailing colon → empty", "https://host:", DefaultRelaySuffix, "", ""},
+		{"url port zero → empty", "https://host:0", DefaultRelaySuffix, "", ""},
+		{"url port too large → empty", "https://host:99999", DefaultRelaySuffix, "", ""},
+		{"url userinfo → empty", "https://u:p@host:8080", DefaultRelaySuffix, "", ""},
+		{"bare port non-numeric → empty", "host:bad", DefaultRelaySuffix, "", ""},
+		{"bare port too large → empty", "host:99999", DefaultRelaySuffix, "", ""},
+		{"bare trailing colon → empty", "host:", DefaultRelaySuffix, "", ""},
 	}
 
 	for _, tt := range tests {

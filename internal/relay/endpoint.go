@@ -3,6 +3,7 @@ package relay
 import (
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -49,6 +50,24 @@ func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
 		if err != nil || u.Host == "" {
 			return "", ""
 		}
+		// Reject userinfo: publicSchemeHost/dial only use scheme+host,
+		// so credentials would be silently dropped — better to fail fast.
+		if u.User != nil {
+			return "", ""
+		}
+		// A trailing colon (e.g. "host:") parses cleanly but means an
+		// explicit-but-empty port. url.Parse already rejects non-numeric
+		// ports like "host:bad", but the empty form slips through.
+		if strings.HasSuffix(u.Host, ":") {
+			return "", ""
+		}
+		// Validate present port is in [1, 65535]. url.Parse accepts
+		// "0" and out-of-range numerics that would never dial.
+		if p := u.Port(); p != "" {
+			if n, err := strconv.ParseUint(p, 10, 16); err != nil || n == 0 {
+				return "", ""
+			}
+		}
 		scheme = SchemeWSS
 		switch strings.ToLower(u.Scheme) {
 		case "http", "ws":
@@ -73,6 +92,20 @@ func ParseRelay(input, defaultSuffix string) (endpoint, scheme string) {
 		// IPv4 literals (To4 != nil) and "host:port" forms pass through.
 		if ip := net.ParseIP(input); ip != nil && ip.To4() == nil {
 			return "[" + input + "]", SchemeWSS
+		}
+		// Bare host:port: a colon here is unambiguous because IPv6
+		// literals were handled above and IPv4 forms have no colon.
+		// Require a numeric port in [1, 65535] so we fail fast on
+		// "host:" / "host:bad" / "host:0" rather than passing them
+		// through to a later dial.
+		if strings.ContainsRune(input, ':') {
+			_, port, err := net.SplitHostPort(input)
+			if err != nil || port == "" {
+				return "", ""
+			}
+			if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+				return "", ""
+			}
 		}
 		return input, SchemeWSS
 	}

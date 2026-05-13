@@ -63,6 +63,15 @@ func TestValidatePublicURL(t *testing.T) {
 		{"https://relay.example.com/base/", true},
 		{"https://relay.example.com/?foo=bar", true},
 		{"https://relay.example.com/#frag", true},
+		// userinfo is silently dropped by publicSchemeHost, so reject.
+		{"https://user@relay.example.com", true},
+		{"https://user:pass@relay.example.com", true},
+		// invalid ports — url.Parse rejects non-numeric ports, but
+		// empty / out-of-range / zero numerics pass and would mint
+		// rendezvous URLs that can never be dialed.
+		{"https://relay.example.com:", true},
+		{"https://relay.example.com:0", true},
+		{"https://relay.example.com:99999", true},
 	}
 	for _, tc := range cases {
 		err := validatePublicURL(tc.s)

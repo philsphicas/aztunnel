@@ -1,15 +1,13 @@
-// Command aztunnel-relay runs a self-hosted Azure-Relay-compatible
-// Hybrid Connections server. It speaks the subset of the Azure Relay
-// wire protocol used by aztunnel listeners and senders.
+// Command aztunnel-relay runs a mock Azure-Relay-compatible Hybrid
+// Connections server for local development, CI, and offline end-to-end
+// testing of aztunnel. It speaks the subset of the Azure Relay wire
+// protocol used by aztunnel listeners and senders.
 //
-// Two primary uses:
+// It is not a drop-in replacement for Azure Relay and is not intended
+// for production traffic: v1 performs no token validation, no
+// listener auth/authz, and no HA/clustering.
 //
-//   - Mock relay for local development, CI, and offline testing.
-//   - Self-hosted alternative to Azure Relay for air-gapped or
-//     cost-constrained environments.
-//
-// See mockrelay/README.md for deployment notes, flag reference, and
-// the security model (v1 has no token validation).
+// See mockrelay/README.md for deployment notes and flag reference.
 package main
 
 import (
@@ -62,7 +60,7 @@ func (v versionFlag) BeforeApply(app *kong.Kong) error {
 func main() {
 	parser := kong.Must(&CLI,
 		kong.Name("aztunnel-relay"),
-		kong.Description("Self-hosted Azure-Relay-compatible Hybrid Connections server."),
+		kong.Description("Mock Azure-Relay-compatible Hybrid Connections server for testing aztunnel."),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
 	)

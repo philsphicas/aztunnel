@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -50,6 +51,22 @@ func validatePublicURL(s string) error {
 	}
 	if u.Host == "" {
 		return fmt.Errorf("missing host")
+	}
+	// Reject userinfo: rendezvousURL only honors scheme+host, so any
+	// credentials would be silently dropped — better to fail fast.
+	if u.User != nil {
+		return fmt.Errorf("userinfo not supported in PublicURL")
+	}
+	// A trailing colon ("host:") parses cleanly but means an explicit
+	// empty port. url.Parse already rejects non-numeric ports.
+	if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("empty port in PublicURL host %q", u.Host)
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.ParseUint(p, 10, 16)
+		if err != nil || n == 0 {
+			return fmt.Errorf("invalid port %q in PublicURL: must be numeric 1-65535", p)
+		}
 	}
 	// Empty or single-slash paths are normal artifacts of url.Parse on
 	// "https://host" vs "https://host/"; anything else would be silently

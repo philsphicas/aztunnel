@@ -12,12 +12,12 @@
 //   - The server then bridges the two halves byte-for-byte, preserving
 //     WebSocket message boundaries.
 //
-// This package is intended for two related use cases: a "mock relay" for
-// local development, CI, and offline testing of aztunnel, and a
-// self-hosted alternative to Azure Relay for air-gapped or
-// cost-constrained environments. It is *not* a drop-in replacement for
-// Azure Relay — in particular, v1 performs no token validation, no
-// listener auth/authz, and no HA/clustering.
+// This package is a mock relay intended for local development, CI, and
+// offline end-to-end testing of aztunnel — for example, exercising
+// connect/listen flows without an Azure Relay subscription. It is *not*
+// a drop-in replacement for Azure Relay and is not intended for
+// production traffic: v1 performs no token validation, no listener
+// auth/authz, and no HA/clustering.
 package server
 
 import (
@@ -34,8 +34,8 @@ import (
 // Config holds parameters for a relay Server. The zero value is usable
 // for tests — NewServer fills in defaults for Logger, ListenerIdleTimeout,
 // and RendezvousTimeout, and MaxConnections=0 (unlimited) is a valid
-// production setting. PublicURL is the only field that may need to be
-// set explicitly when running behind a proxy or TLS terminator.
+// setting. PublicURL is the only field that may need to be set
+// explicitly when running behind a proxy or TLS terminator.
 type Config struct {
 	// Logger is used for server-side logging. If nil, slog.Default() is used.
 	Logger *slog.Logger
