@@ -42,7 +42,7 @@ type AuthFlags struct {
 	Namespace        string `name:"namespace" help:"Azure Relay namespace name (alias for --relay)." hidden:""`
 	Hyco             string `help:"Hybrid connection name."`
 	RelaySuffix      string `name:"relay-suffix" help:"Namespace suffix for sovereign clouds." default:""`
-	RelayAuth        string `name:"relay-auth" help:"Auth method: auto (default), none, sas, entra." enum:"auto,none,sas,entra" default:"auto" env:"AZTUNNEL_RELAY_AUTH"`
+	RelayAuth        string `name:"relay-auth" help:"Auth method: auto (default), sas, entra." enum:"auto,sas,entra" default:"auto" env:"AZTUNNEL_RELAY_AUTH"`
 	RelayInsecureTLS bool   `name:"relay-insecure-tls" help:"Skip TLS certificate verification (mock/self-hosted only)."`
 }
 

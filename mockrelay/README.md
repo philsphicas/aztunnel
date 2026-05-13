@@ -37,22 +37,25 @@ aztunnel-relay
 is the default so the mock can't accidentally be reached from another
 host.)
 
-Terminal 2 — start a listener that forwards to a local SSH server:
+Terminal 2 — start a listener that forwards to a local SSH server. The
+mock validates SAS, so the client needs to know the dummy key (the relay
+prints it on startup as `AZTUNNEL_KEY_NAME`/`AZTUNNEL_KEY` log fields):
 
 ```sh
+export AZTUNNEL_KEY_NAME=dev
+export AZTUNNEL_KEY=dev-secret-do-not-use-in-prod
+
 aztunnel relay-listener \
   --relay ws://localhost:8080 \
-  --hyco demo-hc \
-  --relay-auth=none
+  --hyco demo-hc
 ```
 
-Terminal 3 — start a port-forward sender:
+Terminal 3 — start a port-forward sender (same env vars):
 
 ```sh
 aztunnel relay-sender port-forward \
   --relay ws://localhost:8080 \
   --hyco demo-hc \
-  --relay-auth=none \
   --bind 127.0.0.1:2222 \
   127.0.0.1:22
 ```
@@ -61,10 +64,10 @@ Now `ssh -p 2222 user@127.0.0.1` will tunnel through the local relay.
 
 Key flags explained:
 
-| Flag                | Why                                                                                                                                 |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `--relay ws://...`  | URL with `ws://` scheme tells the client to dial plain HTTP, not TLS. Port is taken from the URL; the Azure suffix is not appended. |
-| `--relay-auth=none` | Selects the no-op token provider — the client sends a dummy `sb-hc-token` value that the server ignores.                            |
+| Flag                       | Why                                                                                                                                 |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `--relay ws://...`         | URL with `ws://` scheme tells the client to dial plain HTTP, not TLS. Port is taken from the URL; the Azure suffix is not appended. |
+| `AZTUNNEL_KEY_NAME` / `AZTUNNEL_KEY` env | The mock SAS credentials. Defaults are `dev` / `dev-secret-do-not-use-in-prod`. Override with `--auth-key-name` / `--auth-key` on the relay if you want different values. |
 
 ## TLS
 
@@ -92,7 +95,6 @@ store):
 aztunnel relay-listener \
   --relay localhost:8443 \
   --hyco demo-hc \
-  --relay-auth=none \
   --relay-insecure-tls
 ```
 
@@ -122,12 +124,12 @@ Clients then connect with their default settings (full TLS verification):
 ```sh
 aztunnel relay-listener \
   --relay relay.example.com \
-  --hyco demo-hc \
-  --relay-auth=none
+  --hyco demo-hc
 ```
 
-> Reminder: token validation is not implemented. A real certificate
-> alone does not make this safe to expose publicly.
+> Reminder: this is still a mock. Real production deployments need real
+> authentication; the SAS validation here only proves the client knows
+> a fixed dummy key.
 
 ## CLI flags
 
@@ -146,6 +148,9 @@ aztunnel-relay [flags]
   --listener-idle-timeout=2m    Close idle listener control channels.
   --rendezvous-timeout=30s      Max wait for listener to dial rendezvous URL.
   --metrics-addr                Prometheus metrics address (e.g. :9090).
+  --auth-key-name=dev           SAS key name accepted from clients.
+  --auth-key=dev-secret-...     SAS key value accepted from clients.
+  --no-auth                     Disable SAS validation entirely (tests only).
 ```
 
 All flags have matching environment variables (`AZTUNNEL_RELAY_BIND`,
@@ -153,13 +158,18 @@ All flags have matching environment variables (`AZTUNNEL_RELAY_BIND`,
 
 ## Client-side flags
 
-The aztunnel client adds two flags to all relay-\* commands for use
+The aztunnel client adds one flag to all relay-\* commands for use
 against the mock relay:
 
 | Flag                   | Env var                         | Effect                                                                      |
 | ---------------------- | ------------------------------- | --------------------------------------------------------------------------- |
-| `--relay-auth=MODE`    | `AZTUNNEL_RELAY_AUTH`           | `auto` (default), `none`, `sas`, or `entra`. Pick `none` for the mock case. |
 | `--relay-insecure-tls` | `AZTUNNEL_RELAY_INSECURE_TLS=1` | Skip TLS verification (use only for self-signed local/test certs).          |
+
+To authenticate against the mock, set `AZTUNNEL_KEY_NAME` and
+`AZTUNNEL_KEY` to the values printed by `aztunnel-relay` on startup
+(defaults: `dev` / `dev-secret-do-not-use-in-prod`). The aztunnel client
+uses its normal SAS code path — there is no client-side bypass for the
+mock case.
 
 The `--relay` value drives scheme and suffix decisions:
 
@@ -171,9 +181,6 @@ The `--relay` value drives scheme and suffix decisions:
 | `localhost:8080`                 | wss    | no (port present)               |
 | `ws://localhost:8080`            | ws     | no                              |
 | `https://relay.example.com:8443` | wss    | no                              |
-
-This means `--relay-auth=none` and `--relay ws://localhost:8080` are
-the only required additions for the typical mock scenario.
 
 ## Architecture
 
@@ -200,13 +207,17 @@ the only required additions for the typical mock scenario.
 
 ## Limitations
 
-v1 deliberately omits the following — file issues if you need them:
+This is a test fixture, not a production relay — file issues if you
+need any of the following:
 
-- **No token validation.** Anyone who can reach the relay's TCP port
-  can listen or send for any entity. Rendezvous URLs carry a 128-bit
-  random ID with a short timeout (30s default), but they are not
-  cryptographically bound to a particular sender/listener pair beyond
-  that.
+- **SAS validation only.** The relay accepts any SAS token signed with
+  the configured key (default: a hard-coded dev key). It does NOT check
+  the audience (`sr`) against the request URL, so a token signed for
+  one entity is accepted for any entity. Anyone who can reach the
+  relay's TCP port AND knows the key can listen or send for any entity.
+  Rendezvous URLs carry a 128-bit random ID with a short timeout (30s
+  default), but they are not cryptographically bound to a particular
+  sender/listener pair beyond that.
 - **No HA / clustering.** A single `aztunnel-relay` process is the
   source of truth for the listeners it knows about. Running multiple
   replicas is fine for independent traffic, but a listener registered
@@ -226,8 +237,9 @@ is to run `aztunnel-relay` as a subprocess in your test setup:
 aztunnel-relay --bind 127.0.0.1:0 --log-level=warn &
 ```
 
-…then point your aztunnel client at it with `--relay ws://...
---relay-auth=none`.
+…then point your aztunnel client at it with `--relay ws://...` and the
+default `AZTUNNEL_KEY_NAME=dev` / `AZTUNNEL_KEY=dev-secret-do-not-use-in-prod`
+SAS credentials.
 
 For an in-tree, in-process example, see
 `mockrelay/server/integration_test.go`, which wires

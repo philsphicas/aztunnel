@@ -256,38 +256,36 @@ func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 	// If err != nil, that's expected in CI where no Azure creds are available.
 }
 
-func TestResolveAuth_AuthModeNone(t *testing.T) {
+func TestResolveAuth_RelayAuthNoneIsRejected(t *testing.T) {
+	// --relay-auth=none was removed when the mock relay started
+	// validating SAS. The auto/sas/entra modes are the only valid
+	// values; anything else (including the historical "none") must
+	// return an error.
 	t.Setenv("AZTUNNEL_RELAY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY", "")
 	t.Setenv("AZTUNNEL_RELAY_AUTH", "")
 
-	endpoint, opts, tp, err := resolveAuth(AuthFlags{
+	_, _, _, err := resolveAuth(AuthFlags{
 		Relay:     "localhost:8080",
 		RelayAuth: "none",
 	}, discardLogger())
-	if err != nil {
-		t.Fatalf("resolveAuth: %v", err)
+	if err == nil {
+		t.Fatal("expected error for --relay-auth=none, got nil")
 	}
-	if endpoint != "localhost:8080" {
-		t.Errorf("endpoint = %q, want %q", endpoint, "localhost:8080")
-	}
-	if _, ok := tp.(relay.NoOpTokenProvider); !ok {
-		t.Errorf("token provider = %T, want relay.NoOpTokenProvider", tp)
-	}
-	if opts.Scheme != relay.SchemeWSS {
-		t.Errorf("scheme = %q, want %q", opts.Scheme, relay.SchemeWSS)
+	if !strings.Contains(err.Error(), "unknown --relay-auth") {
+		t.Errorf("error %q should mention 'unknown --relay-auth'", err.Error())
 	}
 }
 
 func TestResolveAuth_WsSchemeFromURL(t *testing.T) {
 	t.Setenv("AZTUNNEL_RELAY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY", "")
+	t.Setenv("AZTUNNEL_KEY_NAME", "k")
+	t.Setenv("AZTUNNEL_KEY", "v")
 
 	_, opts, _, err := resolveAuth(AuthFlags{
 		Relay:     "ws://localhost:8080",
-		RelayAuth: "none",
+		RelayAuth: "sas",
 	}, discardLogger())
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
@@ -299,10 +297,12 @@ func TestResolveAuth_WsSchemeFromURL(t *testing.T) {
 
 func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_RELAY_INSECURE_TLS", "")
+	t.Setenv("AZTUNNEL_KEY_NAME", "k")
+	t.Setenv("AZTUNNEL_KEY", "v")
 
 	_, opts, _, err := resolveAuth(AuthFlags{
 		Relay:            "localhost:8443",
-		RelayAuth:        "none",
+		RelayAuth:        "sas",
 		RelayInsecureTLS: true,
 	}, discardLogger())
 	if err != nil {
@@ -315,12 +315,12 @@ func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
 
 func TestResolveAuth_InsecureTLSIgnoredForWS(t *testing.T) {
 	t.Setenv("AZTUNNEL_RELAY_INSECURE_TLS", "")
-	t.Setenv("AZTUNNEL_KEY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY", "")
+	t.Setenv("AZTUNNEL_KEY_NAME", "k")
+	t.Setenv("AZTUNNEL_KEY", "v")
 
 	_, opts, _, err := resolveAuth(AuthFlags{
 		Relay:            "ws://localhost:8080",
-		RelayAuth:        "none",
+		RelayAuth:        "sas",
 		RelayInsecureTLS: true,
 	}, discardLogger())
 	if err != nil {
@@ -335,14 +335,15 @@ func TestResolveAuth_InsecureTLSIgnoredForWS(t *testing.T) {
 }
 
 func TestResolveAuth_NilLoggerDoesNotPanic(t *testing.T) {
-	t.Setenv("AZTUNNEL_KEY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY", "")
+	t.Setenv("AZTUNNEL_KEY_NAME", "k")
+	t.Setenv("AZTUNNEL_KEY", "v")
 	// resolveAuth must internally default a nil logger to slog.Default().
-	// The --relay-auth=none branch logs a warning, so this exercises a
-	// real *slog.Logger call site.
+	// resolveAuth's logger is used by the --relay-insecure-tls warning
+	// and by other diagnostic paths; nil should not panic.
 	_, _, _, err := resolveAuth(AuthFlags{
-		Relay:     "localhost:8080",
-		RelayAuth: "none",
+		Relay:            "localhost:8443",
+		RelayAuth:        "sas",
+		RelayInsecureTLS: true,
 	}, nil)
 	if err != nil {
 		t.Fatalf("resolveAuth(nil logger): %v", err)
@@ -366,9 +367,11 @@ func TestResolveAuth_AuthModeSAS_MissingCreds(t *testing.T) {
 }
 
 func TestResolveAuth_BareHostPortKeepsNoSuffix(t *testing.T) {
+	t.Setenv("AZTUNNEL_KEY_NAME", "k")
+	t.Setenv("AZTUNNEL_KEY", "v")
 	endpoint, opts, _, err := resolveAuth(AuthFlags{
 		Relay:     "localhost:8080",
-		RelayAuth: "none",
+		RelayAuth: "sas",
 	}, discardLogger())
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)

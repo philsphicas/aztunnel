@@ -46,14 +46,3 @@ func TestSanitizeErr(t *testing.T) {
 		}
 	})
 }
-
-func TestNoOpTokenProvider(t *testing.T) {
-	var tp TokenProvider = NoOpTokenProvider{}
-	tok, err := tp.GetToken(context.Background(), "https://anything")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tok == "" {
-		t.Errorf("NoOpTokenProvider returned empty token; the relay protocol requires sb-hc-token to be non-empty")
-	}
-}

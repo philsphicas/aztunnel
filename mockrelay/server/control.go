@@ -58,6 +58,11 @@ func (c *controlSession) writeJSON(ctx context.Context, msg interface{}) error {
 // the documented behavior), whereas the previous per-iter
 // context.WithTimeout did not.
 func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity string) {
+	if err := s.validateSAS(r); err != nil {
+		s.log.Warn("listener auth failed", "entity", entity, "remote", r.RemoteAddr, "error", err)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	activity := make(chan struct{}, 1)
 	notify := func() {
 		select {

@@ -37,23 +37,6 @@ func (p *SASTokenProvider) GetToken(_ context.Context, resourceURI string) (stri
 	return GenerateSASToken(resourceURI, p.KeyName, p.Key, tokenExpiry)
 }
 
-// NoOpTokenProvider returns a fixed placeholder token. It is intended for
-// use against a relay server that does not validate tokens (e.g. the
-// in-tree aztunnel-relay binary used for local development, CI, and
-// self-hosted deployments where authentication is enforced out-of-band).
-//
-// NEVER use this provider against real Azure Relay: the placeholder token
-// will be rejected and is a clear footgun if it ever reaches a production
-// endpoint.
-type NoOpTokenProvider struct{}
-
-// GetToken returns a fixed placeholder token. The Azure Relay protocol
-// requires the sb-hc-token query parameter to be non-empty, so we return
-// a value rather than the empty string.
-func (NoOpTokenProvider) GetToken(_ context.Context, _ string) (string, error) {
-	return "aztunnel-noop", nil
-}
-
 // EntraTokenProvider obtains OAuth2 tokens via Azure Identity (DefaultAzureCredential).
 type EntraTokenProvider struct {
 	cred azcore.TokenCredential

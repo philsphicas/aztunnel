@@ -93,6 +93,23 @@ func startMockRelay(t *testing.T, useTLS bool) (host string, opts relay.ClientOp
 	return host, opts, srv
 }
 
+// mintProbeToken builds a short-lived SAS token using the mock's
+// default credentials so probe requests get past validateSAS. Returns
+// the bare token string (caller URL-encodes for the query param).
+func mintProbeToken(t *testing.T, host, entity string) string {
+	t.Helper()
+	tok, err := relay.GenerateSASToken(
+		relay.ResourceURI(host, entity),
+		server.DefaultSASKeyName,
+		server.DefaultSASKey,
+		1*time.Minute,
+	)
+	if err != nil {
+		t.Fatalf("mint probe token: %v", err)
+	}
+	return tok
+}
+
 // waitForControl polls until at least one listener has registered for
 // the given entity, or the timeout elapses. The listener's control loop
 // runs asynchronously after ListenAndServe is called.
@@ -113,7 +130,7 @@ func waitForControl(t *testing.T, host, entity string, useTLS bool, timeout time
 	// without the Upgrade header it returns 400 instead, signaling the
 	// listener IS present). We watch for the transition from 404 to
 	// 400/500-ish.
-	probeURL := scheme + "://" + host + "/$hc/" + entity + "?sb-hc-action=connect"
+	probeURL := scheme + "://" + host + "/$hc/" + entity + "?sb-hc-action=connect&sb-hc-token=" + url.QueryEscape(mintProbeToken(t, host, entity))
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		resp, err := httpClient.Get(probeURL)
@@ -140,7 +157,7 @@ func runPortForward(t *testing.T, ctx context.Context, host, entity, target stri
 		err := sender.PortForward(ctx, sender.PortForwardConfig{
 			Endpoint:      host,
 			EntityPath:    entity,
-			TokenProvider: relay.NoOpTokenProvider{},
+			TokenProvider: &relay.SASTokenProvider{KeyName: server.DefaultSASKeyName, Key: server.DefaultSASKey},
 			ClientOptions: opts,
 			Target:        target,
 			BindAddress:   bind,
@@ -176,7 +193,7 @@ func runListener(t *testing.T, ctx context.Context, host, entity string, opts re
 		err := listener.ListenAndServe(ctx, listener.Config{
 			Endpoint:      host,
 			EntityPath:    entity,
-			TokenProvider: relay.NoOpTokenProvider{},
+			TokenProvider: &relay.SASTokenProvider{KeyName: server.DefaultSASKeyName, Key: server.DefaultSASKey},
 			ClientOptions: opts,
 			Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
@@ -239,8 +256,9 @@ func TestIntegration_PortForwardEcho(t *testing.T) {
 // is registered, the server returns 404 to the sender pre-upgrade —
 // this is the contract DialWithRetry depends on for backoff.
 func TestIntegration_NoListener_Returns404(t *testing.T) {
-	_, _, srv := startMockRelay(t, false)
-	resp, err := http.Get(srv.URL + "/$hc/nobody?sb-hc-action=connect")
+	host, _, srv := startMockRelay(t, false)
+	tok := mintProbeToken(t, host, "nobody")
+	resp, err := http.Get(srv.URL + "/$hc/nobody?sb-hc-action=connect&sb-hc-token=" + url.QueryEscape(tok))
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

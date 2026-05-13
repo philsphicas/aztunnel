@@ -72,6 +72,11 @@ func (p *pendingRendezvous) abort() {
 //     timeout/failure, close the sender WS cleanly.
 //  7. Bridge.
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity string) {
+	if err := s.validateSAS(r); err != nil {
+		s.log.Warn("sender auth failed", "entity", entity, "remote", r.RemoteAddr, "error", err)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if !s.hub.hasControls(entity) {
 		// Match Azure Relay's "no listener" semantics. The aztunnel
 		// sender (DialWithRetry) retries on this status.

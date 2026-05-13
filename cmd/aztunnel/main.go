@@ -104,9 +104,12 @@ func resolveHyco(hycoFlag string) (string, error) {
 //   - auto: SAS env vars (AZTUNNEL_KEY_NAME + AZTUNNEL_KEY) → SAS;
 //     otherwise → Entra via DefaultAzureCredential. This is the
 //     historical default.
-//   - none: NoOpTokenProvider (server must not validate tokens).
 //   - sas: require AZTUNNEL_KEY_NAME and AZTUNNEL_KEY.
 //   - entra: force Entra; fail if credentials are unavailable.
+//
+// To exercise aztunnel against the in-tree mock (aztunnel-relay), use
+// SAS with the mock's printed dummy key — there is no longer a no-auth
+// shortcut on the client side.
 func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, err error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -161,9 +164,6 @@ func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay
 	key := os.Getenv("AZTUNNEL_KEY")
 
 	switch mode {
-	case "none":
-		logger.Warn("relay auth disabled (--relay-auth=none) — do NOT use against production Azure Relay")
-		return endpoint, opts, relay.NoOpTokenProvider{}, nil
 	case "sas":
 		if keyName == "" || key == "" {
 			return "", relay.ClientOptions{}, nil, fmt.Errorf("--relay-auth=sas requires AZTUNNEL_KEY_NAME and AZTUNNEL_KEY")
@@ -185,7 +185,7 @@ func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay
 		}
 		return endpoint, opts, entra, nil
 	default:
-		return "", relay.ClientOptions{}, nil, fmt.Errorf("unknown --relay-auth value: %q (want auto, none, sas, or entra)", mode)
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("unknown --relay-auth value: %q (want auto, sas, or entra)", mode)
 	}
 }
 

@@ -36,6 +36,7 @@ func TestHandleListen_PingResetsIdleTimer(t *testing.T) {
 	s, err := NewServer(Config{
 		ListenerIdleTimeout: idle,
 		Logger:              slog.New(slog.NewTextHandler(testDiscard{}, nil)),
+		SkipAuth:            true,
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -107,6 +108,7 @@ func TestHandleListen_IdleClosesWithoutActivity(t *testing.T) {
 	s, err := NewServer(Config{
 		ListenerIdleTimeout: idle,
 		Logger:              slog.New(slog.NewTextHandler(testDiscard{}, nil)),
+		SkipAuth:            true,
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
@@ -173,6 +175,7 @@ func TestHandleListen_WatchdogExitsOnClientClose(t *testing.T) {
 	s, err := NewServer(Config{
 		ListenerIdleTimeout: idle,
 		Logger:              slog.New(slog.NewTextHandler(testDiscard{}, nil)),
+		SkipAuth:            true,
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

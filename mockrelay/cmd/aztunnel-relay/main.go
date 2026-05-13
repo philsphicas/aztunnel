@@ -4,8 +4,9 @@
 // protocol used by aztunnel listeners and senders.
 //
 // It is not a drop-in replacement for Azure Relay and is not intended
-// for production traffic: v1 performs no token validation, no
-// listener auth/authz, and no HA/clustering.
+// for production traffic: SAS validation uses a fixed dummy key
+// (printed at startup so clients can match) and the server has no
+// listener auth/authz or HA/clustering.
 //
 // See mockrelay/README.md for deployment notes and flag reference.
 package main
@@ -46,6 +47,9 @@ var CLI struct {
 	ListenerIdleTimeout time.Duration `name:"listener-idle-timeout" help:"Close idle listener control channels after this duration." default:"2m"`
 	RendezvousTimeout   time.Duration `name:"rendezvous-timeout" help:"Max time a sender waits for the listener to dial the rendezvous URL." default:"30s"`
 	MetricsAddr         string        `name:"metrics-addr" help:"Address for Prometheus metrics server (e.g. :9090); disabled if empty." env:"AZTUNNEL_RELAY_METRICS_ADDR"`
+	AuthKeyName         string        `name:"auth-key-name" help:"SAS key name the server will accept (clients set AZTUNNEL_KEY_NAME to match). Defaults to a fixed dev value." env:"AZTUNNEL_RELAY_AUTH_KEY_NAME"`
+	AuthKey             string        `name:"auth-key" help:"SAS key value the server will accept (clients set AZTUNNEL_KEY to match). Defaults to a fixed dev value — NOT secret." env:"AZTUNNEL_RELAY_AUTH_KEY"` //nolint:gosec // intentionally a fixed dev value; mock relay is a test fixture.
+	NoAuth              bool          `name:"no-auth" help:"Disable SAS validation entirely. Intended only for protocol-level tests; do not use unattended." env:"AZTUNNEL_RELAY_NO_AUTH"`
 	Version             versionFlag   `name:"version" help:"Print version and exit."`
 }
 
@@ -92,6 +96,9 @@ func run() error {
 		ListenerIdleTimeout: CLI.ListenerIdleTimeout,
 		RendezvousTimeout:   CLI.RendezvousTimeout,
 		PublicURL:           CLI.PublicURL,
+		SASKeyName:          CLI.AuthKeyName,
+		SASKey:              CLI.AuthKey,
+		SkipAuth:            CLI.NoAuth,
 	})
 	if err != nil {
 		return err
@@ -129,6 +136,7 @@ func run() error {
 	if CLI.PublicURL == "" {
 		logger.Info("--public-url unset; rendezvous URLs will be derived from the inbound Host header (safe for loopback binds)")
 	}
+	logAuthBanner(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -153,6 +161,29 @@ func resolveTLS(logger *slog.Logger) (*server.TLSOptions, error) {
 	}
 	logger.Info("generating self-signed TLS certificate")
 	return server.SelfSignedTLS()
+}
+
+// logAuthBanner emits a prominent line telling the operator which
+// AZTUNNEL_KEY_NAME / AZTUNNEL_KEY values aztunnel must use to
+// authenticate against this relay. When --no-auth is set, prints a
+// warning instead.
+func logAuthBanner(logger *slog.Logger) {
+	if CLI.NoAuth {
+		logger.Warn("SAS validation disabled (--no-auth) — every client request is accepted; do not run unattended")
+		return
+	}
+	keyName := CLI.AuthKeyName
+	if keyName == "" {
+		keyName = server.DefaultSASKeyName
+	}
+	key := CLI.AuthKey
+	if key == "" {
+		key = server.DefaultSASKey
+	}
+	logger.Info("SAS auth enabled — clients must set AZTUNNEL_KEY_NAME and AZTUNNEL_KEY to match",
+		"AZTUNNEL_KEY_NAME", keyName,
+		"AZTUNNEL_KEY", key,
+	)
 }
 
 func newLogger(level string) *slog.Logger {

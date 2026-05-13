@@ -16,8 +16,9 @@
 // offline end-to-end testing of aztunnel — for example, exercising
 // connect/listen flows without an Azure Relay subscription. It is *not*
 // a drop-in replacement for Azure Relay and is not intended for
-// production traffic: v1 performs no token validation, no listener
-// auth/authz, and no HA/clustering.
+// production traffic: SAS validation uses a fixed dummy key (printed by
+// aztunnel-relay on startup) and the server has no listener auth/authz
+// or HA/clustering.
 package server
 
 import (
@@ -65,6 +66,22 @@ type Config struct {
 	// TLS state. This is fine for local development and tests but
 	// must be set behind a reverse proxy or TLS terminator.
 	PublicURL string
+
+	// SASKeyName and SASKey configure the dummy Shared Access Signature
+	// the server validates on listen and connect requests. When empty,
+	// DefaultSASKeyName / DefaultSASKey are used. The values are NOT
+	// secret — they exist so aztunnel clients can authenticate against
+	// the mock with real --key-name/--key or AZTUNNEL_KEY_NAME/AZTUNNEL_KEY,
+	// exercising the real SAS code path end-to-end.
+	SASKeyName string
+	SASKey     string
+
+	// SkipAuth disables SAS validation entirely. Intended for tests
+	// that want to drive the protocol without having to mint tokens
+	// (e.g. low-level handler tests). Production aztunnel-relay should
+	// never set this — set SASKey / SASKeyName to something specific
+	// instead.
+	SkipAuth bool
 }
 
 // Defaults applied when fields are zero-valued.
@@ -97,6 +114,12 @@ func NewServer(cfg Config) (*Server, error) {
 		if err := validatePublicURL(cfg.PublicURL); err != nil {
 			return nil, fmt.Errorf("invalid PublicURL: %w", err)
 		}
+	}
+	if cfg.SASKeyName == "" {
+		cfg.SASKeyName = DefaultSASKeyName
+	}
+	if cfg.SASKey == "" {
+		cfg.SASKey = DefaultSASKey
 	}
 	return &Server{
 		cfg: cfg,

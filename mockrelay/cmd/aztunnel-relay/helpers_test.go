@@ -14,7 +14,29 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/philsphicas/aztunnel/mockrelay/server"
 )
+
+// clientAuthEnv returns the parent environment plus AZTUNNEL_KEY_NAME
+// and AZTUNNEL_KEY set to the mock relay's default credentials. The
+// inherited values, if set, are intentionally overridden so a stray
+// AZTUNNEL_KEY in the developer's shell can't break the test.
+func clientAuthEnv() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+2)
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "AZTUNNEL_KEY=") || strings.HasPrefix(kv, "AZTUNNEL_KEY_NAME=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out,
+		"AZTUNNEL_KEY_NAME="+server.DefaultSASKeyName,
+		"AZTUNNEL_KEY="+server.DefaultSASKey,
+	)
+	return out
+}
 
 // Singleton-built binaries shared across all subprocess tests. Built
 // lazily on first use; subsequent callers reuse the same path. Go's
@@ -134,7 +156,9 @@ func startRelay(t *testing.T, ctx context.Context, extraArgs ...string) *relayPr
 }
 
 // startListener starts `aztunnel relay-listener` against the given
-// relay and entity, using --relay-auth=none. extraArgs are appended.
+// relay and entity. The aztunnel subprocess inherits AZTUNNEL_KEY_NAME
+// and AZTUNNEL_KEY (set by clientAuthEnv) so SAS validation passes
+// against the mock relay's default credentials. extraArgs are appended.
 func startListener(t *testing.T, ctx context.Context, relayURL, entity string, extraArgs ...string) *clientProc {
 	t.Helper()
 	aztunnel, _ := binaries(t)
@@ -143,7 +167,6 @@ func startListener(t *testing.T, ctx context.Context, relayURL, entity string, e
 		"relay-listener",
 		"--relay", relayURL,
 		"--hyco", entity,
-		"--relay-auth=none",
 		"--log-level", "info",
 	}, extraArgs...)
 	return startClient(t, ctx, aztunnel, "listener", args)
@@ -159,7 +182,6 @@ func startPortForwardSender(t *testing.T, ctx context.Context, relayURL, entity,
 		"relay-sender", "port-forward",
 		"--relay", relayURL,
 		"--hyco", entity,
-		"--relay-auth=none",
 		"--bind", bindAddr,
 		"--log-level", "info",
 	}, extraArgs...)
@@ -177,7 +199,6 @@ func startSOCKS5Sender(t *testing.T, ctx context.Context, relayURL, entity, bind
 		"relay-sender", "socks5-proxy",
 		"--relay", relayURL,
 		"--hyco", entity,
-		"--relay-auth=none",
 		"--bind", bindAddr,
 		"--log-level", "info",
 	}, extraArgs...)
@@ -196,12 +217,11 @@ func startConnectSender(t *testing.T, ctx context.Context, relayURL, entity, tar
 		"relay-sender", "connect",
 		"--relay", relayURL,
 		"--hyco", entity,
-		"--relay-auth=none",
 		"--log-level", "info",
 		target,
 	}
 	cmd := exec.CommandContext(ctx, aztunnel, args...) //nolint:gosec // test-only paths
-	cmd.Env = os.Environ()
+	cmd.Env = clientAuthEnv()
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -233,7 +253,7 @@ func startConnectSender(t *testing.T, ctx context.Context, relayURL, entity, tar
 func startClient(t *testing.T, ctx context.Context, binary, label string, args []string) *clientProc {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // test-only paths
-	cmd.Env = os.Environ()
+	cmd.Env = clientAuthEnv()
 	out := &lockedBuffer{}
 	cmd.Stderr = out
 	cmd.Stdout = out
