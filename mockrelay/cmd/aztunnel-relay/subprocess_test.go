@@ -13,7 +13,7 @@ import (
 // the relay and a listener + port-forward sender as real subprocesses,
 // and round-trips bytes through a local echo TCP server. This catches
 // CLI/env wiring issues that in-process tests can't (--relay parsing,
-// --relay-auth handling, default scheme/suffix decisions).
+// SAS credential resolution, default suffix decisions).
 //
 // The relay always runs with TLS (a self-signed cert generated on
 // startup); aztunnel uses --relay-insecure-tls to accept it. aztunnel
@@ -30,10 +30,10 @@ func TestSubprocess_EndToEnd(t *testing.T) {
 	rp := startRelay(t, ctx)
 
 	entity := "subproc-end-to-end"
-	_ = startListener(t, ctx, rp.addr, entity)
+	_ = startListener(t, ctx, rp.relayURL, entity)
 
 	pfBind := fmt.Sprintf("127.0.0.1:%d", pickFreePort(t))
-	_ = startPortForwardSender(t, ctx, rp.addr, entity, pfBind, echoAddr)
+	_ = startPortForwardSender(t, ctx, rp.relayURL, entity, pfBind, echoAddr)
 
 	waitForTCP(t, pfBind, 5*time.Second)
 

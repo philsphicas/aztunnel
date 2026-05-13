@@ -100,9 +100,10 @@ func buildPkg(binDir, name, pkgPath string) (string, error) {
 
 // relayProc is a running aztunnel-relay subprocess.
 type relayProc struct {
-	cmd  *exec.Cmd
-	addr string // 127.0.0.1:PORT — bare host:port, dialed by aztunnel as wss
-	out  *lockedBuffer
+	cmd      *exec.Cmd
+	addr     string // 127.0.0.1:PORT — bare host:port for TCP probes
+	relayURL string // wss://127.0.0.1:PORT — what aztunnel --relay expects
+	out      *lockedBuffer
 }
 
 // clientProc is a running aztunnel client subprocess (listener or
@@ -140,9 +141,10 @@ func startRelay(t *testing.T, ctx context.Context, extraArgs ...string) *relayPr
 	}
 
 	proc := &relayProc{
-		cmd:  cmd,
-		addr: addr,
-		out:  out,
+		cmd:      cmd,
+		addr:     addr,
+		relayURL: "wss://" + addr,
+		out:      out,
 	}
 	t.Cleanup(func() {
 		_ = cmd.Process.Signal(os.Interrupt)

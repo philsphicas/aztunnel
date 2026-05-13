@@ -91,29 +91,15 @@ func resolveHyco(hycoFlag string) (string, error) {
 //
 // Suffix precedence: --relay-suffix > AZTUNNEL_RELAY_SUFFIX (env) >
 // DefaultRelaySuffix. Suffix is only applied to bare hostnames with no
-// dot AND no colon (port). Inputs that include a port — typical for
-// mock/self-hosted relays — are used verbatim.
+// dot.
 //
-// Transport is always TLS (wss). aztunnel rejects ws:// / http:// URLs
-// at parse time. --relay-insecure-tls (or AZTUNNEL_RELAY_INSECURE_TLS=1)
-// skips TLS verification — required for the mock relay's self-signed
-// certificate but never appropriate for real Azure Relay.
+// Auth resolution: SAS env vars (AZTUNNEL_KEY_NAME + AZTUNNEL_KEY) →
+// SAS; otherwise → Entra ID via DefaultAzureCredential.
 //
-// Auth precedence for --relay-auth: CLI flag > AZTUNNEL_RELAY_AUTH (env,
-// bound by kong) > "auto" default. Modes:
-//   - auto: SAS env vars (AZTUNNEL_KEY_NAME + AZTUNNEL_KEY) → SAS;
-//     otherwise → Entra via DefaultAzureCredential. This is the
-//     historical default.
-//   - sas: require AZTUNNEL_KEY_NAME and AZTUNNEL_KEY.
-//   - entra: force Entra; fail if credentials are unavailable.
-//
-// To exercise aztunnel against the in-tree mock (aztunnel-relay), use
-// SAS with the mock's printed dummy key — there is no longer a no-auth
-// shortcut on the client side.
-func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, err error) {
-	if logger == nil {
-		logger = slog.Default()
-	}
+// --relay-insecure-tls (or AZTUNNEL_RELAY_INSECURE_TLS=1) populates
+// opts.TLSConfig with InsecureSkipVerify. Callers are expected to log
+// a warning when this is set.
+func resolveAuth(af AuthFlags) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, err error) {
 	ns := af.Relay
 	if ns == "" {
 		ns = af.Namespace
@@ -132,51 +118,34 @@ func resolveAuth(af AuthFlags, logger *slog.Logger) (endpoint string, opts relay
 		suffix = relay.DefaultRelaySuffix
 	}
 
-	host := relay.ParseRelay(ns, suffix)
-	if host == "" {
+	endpoint = relay.ParseRelay(ns, suffix)
+	if endpoint == "" {
 		return "", relay.ClientOptions{}, nil, fmt.Errorf("invalid relay endpoint: %q", ns)
 	}
-	endpoint = host
 
 	if af.RelayInsecureTLS || os.Getenv("AZTUNNEL_RELAY_INSECURE_TLS") == "1" {
 		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in by user for mock/self-hosted
-		logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
-	}
-
-	mode := strings.ToLower(af.RelayAuth)
-	if mode == "" {
-		// Defense in depth: kong's env: tag and default:"auto" already
-		// guarantee a non-empty value here, but fall back if the field
-		// is cleared programmatically (e.g. by a test).
-		mode = "auto"
 	}
 
 	keyName := os.Getenv("AZTUNNEL_KEY_NAME")
 	key := os.Getenv("AZTUNNEL_KEY")
-
-	switch mode {
-	case "sas":
-		if keyName == "" || key == "" {
-			return "", relay.ClientOptions{}, nil, fmt.Errorf("--relay-auth=sas requires AZTUNNEL_KEY_NAME and AZTUNNEL_KEY")
-		}
+	if keyName != "" && key != "" {
 		return endpoint, opts, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
-	case "entra":
-		entra, err := relay.NewEntraTokenProvider()
-		if err != nil {
-			return "", relay.ClientOptions{}, nil, fmt.Errorf("--relay-auth=entra: %w", err)
-		}
-		return endpoint, opts, entra, nil
-	case "auto":
-		if keyName != "" && key != "" {
-			return endpoint, opts, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
-		}
-		entra, err := relay.NewEntraTokenProvider()
-		if err != nil {
-			return "", relay.ClientOptions{}, nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
-		}
-		return endpoint, opts, entra, nil
-	default:
-		return "", relay.ClientOptions{}, nil, fmt.Errorf("unknown --relay-auth value: %q (want auto, sas, or entra)", mode)
+	}
+
+	entra, err := relay.NewEntraTokenProvider()
+	if err != nil {
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
+	}
+	return endpoint, opts, entra, nil
+}
+
+// warnInsecureTLS emits a one-line warning when opts.TLSConfig disables
+// certificate verification. Call this from each cmd after resolveAuth so
+// the warning shows up under the cmd's own logger configuration.
+func warnInsecureTLS(opts relay.ClientOptions, logger *slog.Logger) {
+	if opts.TLSConfig != nil && opts.TLSConfig.InsecureSkipVerify {
+		logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
 	}
 }
 

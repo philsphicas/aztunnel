@@ -21,12 +21,13 @@ func (c *ConnectCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	logger := newLogger(globals.LogLevel)
-
-	endpoint, opts, tp, err := resolveAuth(c.AuthFlags, logger)
+	endpoint, opts, tp, err := resolveAuth(c.AuthFlags)
 	if err != nil {
 		return err
 	}
+
+	logger := newLogger(globals.LogLevel)
+	warnInsecureTLS(opts, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

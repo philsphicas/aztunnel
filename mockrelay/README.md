@@ -6,8 +6,9 @@
 > listener and sender, so you can exercise the full data path without
 > an Azure account.
 >
-> It currently performs **no token validation, no listener auth, and
-> no HA**. Anyone who can reach its TCP port can listen for or send
+> It validates SAS tokens against a fixed dummy key (printed at
+> startup) but performs **no listener auth and no HA**. Anyone who
+> can reach its TCP port AND knows the key can listen for or send
 > connections to any entity. Use it for local dev, CI, and
 > self-contained air-gapped tests — not as a public-facing service.
 > If you need a hardened self-hosted relay, that is a separate effort
@@ -24,11 +25,10 @@ this module.
 
 ## Quick start
 
-The simplest setup is a plain-HTTP relay on localhost, with no auth
-and no TLS. Ideal for tests, dev loops, and demos.
+The simplest setup is a TLS relay on localhost. aztunnel only dials
+TLS-protected relays, so `--tls` is required.
 
-Terminal 1 — start the relay (TLS is required because aztunnel only
-dials TLS-protected relays):
+Terminal 1 — start the relay:
 
 ```sh
 aztunnel-relay --tls
@@ -48,7 +48,7 @@ export AZTUNNEL_KEY_NAME=dev
 export AZTUNNEL_KEY=dev-secret-do-not-use-in-prod
 
 aztunnel relay-listener \
-  --relay localhost:8080 \
+  --relay wss://localhost:8080 \
   --hyco demo-hc \
   --relay-insecure-tls
 ```
@@ -57,7 +57,7 @@ Terminal 3 — start a port-forward sender (same env vars):
 
 ```sh
 aztunnel relay-sender port-forward \
-  --relay localhost:8080 \
+  --relay wss://localhost:8080 \
   --hyco demo-hc \
   --bind 127.0.0.1:2222 \
   --relay-insecure-tls \
@@ -68,11 +68,11 @@ Now `ssh -p 2222 user@127.0.0.1` will tunnel through the local relay.
 
 Key flags explained:
 
-| Flag                                     | Why                                                                                                                                                                       |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--relay localhost:8080`                 | Bare `host:port` is treated as `wss://localhost:8080`. The Azure suffix is not appended when a port is present.                                                           |
-| `--relay-insecure-tls`                   | Skip TLS verification for the mock's self-signed cert. Required only for local/testing setups where the cert isn't trusted by the system store.                           |
-| `AZTUNNEL_KEY_NAME` / `AZTUNNEL_KEY` env | The mock SAS credentials. Defaults are `dev` / `dev-secret-do-not-use-in-prod`. Override with `--auth-key-name` / `--auth-key` on the relay if you want different values. |
+| Flag                                     | Why                                                                                                                                             |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--relay wss://localhost:8080`           | Relay endpoints must be a `wss://` URL (or a bare/FQDN namespace name for real Azure Relay). Plain `ws://` / `http://` are rejected.            |
+| `--relay-insecure-tls`                   | Skip TLS verification for the mock's self-signed cert. Required only for local/testing setups where the cert isn't trusted by the system store. |
+| `AZTUNNEL_KEY_NAME` / `AZTUNNEL_KEY` env | The mock SAS credentials. Defaults are `dev` / `dev-secret-do-not-use-in-prod`.                                                                 |
 
 ## TLS
 
@@ -100,13 +100,10 @@ store):
 
 ```sh
 aztunnel relay-listener \
-  --relay localhost:8443 \
+  --relay wss://localhost:8443 \
   --hyco demo-hc \
   --relay-insecure-tls
 ```
-
-(Note: when the `--relay` value includes a port and no scheme, it is
-treated as `wss://`. So `localhost:8443` → `wss://localhost:8443`.)
 
 ### Provided certificate (e.g. for a non-loopback test bed)
 
@@ -155,9 +152,6 @@ aztunnel-relay [flags]
   --listener-idle-timeout=2m    Close idle listener control channels.
   --rendezvous-timeout=30s      Max wait for listener to dial rendezvous URL.
   --metrics-addr                Prometheus metrics address (e.g. :9090).
-  --auth-key-name=dev           SAS key name accepted from clients.
-  --auth-key=dev-secret-...     SAS key value accepted from clients.
-  --no-auth                     Disable SAS validation entirely (tests only).
 ```
 
 All flags have matching environment variables (`AZTUNNEL_RELAY_BIND`,
@@ -179,17 +173,20 @@ uses its normal SAS code path — there is no client-side bypass for the
 mock case.
 
 The `--relay` value drives scheme and suffix decisions. Plain `ws://`
-and `http://` URLs are rejected — aztunnel only dials TLS.
+and `http://` URLs are rejected — aztunnel only dials TLS. Bare
+`host:port` is also rejected; use the `wss://` form for explicit
+ports.
 
-| `--relay` value                  | Scheme | Suffix appended?                |
-| -------------------------------- | ------ | ------------------------------- |
-| `my-ns`                          | wss    | yes (`.servicebus.windows.net`) |
-| `my-ns.example.com`              | wss    | no                              |
-| `relay.example.com:8443`         | wss    | no (port present)               |
-| `localhost:8080`                 | wss    | no (port present)               |
-| `wss://my-ns`                    | wss    | yes                             |
-| `https://relay.example.com:8443` | wss    | no                              |
-| `ws://localhost:8080`            | —      | rejected (use port-only form)   |
+| `--relay` value                  | Suffix appended?                |
+| -------------------------------- | ------------------------------- |
+| `my-ns`                          | yes (`.servicebus.windows.net`) |
+| `my-ns.example.com`              | no                              |
+| `wss://relay.example.com:8443`   | no                              |
+| `wss://localhost:8080`           | no                              |
+| `wss://my-ns`                    | yes                             |
+| `https://relay.example.com:8443` | no                              |
+| `localhost:8080`                 | rejected (use `wss://` form)    |
+| `ws://localhost:8080`            | rejected (TLS only)             |
 
 ## Architecture
 
@@ -246,7 +243,7 @@ is to run `aztunnel-relay` as a subprocess in your test setup:
 aztunnel-relay --tls --bind 127.0.0.1:0 --log-level=warn &
 ```
 
-…then point your aztunnel client at the relay's bound `host:port` with
+…then point your aztunnel client at the relay's bound `wss://host:port` URL with
 `--relay-insecure-tls` (to accept the self-signed cert) and the default
 `AZTUNNEL_KEY_NAME=dev` / `AZTUNNEL_KEY=dev-secret-do-not-use-in-prod`
 SAS credentials.

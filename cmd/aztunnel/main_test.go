@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"os"
 	"runtime/debug"
@@ -11,12 +10,6 @@ import (
 
 	"github.com/philsphicas/aztunnel/internal/relay"
 )
-
-// discardLogger returns a logger that drops all output, for tests that
-// want to exercise resolveAuth without polluting test output.
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
 
 func TestAutomemlimitActive(t *testing.T) {
 	// automemlimit is activated via blank import in main.go. It reads the
@@ -78,7 +71,7 @@ func TestResolveAuth_NamespaceFromEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, tp, err := resolveAuth(AuthFlags{}, discardLogger())
+	endpoint, _, tp, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -95,7 +88,7 @@ func TestResolveAuth_SASCredentials(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "RootManageSharedAccessKey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, tp, err := resolveAuth(AuthFlags{}, discardLogger())
+	endpoint, _, tp, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -120,7 +113,7 @@ func TestResolveAuth_MissingNamespace(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	_, _, _, err := resolveAuth(AuthFlags{}, discardLogger())
+	_, _, _, err := resolveAuth(AuthFlags{})
 	if err == nil {
 		t.Fatal("expected error when namespace is missing, got nil")
 	}
@@ -134,7 +127,7 @@ func TestResolveAuth_NamespaceFlagPriority(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "from-flag"}, discardLogger())
+	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "from-flag"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -148,7 +141,7 @@ func TestResolveAuth_FQDNInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{}, discardLogger())
+	endpoint, _, _, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -161,7 +154,7 @@ func TestResolveAuth_URIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "sb://my-relay.servicebus.windows.net"}, discardLogger())
+	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "sb://my-relay.servicebus.windows.net"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -175,7 +168,7 @@ func TestResolveAuth_CustomSuffixFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.chinacloudapi.cn"}, discardLogger())
+	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.chinacloudapi.cn"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -190,7 +183,7 @@ func TestResolveAuth_SuffixEnvVar(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{}, discardLogger())
+	endpoint, _, _, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -203,7 +196,7 @@ func TestResolveAuth_SuffixIgnoredForFQDN(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "my-relay.servicebus.chinacloudapi.cn", RelaySuffix: ".should-be-ignored"}, discardLogger())
+	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "my-relay.servicebus.chinacloudapi.cn", RelaySuffix: ".should-be-ignored"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -218,7 +211,7 @@ func TestResolveAuth_SuffixFlagPrecedenceOverEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.usgovcloudapi.net"}, discardLogger())
+	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.usgovcloudapi.net"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -231,7 +224,7 @@ func TestResolveAuth_InvalidURIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	_, _, _, err := resolveAuth(AuthFlags{Relay: "sb://"}, discardLogger())
+	_, _, _, err := resolveAuth(AuthFlags{Relay: "sb://"})
 	if err == nil {
 		t.Fatal("expected error for invalid URI input, got nil")
 	}
@@ -245,7 +238,7 @@ func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	_, _, tp, err := resolveAuth(AuthFlags{}, discardLogger())
+	_, _, tp, err := resolveAuth(AuthFlags{})
 	// Either it succeeds with Entra or fails because no Azure creds available.
 	// Either way, tp should NOT be a SASTokenProvider.
 	if err == nil {
@@ -256,38 +249,15 @@ func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 	// If err != nil, that's expected in CI where no Azure creds are available.
 }
 
-func TestResolveAuth_RelayAuthNoneIsRejected(t *testing.T) {
-	// --relay-auth=none was removed when the mock relay started
-	// validating SAS. The auto/sas/entra modes are the only valid
-	// values; anything else (including the historical "none") must
-	// return an error.
-	t.Setenv("AZTUNNEL_RELAY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY", "")
-	t.Setenv("AZTUNNEL_RELAY_AUTH", "")
-
-	_, _, _, err := resolveAuth(AuthFlags{
-		Relay:     "localhost:8080",
-		RelayAuth: "none",
-	}, discardLogger())
-	if err == nil {
-		t.Fatal("expected error for --relay-auth=none, got nil")
-	}
-	if !strings.Contains(err.Error(), "unknown --relay-auth") {
-		t.Errorf("error %q should mention 'unknown --relay-auth'", err.Error())
-	}
-}
-
 func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_RELAY_INSECURE_TLS", "")
 	t.Setenv("AZTUNNEL_KEY_NAME", "k")
 	t.Setenv("AZTUNNEL_KEY", "v")
 
 	_, opts, _, err := resolveAuth(AuthFlags{
-		Relay:            "localhost:8443",
-		RelayAuth:        "sas",
+		Relay:            "wss://localhost:8443",
 		RelayInsecureTLS: true,
-	}, discardLogger())
+	})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -313,10 +283,7 @@ func TestResolveAuth_RejectsPlainSchemes(t *testing.T) {
 		{"ftp scheme", "ftp://relay.example.com:8443"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := resolveAuth(AuthFlags{
-				Relay:     tc.relay,
-				RelayAuth: "sas",
-			}, discardLogger())
+			_, _, _, err := resolveAuth(AuthFlags{Relay: tc.relay})
 			if err == nil {
 				t.Fatalf("expected error for relay %q, got nil", tc.relay)
 			}
@@ -324,53 +291,6 @@ func TestResolveAuth_RejectsPlainSchemes(t *testing.T) {
 				t.Errorf("error %q should mention 'invalid relay endpoint'", err.Error())
 			}
 		})
-	}
-}
-
-func TestResolveAuth_NilLoggerDoesNotPanic(t *testing.T) {
-	t.Setenv("AZTUNNEL_KEY_NAME", "k")
-	t.Setenv("AZTUNNEL_KEY", "v")
-	// resolveAuth must internally default a nil logger to slog.Default().
-	// resolveAuth's logger is used by the --relay-insecure-tls warning
-	// and by other diagnostic paths; nil should not panic.
-	_, _, _, err := resolveAuth(AuthFlags{
-		Relay:            "localhost:8443",
-		RelayAuth:        "sas",
-		RelayInsecureTLS: true,
-	}, nil)
-	if err != nil {
-		t.Fatalf("resolveAuth(nil logger): %v", err)
-	}
-}
-
-func TestResolveAuth_AuthModeSAS_MissingCreds(t *testing.T) {
-	t.Setenv("AZTUNNEL_KEY_NAME", "")
-	t.Setenv("AZTUNNEL_KEY", "")
-
-	_, _, _, err := resolveAuth(AuthFlags{
-		Relay:     "myns",
-		RelayAuth: "sas",
-	}, discardLogger())
-	if err == nil {
-		t.Fatal("expected error when --relay-auth=sas without credentials")
-	}
-	if !strings.Contains(err.Error(), "AZTUNNEL_KEY_NAME") {
-		t.Errorf("error %q should mention AZTUNNEL_KEY_NAME", err.Error())
-	}
-}
-
-func TestResolveAuth_BareHostPortKeepsNoSuffix(t *testing.T) {
-	t.Setenv("AZTUNNEL_KEY_NAME", "k")
-	t.Setenv("AZTUNNEL_KEY", "v")
-	endpoint, _, _, err := resolveAuth(AuthFlags{
-		Relay:     "localhost:8080",
-		RelayAuth: "sas",
-	}, discardLogger())
-	if err != nil {
-		t.Fatalf("resolveAuth: %v", err)
-	}
-	if endpoint != "localhost:8080" {
-		t.Errorf("endpoint = %q, want %q (no suffix when port present)", endpoint, "localhost:8080")
 	}
 }
 

@@ -25,12 +25,13 @@ func (r *RelayListenerCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	logger := newLogger(globals.LogLevel)
-
-	endpoint, opts, tp, err := resolveAuth(r.AuthFlags, logger)
+	endpoint, opts, tp, err := resolveAuth(r.AuthFlags)
 	if err != nil {
 		return err
 	}
+
+	logger := newLogger(globals.LogLevel)
+	warnInsecureTLS(opts, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

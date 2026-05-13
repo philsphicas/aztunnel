@@ -23,9 +23,7 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	logger := newLogger(globals.LogLevel)
-
-	endpoint, opts, tp, err := resolveAuth(s.AuthFlags, logger)
+	endpoint, opts, tp, err := resolveAuth(s.AuthFlags)
 	if err != nil {
 		return err
 	}
@@ -41,6 +39,8 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 		}
 		bind = "0.0.0.0:" + port
 	}
+	logger := newLogger(globals.LogLevel)
+	warnInsecureTLS(opts, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
