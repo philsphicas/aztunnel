@@ -30,8 +30,12 @@ and no TLS. Ideal for tests, dev loops, and demos.
 Terminal 1 — start the relay:
 
 ```sh
-aztunnel-relay --bind :8080
+aztunnel-relay
 ```
+
+(equivalent to `aztunnel-relay --bind 127.0.0.1:8080`; the loopback bind
+is the default so the mock can't accidentally be reached from another
+host.)
 
 Terminal 2 — start a listener that forwards to a local SSH server:
 
@@ -70,7 +74,7 @@ Two options:
 ### Self-signed certificate (for local TLS testing)
 
 ```sh
-aztunnel-relay --tls --bind :8443
+aztunnel-relay --tls --bind 127.0.0.1:8443
 ```
 
 The relay generates an ECDSA P-256 self-signed cert for `localhost`,
@@ -103,14 +107,15 @@ aztunnel-relay \
   --tls-cert /etc/ssl/relay.example.com.crt \
   --tls-key  /etc/ssl/relay.example.com.key \
   --public-url https://relay.example.com \
-  --bind :8443
+  --bind 0.0.0.0:8443
 ```
 
 Set `--public-url` to the externally-visible base URL of the relay.
 This is what the server tells the listener to dial for the rendezvous
 half of each connection. **Required behind a reverse proxy or when
-binding to `0.0.0.0`** — otherwise the rendezvous URL is built from the
-inbound `Host` header, which may not be externally routable.
+binding to a non-loopback address** — otherwise the rendezvous URL is
+built from the inbound `Host` header, which is sender-controlled and
+not generally externally routable.
 
 Clients then connect with their default settings (full TLS verification):
 
@@ -129,7 +134,7 @@ aztunnel relay-listener \
 ```text
 aztunnel-relay [flags]
 
-  --bind=":8080"                Address:port to bind on.
+  --bind="127.0.0.1:8080"       Address:port to bind on.
   --tls                         Enable TLS. If --tls-cert/--tls-key are
                                 unset, generate a self-signed cert.
   --tls-cert=PATH               PEM-encoded TLS certificate.

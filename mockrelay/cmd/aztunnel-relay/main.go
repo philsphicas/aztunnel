@@ -36,11 +36,11 @@ func init() {
 
 // CLI is the top-level command structure for aztunnel-relay.
 var CLI struct {
-	Bind                string        `name:"bind" help:"Address:port to bind on." default:":8080" env:"AZTUNNEL_RELAY_BIND"`
+	Bind                string        `name:"bind" help:"Address:port to bind on." default:"127.0.0.1:8080" env:"AZTUNNEL_RELAY_BIND"`
 	TLS                 bool          `name:"tls" help:"Enable TLS (wss). If --tls-cert/--tls-key are unset, generate a self-signed cert." env:"AZTUNNEL_RELAY_TLS"`
 	TLSCert             string        `name:"tls-cert" help:"Path to PEM-encoded TLS certificate." env:"AZTUNNEL_RELAY_TLS_CERT"`
 	TLSKey              string        `name:"tls-key" help:"Path to PEM-encoded TLS private key." env:"AZTUNNEL_RELAY_TLS_KEY"`
-	PublicURL           string        `name:"public-url" help:"Base URL for minted rendezvous addresses (e.g. https://relay.example.com). Required behind a reverse proxy or when binding to 0.0.0.0." env:"AZTUNNEL_RELAY_PUBLIC_URL"`
+	PublicURL           string        `name:"public-url" help:"Base URL for minted rendezvous addresses (e.g. https://relay.example.com). Required behind a reverse proxy or when binding to a non-loopback address." env:"AZTUNNEL_RELAY_PUBLIC_URL"`
 	LogLevel            string        `name:"log-level" help:"Log level (debug, info, warn, error)." default:"info"`
 	MaxConnections      int           `name:"max-connections" help:"Max concurrent rendezvous connections per entity (0 = unlimited)." default:"0"`
 	ListenerIdleTimeout time.Duration `name:"listener-idle-timeout" help:"Close idle listener control channels after this duration." default:"2m"`
