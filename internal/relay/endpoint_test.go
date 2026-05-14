@@ -17,6 +17,14 @@ func TestParseRelay(t *testing.T) {
 		{"wss:// uri", "wss://my-relay.servicebus.windows.net", DefaultRelaySuffix, "my-relay.servicebus.windows.net"},
 		{"wss:// uri with port", "wss://relay.example.com:8443", DefaultRelaySuffix, "relay.example.com:8443"},
 		{"https:// uri with port", "https://relay.example.com:8443", DefaultRelaySuffix, "relay.example.com:8443"},
+		// Explicit default-port :443 is stripped on https/wss so the
+		// canonical sr matches what Azure Relay expects (no port).
+		{"wss:// explicit :443 stripped", "wss://my-relay.servicebus.windows.net:443", DefaultRelaySuffix, "my-relay.servicebus.windows.net"},
+		{"https:// explicit :443 stripped", "https://my-relay.servicebus.windows.net:443", DefaultRelaySuffix, "my-relay.servicebus.windows.net"},
+		{"wss:// bare name with :443", "wss://my-relay:443", DefaultRelaySuffix, "my-relay.servicebus.windows.net"},
+		// sb:// is accepted as a scheme but does not get default-port
+		// stripping — aztunnel doesn't dial AMQP anyway.
+		{"sb:// uri with :5671 preserved", "sb://my-relay.servicebus.windows.net:5671", DefaultRelaySuffix, "my-relay.servicebus.windows.net:5671"},
 		{"wss:// bare → wss + suffix", "wss://my-relay", DefaultRelaySuffix, "my-relay.servicebus.windows.net"},
 		{"whitespace", "  my-relay  ", DefaultRelaySuffix, "my-relay.servicebus.windows.net"},
 		{"custom suffix", "my-relay", ".servicebus.chinacloudapi.cn", "my-relay.servicebus.chinacloudapi.cn"},

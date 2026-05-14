@@ -25,6 +25,12 @@ const DefaultRelaySuffix = ".servicebus.windows.net"
 // Bare host:port (or bare IPv6 literal) is not accepted — use the
 // wss:// URL form for those.
 //
+// An explicit :443 on https/wss URIs is stripped so the canonical
+// host string (and the SAS resource URI derived from it) matches the
+// portless form Azure Relay expects. Non-default ports are preserved
+// — the mock relay listens on :8443 by default and the demo stack
+// relies on that.
+//
 // Returns "" on empty input, malformed URI, or unknown scheme.
 func ParseRelay(input, defaultSuffix string) string {
 	input = strings.TrimSpace(input)
@@ -37,12 +43,16 @@ func ParseRelay(input, defaultSuffix string) string {
 		if err != nil || u.Host == "" {
 			return ""
 		}
-		switch strings.ToLower(u.Scheme) {
+		scheme := strings.ToLower(u.Scheme)
+		switch scheme {
 		case "sb", "https", "wss":
 		default:
 			return ""
 		}
 		host := u.Host
+		if u.Port() == "443" && (scheme == "https" || scheme == "wss") {
+			host = u.Hostname()
+		}
 		if !strings.ContainsAny(host, ".:") {
 			host += defaultSuffix
 		}
