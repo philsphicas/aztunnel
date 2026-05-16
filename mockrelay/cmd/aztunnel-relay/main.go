@@ -42,10 +42,10 @@ var CLI struct {
 	TLSCert             string        `name:"tls-cert" help:"Path to PEM-encoded TLS certificate." env:"AZTUNNEL_RELAY_TLS_CERT"`
 	TLSKey              string        `name:"tls-key" help:"Path to PEM-encoded TLS private key." env:"AZTUNNEL_RELAY_TLS_KEY"`
 	PublicURL           string        `name:"public-url" help:"Base URL for minted rendezvous addresses (e.g. https://relay.example.com). Required behind a reverse proxy or when binding to a non-loopback address." env:"AZTUNNEL_RELAY_PUBLIC_URL"`
-	LogLevel            string        `name:"log-level" help:"Log level (debug, info, warn, error)." default:"info"`
-	MaxConnections      int           `name:"max-connections" help:"Max concurrent rendezvous connections per entity (0 = unlimited)." default:"0"`
-	ListenerIdleTimeout time.Duration `name:"listener-idle-timeout" help:"Close idle listener control channels after this duration." default:"2m"`
-	RendezvousTimeout   time.Duration `name:"rendezvous-timeout" help:"Max time a sender waits for the listener to dial the rendezvous URL." default:"30s"`
+	LogLevel            string        `name:"log-level" help:"Log level (debug, info, warn, error)." default:"info" env:"AZTUNNEL_RELAY_LOG_LEVEL"`
+	MaxConnections      int           `name:"max-connections" help:"Max concurrent rendezvous connections per entity (0 = unlimited)." default:"0" env:"AZTUNNEL_RELAY_MAX_CONNECTIONS"`
+	ListenerIdleTimeout time.Duration `name:"listener-idle-timeout" help:"Close idle listener control channels after this duration." default:"2m" env:"AZTUNNEL_RELAY_LISTENER_IDLE_TIMEOUT"`
+	RendezvousTimeout   time.Duration `name:"rendezvous-timeout" help:"Max time a sender waits for the listener to dial the rendezvous URL." default:"30s" env:"AZTUNNEL_RELAY_RENDEZVOUS_TIMEOUT"`
 	MetricsAddr         string        `name:"metrics-addr" help:"Address for Prometheus metrics server (e.g. :9090); disabled if empty." env:"AZTUNNEL_RELAY_METRICS_ADDR"`
 	Version             versionFlag   `name:"version" help:"Print version and exit."`
 }
