@@ -430,14 +430,21 @@ func TestMaxConnections(t *testing.T) {
 			}
 			defer conn3.Close()
 
+			// Three valid enforcement signals: (a) Write fails because the
+			// sender already closed the local TCP socket in response to the
+			// listener rejecting the rendezvous, (b) Read returns an error
+			// (EOF/RST/timeout) with no data, or (c) Read times out. Only fail
+			// if the overflow payload actually round-trips. Write success
+			// alone is not enough — the bytes may sit in the local TCP send
+			// buffer indefinitely, so the Read is what proves enforcement.
 			if _, err := conn3.Write([]byte("overflow\n")); err != nil {
-				t.Fatalf("write 3rd: %v", err)
+				t.Logf("3rd connection write failed (expected enforcement signal): %v", err)
 			}
 			conn3.SetReadDeadline(time.Now().Add(5 * time.Second))
 			buf := make([]byte, 64)
 			n, err := conn3.Read(buf)
-			if err == nil {
-				t.Fatalf("3rd connection unexpectedly read %d bytes (%q) — max-connections limit not enforced", n, buf[:n])
+			if n > 0 {
+				t.Fatalf("3rd connection unexpectedly read %d bytes (%q) — max-connections limit not enforced (read err=%v)", n, buf[:n], err)
 			}
 		})
 	}
