@@ -112,22 +112,24 @@ aztunnel-relay \
   --tls \
   --tls-cert /etc/ssl/relay.example.com.crt \
   --tls-key  /etc/ssl/relay.example.com.key \
-  --public-url https://relay.example.com \
+  --public-url https://relay.example.com:8443 \
   --bind 0.0.0.0:8443
 ```
 
-Set `--public-url` to the externally-visible base URL of the relay.
-This is what the server tells the listener to dial for the rendezvous
-half of each connection. **Required behind a reverse proxy or when
-binding to a non-loopback address** — otherwise the rendezvous URL is
-built from the inbound `Host` header, which is sender-controlled and
-not generally externally routable.
+Set `--public-url` to the externally-visible base URL of the relay,
+including the port if it is not 443. This is what the server tells the
+listener to dial for the rendezvous half of each connection.
+**Required behind a reverse proxy or when binding to a non-loopback
+address** — otherwise the rendezvous URL is built from the inbound
+`Host` header, which is sender-controlled and not generally externally
+routable. If you front the relay with a 443-terminating proxy, use
+`--public-url https://relay.example.com` (no port) so clients dial 443.
 
 Clients then connect with their default settings (full TLS verification):
 
 ```sh
 aztunnel relay-listener \
-  --relay relay.example.com \
+  --relay wss://relay.example.com:8443 \
   --hyco demo-hc
 ```
 
