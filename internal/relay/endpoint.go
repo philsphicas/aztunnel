@@ -29,8 +29,9 @@ const DefaultRelaySuffix = ".servicebus.windows.net"
 // An explicit :443 on https/wss URIs is stripped so the canonical
 // host string (and the SAS resource URI derived from it) matches the
 // portless form Azure Relay expects. Non-default ports are preserved
-// — the mock relay listens on :8443 by default and the demo stack
-// relies on that.
+// — the mock relay binds on 127.0.0.1:8080 by default (the TLS
+// test-bed examples use :8443), and the demo stack relies on those
+// explicit ports round-tripping unchanged.
 //
 // URL inputs are validated strictly: userinfo, non-root paths, query
 // strings, fragments, trailing colons, and out-of-range ports
