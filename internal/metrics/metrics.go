@@ -257,9 +257,9 @@ func (m *Metrics) TrackedBridge(ctx context.Context, ws *websocket.Conn, rwc net
 
 // InstrumentedDial wraps relay.DialWithRetry with duration and error metrics.
 // Safe to call on a nil receiver (falls through to raw DialWithRetry).
-func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, role string, logger *slog.Logger) (*websocket.Conn, error) {
+func (m *Metrics) InstrumentedDial(ctx context.Context, endpoint, entityPath string, tp relay.TokenProvider, opts relay.ClientOptions, role string, logger *slog.Logger) (*websocket.Conn, error) {
 	start := time.Now()
-	ws, err := relay.DialWithRetry(ctx, endpoint, entityPath, tp, logger)
+	ws, err := relay.DialWithRetry(ctx, endpoint, entityPath, tp, opts, logger)
 	m.ObserveDialDuration(role, time.Since(start).Seconds())
 	if err != nil {
 		m.ConnectionError(role, DialReason(err, ReasonRelayFailed))

@@ -71,7 +71,7 @@ func TestResolveAuth_NamespaceFromEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, tp, err := resolveAuth("", "", "")
+	endpoint, _, tp, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestResolveAuth_SASCredentials(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "RootManageSharedAccessKey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, tp, err := resolveAuth("", "", "")
+	endpoint, _, tp, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestResolveAuth_MissingNamespace(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	_, _, err := resolveAuth("", "", "")
+	_, _, _, err := resolveAuth(AuthFlags{})
 	if err == nil {
 		t.Fatal("expected error when namespace is missing, got nil")
 	}
@@ -127,7 +127,7 @@ func TestResolveAuth_NamespaceFlagPriority(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, err := resolveAuth("from-flag", "", "")
+	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "from-flag"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestResolveAuth_FQDNInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, err := resolveAuth("", "", "")
+	endpoint, _, _, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestResolveAuth_URIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, err := resolveAuth("sb://my-relay.servicebus.windows.net", "", "")
+	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "sb://my-relay.servicebus.windows.net"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestResolveAuth_CustomSuffixFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, err := resolveAuth("", "", ".servicebus.chinacloudapi.cn")
+	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.chinacloudapi.cn"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestResolveAuth_SuffixEnvVar(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, err := resolveAuth("", "", "")
+	endpoint, _, _, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestResolveAuth_SuffixIgnoredForFQDN(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, err := resolveAuth("my-relay.servicebus.chinacloudapi.cn", "", ".should-be-ignored")
+	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "my-relay.servicebus.chinacloudapi.cn", RelaySuffix: ".should-be-ignored"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestResolveAuth_SuffixFlagPrecedenceOverEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, err := resolveAuth("", "", ".servicebus.usgovcloudapi.net")
+	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.usgovcloudapi.net"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestResolveAuth_InvalidURIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	_, _, err := resolveAuth("sb://", "", "")
+	_, _, _, err := resolveAuth(AuthFlags{Relay: "sb://"})
 	if err == nil {
 		t.Fatal("expected error for invalid URI input, got nil")
 	}
@@ -238,7 +238,7 @@ func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	_, tp, err := resolveAuth("", "", "")
+	_, _, tp, err := resolveAuth(AuthFlags{})
 	// Either it succeeds with Entra or fails because no Azure creds available.
 	// Either way, tp should NOT be a SASTokenProvider.
 	if err == nil {
@@ -247,6 +247,51 @@ func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 		}
 	}
 	// If err != nil, that's expected in CI where no Azure creds are available.
+}
+
+func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
+	t.Setenv("AZTUNNEL_RELAY_INSECURE_TLS", "")
+	t.Setenv("AZTUNNEL_KEY_NAME", "k")
+	t.Setenv("AZTUNNEL_KEY", "v")
+
+	_, opts, _, err := resolveAuth(AuthFlags{
+		Relay:            "wss://localhost:8443",
+		RelayInsecureTLS: true,
+	})
+	if err != nil {
+		t.Fatalf("resolveAuth: %v", err)
+	}
+	if opts.TLSConfig == nil || !opts.TLSConfig.InsecureSkipVerify {
+		t.Error("expected InsecureSkipVerify TLS config")
+	}
+}
+
+func TestResolveAuth_RejectsPlainSchemes(t *testing.T) {
+	// aztunnel only dials TLS-protected relays, so any --relay value
+	// using ws://, http://, or another non-TLS scheme is rejected at
+	// parse time (not silently downgraded to wss).
+	t.Setenv("AZTUNNEL_RELAY_NAME", "")
+	t.Setenv("AZTUNNEL_KEY_NAME", "k")
+	t.Setenv("AZTUNNEL_KEY", "v")
+
+	for _, tc := range []struct {
+		name  string
+		relay string
+	}{
+		{"ws scheme", "ws://localhost:8080"},
+		{"http scheme", "http://localhost:8080"},
+		{"ftp scheme", "ftp://relay.example.com:8443"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := resolveAuth(AuthFlags{Relay: tc.relay})
+			if err == nil {
+				t.Fatalf("expected error for relay %q, got nil", tc.relay)
+			}
+			if !strings.Contains(err.Error(), "invalid relay endpoint") {
+				t.Errorf("error %q should mention 'invalid relay endpoint'", err.Error())
+			}
+		})
+	}
 }
 
 func TestVersion(t *testing.T) {

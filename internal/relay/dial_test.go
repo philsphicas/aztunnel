@@ -68,7 +68,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, err := Dial(ctx, endpoint, "my-entity", tp)
+		ws, err := Dial(ctx, endpoint, "my-entity", tp, ClientOptions{})
 		if err != nil {
 			t.Fatalf("Dial: %v", err)
 		}
@@ -92,7 +92,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := Dial(ctx, "test.servicebus.windows.net", "my-entity", tp)
+		_, err := Dial(ctx, "test.servicebus.windows.net", "my-entity", tp, ClientOptions{})
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -107,7 +107,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := Dial(ctx, "127.0.0.1:1", "my-entity", tp)
+		_, err := Dial(ctx, "127.0.0.1:1", "my-entity", tp, ClientOptions{})
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -122,7 +122,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel() // cancel immediately
 
-		_, err := Dial(ctx, "127.0.0.1:1", "my-entity", tp)
+		_, err := Dial(ctx, "127.0.0.1:1", "my-entity", tp, ClientOptions{})
 		if err == nil {
 			t.Fatal("expected error for cancelled context, got nil")
 		}
@@ -151,7 +151,7 @@ func TestDial(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, err := Dial(ctx, endpoint, "my entity/path", tp)
+		ws, err := Dial(ctx, endpoint, "my entity/path", tp, ClientOptions{})
 		if err != nil {
 			t.Fatalf("Dial: %v", err)
 		}
@@ -184,7 +184,7 @@ func TestDialWithLogger(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		ws, err := DialWithLogger(ctx, endpoint, "test-entity", tp, logger)
+		ws, err := DialWithLogger(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
 		if err != nil {
 			t.Fatalf("DialWithLogger: %v", err)
 		}
@@ -208,7 +208,7 @@ func TestDialWithLogger(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		_, err := DialWithLogger(ctx, "127.0.0.1:1", "test-entity", tp, logger)
+		_, err := DialWithLogger(ctx, "127.0.0.1:1", "test-entity", tp, ClientOptions{}, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -253,7 +253,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
 		if err != nil {
 			t.Fatalf("DialWithRetry: %v", err)
 		}
@@ -296,7 +296,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
 		if err != nil {
 			t.Fatalf("DialWithRetry: %v", err)
 		}
@@ -322,7 +322,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 
-		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -349,7 +349,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -369,7 +369,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		_, err := DialWithRetry(ctx, "127.0.0.1:1", "test-entity", tp, logger)
+		_, err := DialWithRetry(ctx, "127.0.0.1:1", "test-entity", tp, ClientOptions{}, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -409,7 +409,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		ws, err := DialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
 		if err != nil {
 			t.Fatalf("DialWithRetry: %v", err)
 		}
@@ -450,7 +450,7 @@ func TestDialWithRetry(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, logger)
+		_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}

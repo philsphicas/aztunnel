@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -82,51 +83,70 @@ func resolveHyco(hycoFlag string) (string, error) {
 	return "", fmt.Errorf("hybrid connection name is required: use --hyco or set AZTUNNEL_HYCO_NAME")
 }
 
-// resolveAuth determines the endpoint and token provider from flags and
-// environment variables.
+// resolveAuth determines the endpoint, transport options, and token
+// provider from flags and environment variables.
 //
-// Resolution order for namespace:
-//  1. relay flag (or hidden namespace alias)
-//  2. AZTUNNEL_RELAY_NAME env var
+// Endpoint precedence: --relay > AZTUNNEL_RELAY_NAME (env). The hidden
+// --namespace alias is honored as a synonym for --relay.
 //
-// Resolution order for auth:
-//  1. AZTUNNEL_KEY_NAME + AZTUNNEL_KEY → SAS auth (explicit override)
-//  2. Otherwise → Entra ID auth via DefaultAzureCredential (default)
-func resolveAuth(relayFlag, namespaceAlias, suffixFlag string) (endpoint string, tp relay.TokenProvider, err error) {
-	ns := relayFlag
+// Suffix precedence: --relay-suffix > AZTUNNEL_RELAY_SUFFIX (env) >
+// DefaultRelaySuffix. Suffix is only applied to bare hostnames with no
+// dot.
+//
+// Auth resolution: SAS env vars (AZTUNNEL_KEY_NAME + AZTUNNEL_KEY) →
+// SAS; otherwise → Entra ID via DefaultAzureCredential.
+//
+// --relay-insecure-tls (or AZTUNNEL_RELAY_INSECURE_TLS=1) populates
+// opts.TLSConfig with InsecureSkipVerify. Callers are expected to log
+// a warning when this is set.
+func resolveAuth(af AuthFlags) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, err error) {
+	ns := af.Relay
 	if ns == "" {
-		ns = namespaceAlias
+		ns = af.Namespace
 	}
 	if ns == "" {
 		ns = os.Getenv("AZTUNNEL_RELAY_NAME")
 	}
 	if ns == "" {
-		return "", nil, fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
 	}
-	suffix := suffixFlag
+	suffix := af.RelaySuffix
 	if suffix == "" {
 		suffix = os.Getenv("AZTUNNEL_RELAY_SUFFIX")
 	}
 	if suffix == "" {
 		suffix = relay.DefaultRelaySuffix
 	}
-	endpoint = relay.ParseRelayEndpoint(ns, suffix)
+
+	endpoint = relay.ParseRelay(ns, suffix)
 	if endpoint == "" {
-		return "", nil, fmt.Errorf("invalid relay endpoint: %q", ns)
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("invalid relay endpoint: %q", ns)
+	}
+
+	if af.RelayInsecureTLS || os.Getenv("AZTUNNEL_RELAY_INSECURE_TLS") == "1" {
+		opts.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // opt-in by user for mock/self-hosted
 	}
 
 	keyName := os.Getenv("AZTUNNEL_KEY_NAME")
 	key := os.Getenv("AZTUNNEL_KEY")
-
 	if keyName != "" && key != "" {
-		return endpoint, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
+		return endpoint, opts, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
 	}
 
 	entra, err := relay.NewEntraTokenProvider()
 	if err != nil {
-		return "", nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
+		return "", relay.ClientOptions{}, nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
 	}
-	return endpoint, entra, nil
+	return endpoint, opts, entra, nil
+}
+
+// warnInsecureTLS emits a one-line warning when opts.TLSConfig disables
+// certificate verification. Call this from each cmd after resolveAuth so
+// the warning shows up under the cmd's own logger configuration.
+func warnInsecureTLS(opts relay.ClientOptions, logger *slog.Logger) {
+	if opts.TLSConfig != nil && opts.TLSConfig.InsecureSkipVerify {
+		logger.Warn("relay TLS certificate verification disabled — do NOT use against production Azure Relay")
+	}
 }
 
 // resolveResourceID returns the resource ID from flag or AZTUNNEL_ARC_RESOURCE_ID env var.

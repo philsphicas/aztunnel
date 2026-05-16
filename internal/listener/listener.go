@@ -23,6 +23,7 @@ type Config struct {
 	Endpoint       string
 	EntityPath     string
 	TokenProvider  relay.TokenProvider
+	ClientOptions  relay.ClientOptions
 	AllowList      []string // Optional target allowlist (CIDR:port patterns)
 	MaxConnections int
 	ConnectTimeout time.Duration
@@ -51,6 +52,7 @@ func ListenAndServe(ctx context.Context, cfg Config) error {
 		Endpoint:       cfg.Endpoint,
 		EntityPath:     cfg.EntityPath,
 		TokenProvider:  cfg.TokenProvider,
+		Options:        cfg.ClientOptions,
 		MaxConnections: cfg.MaxConnections,
 		Logger:         cfg.Logger,
 		Handler: func(ctx context.Context, ws *websocket.Conn) {

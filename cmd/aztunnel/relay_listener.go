@@ -25,12 +25,13 @@ func (r *RelayListenerCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	endpoint, tp, err := resolveAuth(r.Relay, r.Namespace, r.RelaySuffix)
+	endpoint, opts, tp, err := resolveAuth(r.AuthFlags)
 	if err != nil {
 		return err
 	}
 
 	logger := newLogger(globals.LogLevel)
+	warnInsecureTLS(opts, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -44,6 +45,7 @@ func (r *RelayListenerCmd) Run(globals *Globals) error {
 		Endpoint:       endpoint,
 		EntityPath:     hyco,
 		TokenProvider:  tp,
+		ClientOptions:  opts,
 		AllowList:      r.Allow,
 		MaxConnections: r.MaxConnections,
 		ConnectTimeout: r.ConnectTimeout,

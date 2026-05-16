@@ -23,6 +23,7 @@ type PortForwardConfig struct {
 	Endpoint      string
 	EntityPath    string
 	TokenProvider relay.TokenProvider
+	ClientOptions relay.ClientOptions
 	Target        string // host:port to forward to
 	BindAddress   string // local address:port to listen on
 	TCPKeepAlive  time.Duration
@@ -75,7 +76,7 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	// Set TCP keepalive on the incoming connection.
 	relay.SetTCPKeepAlive(conn, cfg.TCPKeepAlive)
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, "sender", cfg.Logger)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", cfg.Logger)
 	if err != nil {
 		return err
 	}

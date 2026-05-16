@@ -22,6 +22,9 @@ jobs:
       - name: Build
         run: make build
 
+      - name: Build mockrelay
+        run: make -C mockrelay build
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -33,6 +36,10 @@ jobs:
 
       - name: Test with coverage
         run: go test -race -coverprofile=coverage.txt ./...
+
+      - name: Test mockrelay
+        run: go test -race ./...
+        working-directory: mockrelay
 
       - name: Coverage summary
         run: go tool cover -func=coverage.txt
@@ -65,6 +72,12 @@ jobs:
         with:
           version: v2.10
 
+      - name: golangci-lint (mockrelay)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.10
+          working-directory: mockrelay
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:
@@ -76,3 +89,6 @@ jobs:
 
       - name: govulncheck
         run: make vulncheck
+
+      - name: govulncheck (mockrelay)
+        run: make -C mockrelay vulncheck

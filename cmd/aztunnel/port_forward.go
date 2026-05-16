@@ -24,7 +24,7 @@ func (p *PortForwardCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	endpoint, tp, err := resolveAuth(p.Relay, p.Namespace, p.RelaySuffix)
+	endpoint, opts, tp, err := resolveAuth(p.AuthFlags)
 	if err != nil {
 		return err
 	}
@@ -41,6 +41,7 @@ func (p *PortForwardCmd) Run(globals *Globals) error {
 		bind = "0.0.0.0:" + port
 	}
 	logger := newLogger(globals.LogLevel)
+	warnInsecureTLS(opts, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -49,6 +50,7 @@ func (p *PortForwardCmd) Run(globals *Globals) error {
 		Endpoint:      endpoint,
 		EntityPath:    hyco,
 		TokenProvider: tp,
+		ClientOptions: opts,
 		Target:        p.Target,
 		BindAddress:   bind,
 		TCPKeepAlive:  p.TCPKeepAlive,

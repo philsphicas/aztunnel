@@ -21,12 +21,13 @@ func (c *ConnectCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	endpoint, tp, err := resolveAuth(c.Relay, c.Namespace, c.RelaySuffix)
+	endpoint, opts, tp, err := resolveAuth(c.AuthFlags)
 	if err != nil {
 		return err
 	}
 
 	logger := newLogger(globals.LogLevel)
+	warnInsecureTLS(opts, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -35,6 +36,7 @@ func (c *ConnectCmd) Run(globals *Globals) error {
 		Endpoint:      endpoint,
 		EntityPath:    hyco,
 		TokenProvider: tp,
+		ClientOptions: opts,
 		Target:        c.Target,
 		Stdin:         os.Stdin,
 		Stdout:        os.Stdout,
