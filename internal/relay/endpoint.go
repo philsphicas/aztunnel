@@ -2,6 +2,7 @@ package relay
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -31,6 +32,13 @@ const DefaultRelaySuffix = ".servicebus.windows.net"
 // — the mock relay listens on :8443 by default and the demo stack
 // relies on that.
 //
+// URL inputs are validated strictly: userinfo, non-root paths, query
+// strings, fragments, trailing colons, and out-of-range ports
+// (anything outside 1-65535) are rejected as malformed rather than
+// silently dropped, so a misconfigured --relay fails fast instead of
+// signing and dialing a subtly different resource than the user
+// supplied.
+//
 // Returns "" on empty input, malformed URI, or unknown scheme.
 func ParseRelay(input, defaultSuffix string) string {
 	input = strings.TrimSpace(input)
@@ -48,6 +56,26 @@ func ParseRelay(input, defaultSuffix string) string {
 		case "sb", "https", "wss":
 		default:
 			return ""
+		}
+		// Reject URL components that ParseRelay would otherwise
+		// silently discard — only scheme://host[:port] is supported.
+		if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(input, "#") {
+			return ""
+		}
+		if u.Path != "" && u.Path != "/" {
+			return ""
+		}
+		// Reject trailing colon (e.g. "wss://host:") and out-of-range
+		// explicit ports so the failure surfaces here rather than as
+		// an opaque WebSocket/SAS error later.
+		if strings.HasSuffix(u.Host, ":") {
+			return ""
+		}
+		if p := u.Port(); p != "" {
+			n, err := strconv.Atoi(p)
+			if err != nil || n < 1 || n > 65535 {
+				return ""
+			}
 		}
 		host := u.Host
 		if u.Port() == "443" && (scheme == "https" || scheme == "wss") {

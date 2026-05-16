@@ -45,6 +45,23 @@ func TestParseRelay(t *testing.T) {
 		{"bare host:port rejected", "localhost:8080", DefaultRelaySuffix, ""},
 		{"bare ipv4:port rejected", "127.0.0.1:8080", DefaultRelaySuffix, ""},
 		{"bare ipv6 rejected", "::1", DefaultRelaySuffix, ""},
+		// URL inputs are validated strictly; userinfo / paths / query
+		// strings / fragments are rejected rather than silently dropped.
+		{"wss:// with userinfo rejected", "wss://user@relay.example.com:8443", DefaultRelaySuffix, ""},
+		{"wss:// with user:pass rejected", "wss://user:pass@relay.example.com:8443", DefaultRelaySuffix, ""},
+		{"wss:// with path rejected", "wss://relay.example.com:8443/foo", DefaultRelaySuffix, ""},
+		{"wss:// with trailing slash accepted", "wss://relay.example.com:8443/", DefaultRelaySuffix, "relay.example.com:8443"},
+		{"wss:// with query rejected", "wss://relay.example.com:8443?foo=bar", DefaultRelaySuffix, ""},
+		{"wss:// with empty query rejected", "wss://relay.example.com:8443?", DefaultRelaySuffix, ""},
+		{"wss:// with fragment rejected", "wss://relay.example.com:8443#frag", DefaultRelaySuffix, ""},
+		{"wss:// with empty fragment rejected", "wss://relay.example.com:8443#", DefaultRelaySuffix, ""},
+		// Invalid explicit ports are rejected up front so the failure
+		// is reported as "malformed URI" rather than an opaque dial error.
+		{"wss:// trailing colon rejected", "wss://relay.example.com:", DefaultRelaySuffix, ""},
+		{"wss:// port 0 rejected", "wss://relay.example.com:0", DefaultRelaySuffix, ""},
+		{"wss:// port 65536 rejected", "wss://relay.example.com:65536", DefaultRelaySuffix, ""},
+		{"wss:// non-numeric port rejected", "wss://relay.example.com:abc", DefaultRelaySuffix, ""},
+		{"wss:// ipv6 trailing colon rejected", "wss://[::1]:", DefaultRelaySuffix, ""},
 	}
 
 	for _, tt := range tests {
