@@ -305,12 +305,19 @@ func startAztunnelWithSAS(t *testing.T, env *relayEnv, sas *sasCredentials, args
 	return proc
 }
 
+// metricsScrapeClient is used by scrapeMetricsBest so that polling helpers
+// don't get wedged on a stalled /metrics response (the default http.Client
+// has no timeout, which would defeat the deadline in waitForMetric /
+// waitForMetricsContains). The timeout is generous relative to the 100ms
+// polling cadence but well below typical test timeouts.
+var metricsScrapeClient = &http.Client{Timeout: 2 * time.Second}
+
 // scrapeMetricsBest fetches /metrics from addr and returns the body, or "" on
 // any error. Use this inside polling loops (waitForMetric) where transient
 // fetch failures are tolerable. For one-shot reads with hard failure on error,
 // use scrapeMetrics (defined in e2e_test.go).
 func scrapeMetricsBest(addr string) string {
-	resp, err := http.Get("http://" + addr + "/metrics")
+	resp, err := metricsScrapeClient.Get("http://" + addr + "/metrics")
 	if err != nil {
 		return ""
 	}
