@@ -314,6 +314,43 @@ func TestARMErrorHandling(t *testing.T) {
 	if !strings.Contains(err.Error(), "404") {
 		t.Errorf("error should contain status code: %v", err)
 	}
+
+	var armErr *ARMError
+	if !errors.As(err, &armErr) {
+		t.Fatalf("expected error to be *ARMError, got %T", err)
+	}
+	if armErr.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want 404", armErr.StatusCode)
+	}
+	if !strings.Contains(string(armErr.Body), "ResourceNotFound") {
+		t.Errorf("Body should contain ResourceNotFound: %q", string(armErr.Body))
+	}
+}
+
+func TestARMErrorWrappedDetection(t *testing.T) {
+	// Simulates how GetRelayCredentials wraps newARMError into its own
+	// message; callers should still be able to detect the underlying
+	// status code with errors.As.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"ResourceNotFound"}}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(t, srv)
+	const resourceID = "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.HybridCompute/machines/vm1"
+	_, err := c.GetRelayCredentials(context.Background(), resourceID, "SSH")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+
+	var armErr *ARMError
+	if !errors.As(err, &armErr) {
+		t.Fatalf("errors.As did not match *ARMError; got %v", err)
+	}
+	if armErr.StatusCode != http.StatusNotFound {
+		t.Errorf("StatusCode = %d, want 404", armErr.StatusCode)
+	}
 }
 
 func TestSanitizeErr(t *testing.T) {
@@ -552,6 +589,337 @@ func TestDialWithLoggerRetry(t *testing.T) {
 		}
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("error should wrap context.DeadlineExceeded, got: %v", err)
+		}
+		// New: error message must include attempts, elapsed, and last status.
+		msg := err.Error()
+		for _, want := range []string{"attempt", "last status 404", "gave up"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error message missing %q: %v", want, msg)
+			}
+		}
+	})
+}
+
+func TestDialWithOptionsExplainSetup(t *testing.T) {
+	// Helper to spin up a server that returns 404 N times then accepts a
+	// websocket. Records attempts in a counter.
+	newServerThatRetries := func(failures int) (*httptest.Server, func() int) {
+		var mu sync.Mutex
+		attempts := 0
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			attempts++
+			n := attempts
+			mu.Unlock()
+			if n <= failures {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+		return srv, func() int { mu.Lock(); defer mu.Unlock(); return attempts }
+	}
+
+	relayInfoFor := func(srv *httptest.Server) *RelayInfo {
+		host := strings.TrimPrefix(srv.URL, "https://")
+		dotIdx := strings.Index(host, ".")
+		return &RelayInfo{
+			NamespaceName:             host[:dotIdx],
+			NamespaceNameSuffix:       host[dotIdx+1:],
+			HybridConnectionName:      "test-hyco",
+			AccessKey:                 "test-key",
+			ServiceConfigurationToken: "test-token",
+		}
+	}
+
+	t.Run("ExplainSetup=true emits INFO on first retry and connected INFO", func(t *testing.T) {
+		srv, _ := newServerThatRetries(1)
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		ws, err := DialWithOptions(ctx, relayInfoFor(srv), 22, logger, DialOptions{ExplainSetup: true})
+		if err != nil {
+			t.Fatalf("DialWithOptions: %v", err)
+		}
+		defer ws.CloseNow()
+
+		out := logBuf.String()
+		if !strings.Contains(out, "level=INFO") {
+			t.Errorf("expected INFO log, got: %s", out)
+		}
+		if !strings.Contains(out, "waiting for Arc agent to register") {
+			t.Errorf("expected explanatory INFO, got: %s", out)
+		}
+		if !strings.Contains(out, "arc relay connected") {
+			t.Errorf("expected post-retry connected INFO, got: %s", out)
+		}
+		if strings.Contains(out, "level=WARN") {
+			t.Errorf("retryable 404 should not produce WARN, got: %s", out)
+		}
+	})
+
+	t.Run("ExplainSetup=true emits periodic progress INFO after first retry", func(t *testing.T) {
+		origPeriod := progressLogPeriod
+		progressLogPeriod = 50 * time.Millisecond
+		defer func() { progressLogPeriod = origPeriod }()
+
+		// 2 failures = attempts at ~0s, ~1s, ~3s. The first retry emits
+		// "waiting for Arc agent..." and the second retry (1s later, well
+		// past the shortened 50ms period) emits the periodic
+		// "still waiting for Arc agent..." line we want to cover.
+		srv, _ := newServerThatRetries(2)
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		ws, err := DialWithOptions(ctx, relayInfoFor(srv), 22, logger, DialOptions{ExplainSetup: true})
+		if err != nil {
+			t.Fatalf("DialWithOptions: %v", err)
+		}
+		defer ws.CloseNow()
+
+		out := logBuf.String()
+		if !strings.Contains(out, "waiting for Arc agent to register a relay listener (expected after creating or updating the HybridConnectivity configuration)") {
+			t.Errorf("expected first-retry INFO, got: %s", out)
+		}
+		if !strings.Contains(out, "still waiting for Arc agent to register a relay listener") {
+			t.Errorf("expected periodic progress INFO after the first retry, got: %s", out)
+		}
+		if !strings.Contains(out, "arc relay connected") {
+			t.Errorf("expected connected INFO after progress was announced, got: %s", out)
+		}
+	})
+
+	t.Run("ExplainSetup=false stays quiet on 404", func(t *testing.T) {
+		srv, _ := newServerThatRetries(1)
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		ws, err := DialWithOptions(ctx, relayInfoFor(srv), 22, logger, DialOptions{ExplainSetup: false})
+		if err != nil {
+			t.Fatalf("DialWithOptions: %v", err)
+		}
+		defer ws.CloseNow()
+
+		out := logBuf.String()
+		// Without ExplainSetup and no progress yet, a transient retry that
+		// succeeds within the quiet window must produce zero INFO lines:
+		// no "waiting", no "arc relay connected", no WARN.
+		if strings.Contains(out, "waiting for Arc agent") {
+			t.Errorf("unexpected explanatory INFO without ExplainSetup: %s", out)
+		}
+		if strings.Contains(out, "arc relay connected") {
+			t.Errorf("transient retry without progress should not log connected INFO, got: %s", out)
+		}
+		if strings.Contains(out, "level=INFO") {
+			t.Errorf("transient retry should be silent at info level, got: %s", out)
+		}
+		if strings.Contains(out, "level=WARN") {
+			t.Errorf("retryable 404 should not produce WARN, got: %s", out)
+		}
+	})
+
+	t.Run("first-attempt success is silent at info level", func(t *testing.T) {
+		srv, _ := newServerThatRetries(0)
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		ws, err := DialWithOptions(ctx, relayInfoFor(srv), 22, logger, DialOptions{ExplainSetup: true})
+		if err != nil {
+			t.Fatalf("DialWithOptions: %v", err)
+		}
+		defer ws.CloseNow()
+
+		out := logBuf.String()
+		if strings.Contains(out, "waiting for Arc agent") {
+			t.Errorf("did not expect explanatory INFO when first attempt succeeded: %s", out)
+		}
+		if strings.Contains(out, "arc relay connected") {
+			t.Errorf("first-attempt success should be DEBUG only at info level, got: %s", out)
+		}
+	})
+
+	t.Run("ExplainSetup=false surfaces delayed progress on prolonged 404", func(t *testing.T) {
+		origPeriod, origQuiet := progressLogPeriod, progressLogQuietDelay
+		progressLogPeriod = 50 * time.Millisecond
+		progressLogQuietDelay = 100 * time.Millisecond
+		defer func() {
+			progressLogPeriod = origPeriod
+			progressLogQuietDelay = origQuiet
+		}()
+
+		// Server returns 404 forever.
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancel()
+
+		_, err := DialWithOptions(ctx, relayInfoFor(srv), 22, logger, DialOptions{ExplainSetup: false})
+		if err == nil {
+			t.Fatal("expected timeout error")
+		}
+
+		out := logBuf.String()
+		if strings.Contains(out, "waiting for Arc agent to register") {
+			t.Errorf("ExplainSetup=false must not emit the setup-specific INFO, got: %s", out)
+		}
+		if !strings.Contains(out, "still waiting for arc relay listener") {
+			t.Errorf("expected generic progress INFO after quiet delay, got: %s", out)
+		}
+	})
+
+	t.Run("ExplainSetup=false logs connected INFO after generic progress", func(t *testing.T) {
+		origPeriod, origQuiet := progressLogPeriod, progressLogQuietDelay
+		progressLogPeriod = 50 * time.Millisecond
+		progressLogQuietDelay = 100 * time.Millisecond
+		defer func() {
+			progressLogPeriod = origPeriod
+			progressLogQuietDelay = origQuiet
+		}()
+
+		// 2 failures = attempts at ~0s and ~1s (retryInitial). The 2nd
+		// attempt fires after time.Since(start) >= 100ms, so it triggers
+		// the generic progress INFO. The 3rd attempt at ~3s accepts the
+		// websocket, and the success log must be at INFO because a
+		// progress line was already announced.
+		srv, _ := newServerThatRetries(2)
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		ws, err := DialWithOptions(ctx, relayInfoFor(srv), 22, logger, DialOptions{ExplainSetup: false})
+		if err != nil {
+			t.Fatalf("DialWithOptions: %v", err)
+		}
+		defer ws.CloseNow()
+
+		out := logBuf.String()
+		if !strings.Contains(out, "still waiting for arc relay listener") {
+			t.Errorf("expected generic progress INFO after quiet delay, got: %s", out)
+		}
+		// Once any progress was announced (even the generic one), a
+		// subsequent success must be reported at INFO so the user sees
+		// the wait resolve.
+		if !strings.Contains(out, "arc relay connected") {
+			t.Errorf("expected connected INFO after progress was announced, got: %s", out)
+		}
+	})
+
+	t.Run("context cancel mid-dial returns enriched error", func(t *testing.T) {
+		// Server blocks the handshake so the dial is in progress when we
+		// cancel the parent context. The dial returns with no resp, but
+		// the new ctx.Err() check should still surface the enriched
+		// "gave up after N attempts" diagnostic.
+		blockCh := make(chan struct{})
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			select {
+			case <-blockCh:
+			case <-r.Context().Done():
+			}
+		}))
+		defer srv.Close()
+		defer close(blockCh)
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		var logBuf strings.Builder
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			cancel()
+		}()
+
+		_, err := DialWithOptions(ctx, relayInfoFor(srv), 22, logger, DialOptions{})
+		if err == nil {
+			t.Fatal("expected error after cancellation")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected error to wrap context.Canceled, got: %v", err)
+		}
+		msg := err.Error()
+		for _, want := range []string{"gave up", "attempt", "no HTTP response"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("error message missing %q: %v", want, msg)
+			}
+		}
+		if strings.Contains(msg, "last status 0") {
+			t.Errorf("error should not include misleading 'last status 0', got: %v", msg)
 		}
 	})
 }

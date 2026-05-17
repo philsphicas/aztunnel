@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"time"
@@ -38,8 +40,14 @@ func (c *ArcConnectCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 	// Try to get relay credentials directly. If the endpoint doesn't exist
 	// yet, create it and retry.
 	info, err := client.GetRelayCredentials(ctx, resourceID, arcCmd.Service)
+	var setupRan bool
 	if err != nil {
-		logger.Debug("initial credential request failed, ensuring hybrid connectivity", "error", err)
+		if isHybridConnectivitySetupErr(err) {
+			logger.Info("creating Arc HybridConnectivity configuration; the Arc agent may need a moment to register a relay listener")
+			setupRan = true
+		} else {
+			logger.Debug("initial credential request failed, ensuring hybrid connectivity", "error", err)
+		}
 		if ensureErr := client.EnsureHybridConnectivity(ctx, resourceID, arcCmd.Service, arcCmd.Port); ensureErr != nil {
 			return ensureErr
 		}
@@ -52,7 +60,7 @@ func (c *ArcConnectCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 	target := fmt.Sprintf("%s:%d", resourceID, arcCmd.Port)
 
 	dialStart := time.Now()
-	ws, err := arc.DialWithLogger(ctx, info, arcCmd.Port, logger)
+	ws, err := arc.DialWithOptions(ctx, info, arcCmd.Port, logger, arc.DialOptions{ExplainSetup: setupRan})
 	m.ObserveDialDuration("sender", time.Since(dialStart).Seconds())
 	if err != nil {
 		m.ConnectionError("sender", metrics.DialReason(err, metrics.ReasonRelayFailed))
@@ -65,4 +73,17 @@ func (c *ArcConnectCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 	stdio := &arcStdioConn{in: os.Stdin, out: os.Stdout}
 	_, bridgeErr := m.TrackedBridge(ctx, ws, stdio, "sender", target)
 	return bridgeErr
+}
+
+// isHybridConnectivitySetupErr reports whether err is an ARM error that
+// indicates the HybridConnectivity endpoint or service configuration needs
+// to be created. We treat 404 (ResourceNotFound) and 412 (PreconditionFailed
+// — used when the endpoint exists but service config is missing) as setup
+// conditions.
+func isHybridConnectivitySetupErr(err error) bool {
+	var armErr *arc.ARMError
+	if !errors.As(err, &armErr) {
+		return false
+	}
+	return armErr.StatusCode == http.StatusNotFound || armErr.StatusCode == http.StatusPreconditionFailed
 }
