@@ -1,0 +1,57 @@
+name: E2E Janitor
+
+on:
+  schedule:
+    # Daily at 09:00 UTC. Per-invocation hycos that survive past
+    # max-age are deleted; healthy runs clean up after themselves in
+    # TestMain so the janitor only collects leaks (killed runners,
+    # panicked tests, etc.).
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      max-age:
+        description: "Minimum hyco age before deletion (Go duration)."
+        default: "4h"
+        required: false
+      dry-run:
+        description: "If true, only print what would be deleted."
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  janitor:
+    runs-on: ubuntu-latest
+    environment: e2e-azure
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run janitor
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          RESOURCE_GROUP: ${{ vars.E2E_RESOURCE_GROUP || 'aztunnel-e2e' }}
+          RELAY_NAME: ${{ vars.E2E_RELAY_NAME }}
+          MAX_AGE: ${{ github.event.inputs.max-age || '4h' }}
+          DRY_RUN: ${{ github.event.inputs.dry-run }}
+        working-directory: e2e/infra
+        run: |
+          args=(--max-age "$MAX_AGE")
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          go run ./cmd/e2e-infra janitor "${args[@]}"

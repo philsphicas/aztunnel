@@ -1,46 +1,49 @@
 # End-to-End Tests
 
 These tests verify aztunnel against a real Azure Relay. They are gated behind
-the `e2e` build tag and require at least one auth method configured (Entra ID
-and/or SAS keys). Functional tests run against all available auth methods.
+the `e2e` build tag. Each `go test` invocation provisions its own pair of
+ephemeral hybrid connections in the configured relay namespace, so concurrent
+pipelines (or `make e2e` runs) do not collide.
 
 ## Quick Start
 
 ```bash
-# Option 1: Auto-discover from Azure (after make e2e-infra-setup)
-. e2e/infra/env.sh
+# Contributor: deploy Azure infra + grant yourself RBAC, then run tests
+az login                       # required: TestMain uses DefaultAzureCredential
+make e2e-infra-setup
+eval "$(make e2e-infra-env)"   # exports E2E_RELAY_NAME, E2E_RESOURCE_GROUP, AZURE_SUBSCRIPTION_ID
 make e2e
 
-# Option 2: Entra ID only
-export E2E_RELAY_NAME=my-relay-namespace
-export E2E_ENTRA_HYCO_NAME=e2e-entra
-az login
-make e2e
-
-# Option 3: SAS keys only (no az login required)
-export E2E_RELAY_NAME=my-relay-namespace
-export E2E_SAS_HYCO_NAME=e2e-sas
-export E2E_SAS_LISTENER_KEY_NAME=e2e-listener
-export E2E_SAS_LISTENER_KEY=<key>
-export E2E_SAS_SENDER_KEY_NAME=e2e-sender
-export E2E_SAS_SENDER_KEY=<key>
-make e2e
+# Maintainer: above + CI identity + GitHub secrets
+make e2e-infra-ci
 ```
+
+`AZURE_SUBSCRIPTION_ID` falls back to the Azure CLI's default subscription
+(`~/.azure/azureProfile.json`) if unset, so `az login` alone is enough for
+most contributors. Set it explicitly if you have multiple subscriptions
+and don't want to rely on the CLI's default.
+
+`TestMain` creates two short-lived hybrid connections —
+`e2e-entra-<hex>` for Entra-ID auth and `e2e-sas-<hex>` for SAS-key auth —
+and tears them down on exit. The orphan janitor workflow
+(`.github/workflows/e2e-janitor.yml`) reaps anything left behind by killed
+runners.
 
 ## Environment Variables
 
-| Variable                    | Required    | Description                                |
-| --------------------------- | ----------- | ------------------------------------------ |
-| `E2E_RELAY_NAME`            | Yes         | Azure Relay namespace name                 |
-| `E2E_ENTRA_HYCO_NAME`       | Either/both | Hybrid connection name (Entra ID auth)     |
-| `E2E_SAS_HYCO_NAME`         | Either/both | Hybrid connection name (SAS key auth)      |
-| `E2E_SAS_LISTENER_KEY_NAME` | With SAS    | SAS listener key name (Listen-only)        |
-| `E2E_SAS_LISTENER_KEY`      | With SAS    | SAS listener key                           |
-| `E2E_SAS_SENDER_KEY_NAME`   | With SAS    | SAS sender key name (Send-only)            |
-| `E2E_SAS_SENDER_KEY`        | With SAS    | SAS sender key                             |
-| `E2E_AUTH`                  | No          | `entra`, `sas`, or both (default)          |
-| `E2E_LARGE_TRANSFER`        | No          | Set to `1` to enable 100MB bulk transfer   |
-| `E2E_LONG_LIVED`            | No          | Set to `1` to enable >2 min keepalive test |
+| Variable                | Required | Description                                                                |
+| ----------------------- | -------- | -------------------------------------------------------------------------- |
+| `E2E_RELAY_NAME`        | Yes      | Azure Relay namespace name                                                 |
+| `E2E_RESOURCE_GROUP`    | Yes      | Resource group containing the relay namespace                              |
+| `AZURE_SUBSCRIPTION_ID` | No       | Subscription used to provision per-invocation hycos; defaults to Azure CLI |
+| `E2E_AUTH`              | No       | `entra`, `sas`, or both (default)                                          |
+| `E2E_LARGE_TRANSFER`    | No       | Set to `1` to enable 100MB bulk transfer                                   |
+| `E2E_LONG_LIVED`        | No       | Set to `1` to enable >2 min keepalive test                                 |
+
+Authentication is via `DefaultAzureCredential`: `az login` for local
+development, OIDC federated workload identity for GitHub Actions. No SAS
+listener/sender keys need to be configured by hand — `TestMain` mints them
+on the fly via `Microsoft.Relay/...ListKeys` and tears them down on exit.
 
 ## Test Scenarios
 
@@ -114,95 +117,88 @@ E2E_LARGE_TRANSFER=1 E2E_LONG_LIVED=1 make e2e
 
 ## Infrastructure Setup
 
-One-time setup for the Azure resources needed by e2e tests.
+The maintainer-facing tool is `./e2e/infra/cmd/e2e-infra`, exposed via
+`make e2e-infra-*` targets. It replaces the prior shell scripts and shells
+out to no external tooling (no `az`, no `gh`, no `jq`).
 
-### Quick Start
+### CLI Subcommands
 
-```bash
-# Contributor: deploy Azure infra + grant yourself RBAC for local testing
-make e2e-infra-setup
-. e2e/infra/env.sh
-make e2e
-
-# If you don't have permission to create role assignments:
-SKIP_RBAC=1 make e2e-infra-setup
-# (ask an admin to run: ./e2e/infra/grant-relay-access.sh --user you@contoso.com)
-
-# Maintainer: above + CI identity + GitHub secrets (including Dependabot)
-make e2e-infra-ci
-```
-
-### Scripts
-
-Each script is independently runnable, idempotent, and can be customized via
-environment variables. See the header of each script for details.
-
-| Script                           | Purpose                                       | Prerequisites |
-| -------------------------------- | --------------------------------------------- | ------------- |
-| `create-relay.sh`                | Resource group, relay namespace, hybrid conns | `az`          |
-| `create-relay-sas-auth-rules.sh` | SAS auth rules on `e2e-sas`                   | `az`          |
-| `create-entra-oidc-app.sh`       | Entra ID app + SP + OIDC federated credential | `az`          |
-| `grant-relay-access.sh`          | RBAC Relay Listener + Sender on namespace     | `az`          |
-| `create-github-ci-secrets.sh`    | GitHub environment secrets/vars + Dependabot  | `az`, `gh`    |
-| `env.sh`                         | Export e2e env vars (source or execute)       | `az`          |
+| Make target         | CLI subcommand                                 | Purpose                                                         |
+| ------------------- | ---------------------------------------------- | --------------------------------------------------------------- |
+| `e2e-infra-setup`   | `e2e-infra setup`                              | Create RG + namespace + grant yourself `Azure Relay Owner`.     |
+| `e2e-infra-ci`      | `e2e-infra ci`                                 | Above + Entra app + federated credential + GitHub secrets.      |
+| `e2e-infra-clean`   | `e2e-infra clean --yes`                        | Delete the resource group (and everything in it).               |
+| `e2e-infra-env`     | `e2e-infra env`                                | Print `export` statements for `E2E_*` and `AZURE_*` vars.       |
+| `e2e-infra-janitor` | `e2e-infra janitor [--max-age 4h] [--dry-run]` | Delete orphan `e2e-{entra,sas}-<hex>` hycos older than max-age. |
+| (none)              | `e2e-infra grant --self\|--user\|--sp …`       | Grant `Azure Relay Owner` to a principal.                       |
 
 ### Environment Variable Overrides
 
-| Variable         | Default                      | Used by                                  |
-| ---------------- | ---------------------------- | ---------------------------------------- |
-| `RESOURCE_GROUP` | `aztunnel-e2e`               | all scripts                              |
-| `LOCATION`       | `westus2`                    | `create-relay.sh`                        |
-| `RELAY_NAME`     | `aztunnel-<uniqueString(…)>` | all scripts (auto-discovered if not set) |
-| `ENTRA_APP`      | `aztunnel-e2e-ci`            | identity, grant, configure               |
-| `GITHUB_REPO`    | auto-detected                | identity, configure                      |
-| `GITHUB_ENV`     | `e2e-azure`                  | identity, configure                      |
+| Variable         | Default                          | Notes                                   |
+| ---------------- | -------------------------------- | --------------------------------------- |
+| `RESOURCE_GROUP` | `aztunnel-e2e`                   | Resource group name                     |
+| `LOCATION`       | `westus2`                        | Azure region for created resources      |
+| `RELAY_NAME`     | `aztunnel-<short hash>`          | Auto-generated from sub + RG when unset |
+| `ENTRA_APP`      | `aztunnel-e2e-ci`                | CI app registration display name        |
+| `GITHUB_REPO`    | auto-detected from `.git/config` | `owner/name` of the GitHub repo         |
+| `GITHUB_ENV`     | `e2e-azure`                      | GitHub environment name                 |
 
-### Granting Access
+### Migrating From the Old Shell Scripts
 
-`grant-relay-access.sh` accepts one principal per invocation:
+If you previously ran `create-relay.sh` / `uniquestring.sh` to deploy a
+namespace, the new `e2e-infra setup` is not bit-compatible with the
+historic Bash `uniqueString` helper — different hash function, different
+length — so it does **not** synthesize the same name from a given
+(subscription, resource group) pair.
+
+Two options to migrate without rebuilding:
+
+- **Implicit discovery (recommended for single-namespace RGs):** if your
+  resource group contains exactly one relay namespace,
+  `e2e-infra setup` / `ci` / `env` / `janitor` all auto-discover it and
+  reuse it. Just run `make e2e-infra-setup` (or `make e2e-infra-ci`) and
+  the CLI prints `(reusing existing namespace …)` instead of generating
+  a new name.
+- **Explicit:** pass the existing namespace name on the command line or
+  via `RELAY_NAME=…`. For example:
+  `RELAY_NAME=aztunnel-e2e-relay make e2e-infra-setup`.
+
+If the RG contains more than one relay namespace, every subcommand
+errors out asking for `--relay-name` (or `RELAY_NAME=…`); pick one
+explicitly.
+
+### RBAC
+
+The CI service principal (and your developer account) need the built-in
+**Azure Relay Owner** role at the relay namespace scope. This single role
+covers control-plane operations (create/delete hybrid connections, manage
+SAS auth rules, ListKeys) and data-plane operations (Listen, Send). The
+`e2e-infra setup` and `e2e-infra ci` subcommands grant it automatically.
+
+To grant access to another user or SP:
 
 ```bash
-# Grant yourself
-./e2e/infra/grant-relay-access.sh --self
+# Yourself (idempotent)
+cd e2e/infra && go run ./cmd/e2e-infra grant --self
 
-# Grant a service principal by app name
-./e2e/infra/grant-relay-access.sh --sp aztunnel-e2e-ci
+# Another user by UPN
+cd e2e/infra && go run ./cmd/e2e-infra grant --user alice@contoso.com
 
-# Grant another user by UPN
-./e2e/infra/grant-relay-access.sh --user alice@contoso.com
+# A service principal by app display name
+cd e2e/infra && go run ./cmd/e2e-infra grant --sp aztunnel-e2e-ci
 ```
 
 ### Configuring GitHub
 
-```bash
-# Environment secrets only
-./e2e/infra/create-github-ci-secrets.sh
-
-# Environment + Dependabot secrets
-./e2e/infra/create-github-ci-secrets.sh --dependabot
-
-# Use a different identity for Dependabot
-ENTRA_APP=aztunnel-e2e-dependabot ./e2e/infra/create-github-ci-secrets.sh --dependabot
-```
-
-### Running Scripts Individually
+The `ci` subcommand needs a GitHub token in `GITHUB_TOKEN` with `repo` +
+`admin:org_environment` scopes (or equivalents).
 
 ```bash
-# Step 1: Create relay resources
-./e2e/infra/create-relay.sh
+# Environment secrets only (maintainer)
+cd e2e/infra && GITHUB_TOKEN=$(gh auth token) go run ./cmd/e2e-infra ci
 
-# Step 2: Create SAS auth rules (optional — only needed for SAS tests)
-./e2e/infra/create-relay-sas-auth-rules.sh
-
-# Step 3: Create CI identity (maintainer only)
-./e2e/infra/create-entra-oidc-app.sh
-
-# Step 4: Grant RBAC access
-./e2e/infra/grant-relay-access.sh --self
-./e2e/infra/grant-relay-access.sh --sp aztunnel-e2e-ci
-
-# Step 5: Configure GitHub (maintainer only)
-./e2e/infra/create-github-ci-secrets.sh --dependabot
+# Environment + Dependabot repo secrets
+cd e2e/infra && GITHUB_TOKEN=$(gh auth token) go run ./cmd/e2e-infra ci --dependabot
 ```
 
 ### Costs
@@ -210,6 +206,11 @@ ENTRA_APP=aztunnel-e2e-dependabot ./e2e/infra/create-github-ci-secrets.sh --depe
 - **Idle**: $0 (no listeners connected)
 - **During tests**: fractions of a penny (pro-rated per listener-hour, ~$0.014/hr)
 - **Monthly**: $0 if only used for CI runs
+
+Healthy `make e2e` invocations clean up their hybrid connections in
+`TestMain`. A daily `E2E Janitor` workflow (`make e2e-infra-janitor`)
+reaps orphans left behind by killed runners or panicking tests, so the
+namespace does not accumulate billable resources over time.
 
 ### Tear Down
 
@@ -221,3 +222,17 @@ make e2e-infra-clean
 APP_ID=$(az ad app list --filter "displayName eq 'aztunnel-e2e-ci'" -o json | jq -r '.[0].appId')
 az ad app delete --id "$APP_ID"
 ```
+
+## Concurrency Model
+
+PR pipelines no longer use a workflow `concurrency` group, because
+collisions between concurrent invocations are eliminated at the hyco level:
+
+- Each `go test` binary invocation generates a fresh suffix and creates
+  `e2e-entra-<suffix>` + `e2e-sas-<suffix>` in `TestMain`.
+- Static hyco names from prior versions (`e2e-entra`, `e2e-sas`) are no
+  longer required and are intentionally not provisioned by the new setup.
+- Hyco names are matched against `^e2e-(entra|sas)-[0-9a-f]{12}$` for the
+  janitor, so any unrelated hycos in the namespace are not touched.
+- The relay namespace itself is shared across pipelines; only hybrid
+  connections (and their SAS auth rules) are per-invocation.

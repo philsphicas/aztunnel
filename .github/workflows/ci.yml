@@ -78,6 +78,12 @@ jobs:
           version: v2.10
           working-directory: mockrelay
 
+      - name: golangci-lint (e2e/infra)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.10
+          working-directory: e2e/infra
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:

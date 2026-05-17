@@ -1,0 +1,42 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+
+linters:
+  enable:
+    - errcheck
+    - gosec
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gocritic
+    - revive
+    - misspell
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+
+    gosec:
+      excludes:
+        - G104 # unhandled errors (covered by errcheck with more granularity)
+        - G115 # integer overflow conversion (too noisy for port numbers)
+        - G602 # slice bounds (false positive after ReadFull)
+        - G101 # hardcoded credentials (false positive on test strings)
+        - G304 # file inclusion via variable: githubrepo.go reads .git/config from a small fixed set of relative paths under the cwd
+
+  exclusions:
+    rules:
+      # Test files: allow unchecked errors for test setup/teardown.
+      - linters:
+          - errcheck
+        path: _test\.go
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
