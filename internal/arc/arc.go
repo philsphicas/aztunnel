@@ -204,7 +204,7 @@ func Dial(ctx context.Context, info *RelayInfo, port int) (*websocket.Conn, erro
 	return ws, nil
 }
 
-// Retry parameters for DialWithLogger.
+// Retry parameters for DialWithOptions.
 const (
 	retryInitial    = 1 * time.Second
 	retryMax        = 5 * time.Second
@@ -212,10 +212,47 @@ const (
 	dialTimeout     = 30 * time.Second
 )
 
+// Progress-log timings are vars (not consts) so tests can shorten them
+// without using real time.
+var (
+	// progressLogPeriod controls how often progress INFO logs are emitted
+	// while we wait for the Arc agent to register a relay listener.
+	progressLogPeriod = 15 * time.Second
+	// progressLogQuietDelay is the grace period before emitting the first
+	// progress INFO when DialOptions.ExplainSetup is false. This keeps the
+	// "agent listener is healthy" steady state quiet while still surfacing
+	// real "listener never appears" cases.
+	progressLogQuietDelay = 30 * time.Second
+)
+
+// DialOptions controls DialWithOptions behavior.
+type DialOptions struct {
+	// ExplainSetup enables INFO-level progress logging when the dial
+	// initially returns retryable 404/503 errors. Set this immediately
+	// after creating or updating the HybridConnectivity endpoint, or
+	// after creating a missing service configuration on an existing
+	// endpoint (e.g. first use of a new --service), so the user
+	// understands why the first connection may take a moment while the
+	// Arc agent registers a relay listener.
+	//
+	// When false, per-attempt retries are logged at DEBUG only and the
+	// dial stays silent for the first ~30 seconds. If the listener still
+	// has not appeared after that grace period, a generic progress INFO
+	// is emitted periodically so operator-actionable failures are not
+	// hidden.
+	ExplainSetup bool
+}
+
 // DialWithLogger is like Dial but logs the connection attempt and retries
 // on transient 404/503 errors (no active listener) with exponential backoff
 // until ctx expires.
 func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog.Logger) (*websocket.Conn, error) {
+	return DialWithOptions(ctx, info, port, logger, DialOptions{})
+}
+
+// DialWithOptions is like DialWithLogger but accepts options that adjust
+// progress logging during retries.
+func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slog.Logger, opts DialOptions) (*websocket.Conn, error) {
 	if port == 0 {
 		port = defaultPort
 	}
@@ -234,7 +271,13 @@ func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog
 	headers.Set("Microsoft-Guestgateway-Target", fmt.Sprintf("localhost:%d", port))
 
 	delay := retryInitial
+	start := time.Now()
+	attempts := 0
+	var lastStatus int
+	var lastProgressLog time.Time
+	progressLogged := false
 	for {
+		attempts++
 		connectURL := fmt.Sprintf("wss://%s/$hc/%s?sb-hc-action=connect&sb-hc-id=%s",
 			wssHost, info.HybridConnectionName, newUUID())
 
@@ -245,8 +288,26 @@ func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog
 		cancel()
 
 		if err == nil {
-			logger.Debug("arc relay connected")
+			// Only log success at INFO if we'd already announced a wait —
+			// otherwise we'd suddenly produce a connected line out of nowhere
+			// after a silent transient retry.
+			if progressLogged {
+				logger.Info("arc relay connected",
+					"elapsed", time.Since(start).Truncate(time.Second),
+					"attempts", attempts,
+					"lastStatus", lastStatus)
+			} else {
+				logger.Debug("arc relay connected",
+					"elapsed", time.Since(start).Truncate(time.Second),
+					"attempts", attempts)
+			}
 			return ws, nil
+		}
+
+		// If the parent context was canceled mid-dial, surface the enriched
+		// diagnostic instead of the generic non-retryable websocket error.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, giveUpErr(attempts, time.Since(start), lastStatus, ctxErr)
 		}
 
 		if resp == nil || !relay.IsRetryableStatus(resp.StatusCode) {
@@ -254,16 +315,69 @@ func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog
 			return nil, fmt.Errorf("dial arc relay: %w", sanitizeErr(err))
 		}
 
-		logger.Warn("arc relay dial failed (retrying)", "status", resp.StatusCode, "delay", delay, "error", sanitizeErr(err))
+		lastStatus = resp.StatusCode
+		logger.Debug("arc relay dial returned retryable status",
+			"status", resp.StatusCode,
+			"attempt", attempts,
+			"delay", delay,
+			"error", sanitizeErr(err))
+
+		// Progress logging:
+		//   - ExplainSetup=true: emit immediately on first retry, then every
+		//     progressLogPeriod. This is the "we just created (or updated)
+		//     the HybridConnectivity configuration, waiting for the agent
+		//     to register" path -- covers both endpoint creation (404) and
+		//     adding a missing service configuration to an existing
+		//     endpoint (412).
+		//   - ExplainSetup=false: stay quiet for progressLogQuietDelay (covers
+		//     transient hiccups), then emit progress every progressLogPeriod
+		//     so operators see real "listener never appears" cases.
+		if opts.ExplainSetup {
+			if attempts == 1 {
+				logger.Info("waiting for Arc agent to register a relay listener (expected after creating or updating the HybridConnectivity configuration)",
+					"status", resp.StatusCode)
+				lastProgressLog = time.Now()
+				progressLogged = true
+			} else if time.Since(lastProgressLog) >= progressLogPeriod {
+				logger.Info("still waiting for Arc agent to register a relay listener",
+					"elapsed", time.Since(start).Truncate(time.Second),
+					"attempts", attempts)
+				lastProgressLog = time.Now()
+				progressLogged = true
+			}
+		} else if time.Since(start) >= progressLogQuietDelay && time.Since(lastProgressLog) >= progressLogPeriod {
+			logger.Info("still waiting for arc relay listener",
+				"elapsed", time.Since(start).Truncate(time.Second),
+				"attempts", attempts,
+				"lastStatus", lastStatus)
+			lastProgressLog = time.Now()
+			progressLogged = true
+		}
 
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("dial arc relay: %w", ctx.Err())
+			return nil, giveUpErr(attempts, time.Since(start), lastStatus, ctx.Err())
 		case <-time.After(delay):
 		}
 
 		delay = min(delay*retryMultiplier, retryMax)
 	}
+}
+
+// giveUpErr formats the error returned when ctx terminates while we're
+// retrying the dial. lastStatus is omitted when zero (cancellation arrived
+// before we ever observed a retryable HTTP response).
+func giveUpErr(attempts int, elapsed time.Duration, lastStatus int, cause error) error {
+	noun := "attempts"
+	if attempts == 1 {
+		noun = "attempt"
+	}
+	if lastStatus == 0 {
+		return fmt.Errorf("dial arc relay: gave up after %d %s in %s (no HTTP response): %w",
+			attempts, noun, elapsed.Truncate(time.Second), cause)
+	}
+	return fmt.Errorf("dial arc relay: gave up after %d %s in %s (last status %d): %w",
+		attempts, noun, elapsed.Truncate(time.Second), lastStatus, cause)
 }
 
 func (c *Client) armPUT(ctx context.Context, rawURL, body string) error {
@@ -306,9 +420,22 @@ func (c *Client) armPOST(ctx context.Context, rawURL, body string) ([]byte, erro
 	return io.ReadAll(resp.Body)
 }
 
+// ARMError is returned by Client methods when an ARM API call responds with
+// an HTTP 4xx or 5xx status. Callers can use errors.As to inspect the
+// status code (e.g. to detect first-time setup conditions: 404
+// ResourceNotFound or 412 PreconditionFailed).
+type ARMError struct {
+	StatusCode int
+	Body       []byte
+}
+
+func (e *ARMError) Error() string {
+	return fmt.Sprintf("ARM API error (HTTP %d): %s", e.StatusCode, string(e.Body))
+}
+
 func newARMError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
-	return fmt.Errorf("ARM API error (HTTP %d): %s", resp.StatusCode, string(body))
+	return &ARMError{StatusCode: resp.StatusCode, Body: body}
 }
 
 // sanitizedError wraps an error with a redacted message while preserving

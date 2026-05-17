@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"time"
 
 	"github.com/philsphicas/aztunnel/internal/arc"
@@ -53,8 +54,19 @@ func (p *ArcPortForwardCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 	// Try to get relay credentials directly. If the endpoint doesn't exist
 	// yet, create it. EnsureHybridConnectivity is only called on first
 	// failure to avoid disrupting the Arc agent's relay listener.
+	//
+	// explainOnFirstDial is set when we just created/updated the
+	// HybridConnectivity configuration, so the first inbound connection's
+	// dial can emit an INFO message explaining that the Arc agent may need
+	// time to register a listener. Subsequent dials run quietly.
+	var explainOnFirstDial atomic.Bool
 	if _, err := client.GetRelayCredentials(ctx, resourceID, arcCmd.Service); err != nil {
-		logger.Debug("initial credential request failed, ensuring hybrid connectivity", "error", err)
+		if isHybridConnectivitySetupErr(err) {
+			logger.Info("creating Arc HybridConnectivity configuration; the first forwarded connection may wait while the Arc agent registers a relay listener")
+			explainOnFirstDial.Store(true)
+		} else {
+			logger.Debug("initial credential request failed, ensuring hybrid connectivity", "error", err)
+		}
 		if ensureErr := client.EnsureHybridConnectivity(ctx, resourceID, arcCmd.Service, arcCmd.Port); ensureErr != nil {
 			return ensureErr
 		}
@@ -96,8 +108,9 @@ func (p *ArcPortForwardCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 				return
 			}
 
+			opts := arc.DialOptions{ExplainSetup: consumeExplainOnFirstDial(&explainOnFirstDial)}
 			dialStart := time.Now()
-			ws, err := arc.DialWithLogger(ctx, info, arcCmd.Port, logger)
+			ws, err := arc.DialWithOptions(ctx, info, arcCmd.Port, logger, opts)
 			m.ObserveDialDuration("sender", time.Since(dialStart).Seconds())
 			if err != nil {
 				logger.Warn("arc relay dial failed", "error", err)
@@ -112,4 +125,12 @@ func (p *ArcPortForwardCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 			}
 		}()
 	}
+}
+
+// consumeExplainOnFirstDial atomically reads-and-clears the
+// setup-explanation flag. It returns true only on the call that observes
+// the flag still set, so concurrent inbound connections cannot
+// double-emit the setup-specific INFO logging.
+func consumeExplainOnFirstDial(flag *atomic.Bool) bool {
+	return flag.CompareAndSwap(true, false)
 }

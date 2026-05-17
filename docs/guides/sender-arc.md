@@ -236,6 +236,54 @@ This is a quick way to get network access without provisioning a relay
 namespace or deploying a listener — all you need is an Arc-enrolled VM
 with SSH.
 
+## First-connection latency
+
+The first `aztunnel arc connect` (or `arc port-forward`) against a
+machine that has no HybridConnectivity endpoint for the requested
+service will:
+
+1. Create the endpoint and the requested service configuration (SSH by
+   default, or whatever `--service` was passed) on the Arc resource.
+   This step also runs when the endpoint exists but a configuration for
+   the requested `--service` is missing (e.g. first time using
+   `--service WAC` against a machine that previously only had SSH).
+   The `--service` flag applies to both `arc connect` and
+   `arc port-forward`.
+2. Wait for the Arc agent on the VM to discover the new endpoint and
+   register a listener on the Azure Relay hybrid connection.
+
+Step 2 typically takes 30–90 seconds. During this window every dial
+returns HTTP 404 from Azure Relay because no listener is registered yet.
+aztunnel logs a clear INFO line explaining what's happening and retries
+with exponential backoff until the listener appears.
+
+For `arc connect` the dial begins immediately, so the full sequence
+appears on the same invocation:
+
+```
+INFO creating Arc HybridConnectivity configuration; the Arc agent may need a moment to register a relay listener
+INFO waiting for Arc agent to register a relay listener (expected after creating or updating the HybridConnectivity configuration) status=404
+INFO still waiting for Arc agent to register a relay listener elapsed=18s attempts=6
+INFO arc relay connected elapsed=29s attempts=8 lastStatus=404
+```
+
+For `arc port-forward` the explanatory line is emitted up front, but
+the `waiting for Arc agent...` / `arc relay connected` lines only fire
+when the first inbound TCP connection arrives (the dial is per
+inbound connection, not per `aztunnel` invocation):
+
+```
+INFO creating Arc HybridConnectivity configuration; the first forwarded connection may wait while the Arc agent registers a relay listener
+INFO arc port-forward listening bind=127.0.0.1:2222 ...
+# first ssh / curl through the listener:
+INFO waiting for Arc agent to register a relay listener (expected after creating or updating the HybridConnectivity configuration) status=404
+INFO arc relay connected elapsed=27s attempts=7 lastStatus=404
+```
+
+If SSH itself enforces a `ConnectTimeout` shorter than this window, the
+first invocation may fail — re-running it usually succeeds because the
+listener stays registered.
+
 ## Debugging
 
 ```sh
