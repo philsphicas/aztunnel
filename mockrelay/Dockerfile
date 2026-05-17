@@ -16,6 +16,7 @@ WORKDIR /src
 COPY go.work ./
 COPY go.mod go.sum ./
 COPY mockrelay/go.mod mockrelay/go.sum ./mockrelay/
+COPY e2e/infra/go.mod e2e/infra/go.sum ./e2e/infra/
 RUN go mod download
 COPY . .
 ARG VERSION=dev
