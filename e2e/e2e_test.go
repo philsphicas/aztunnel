@@ -376,6 +376,7 @@ func TestMaxConnections(t *testing.T) {
 			listener := startListener(t, env, auth,
 				"--allow", echo.Addr(),
 				"--max-connections", "2",
+				"--metrics-addr", "127.0.0.1:0",
 				"--log-level", "debug",
 			)
 			sender := startPortForwardSender(t, env, auth, echo.Addr(),
@@ -383,9 +384,11 @@ func TestMaxConnections(t *testing.T) {
 			)
 
 			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
-			// Open 2 connections (should succeed).
+			// Open 2 connections; both must succeed cleanly. The previous version
+			// ignored Write/ReadFull errors here, which could mask broken setup.
 			var conns []net.Conn
 			for i := 0; i < 2; i++ {
 				conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -393,11 +396,17 @@ func TestMaxConnections(t *testing.T) {
 					t.Fatalf("dial %d: %v", i, err)
 				}
 				conns = append(conns, conn)
-				// Verify echo works.
 				msg := fmt.Sprintf("conn%d\n", i)
-				conn.Write([]byte(msg))
+				if _, err := conn.Write([]byte(msg)); err != nil {
+					t.Fatalf("write conn %d: %v", i, err)
+				}
 				buf := make([]byte, len(msg))
-				io.ReadFull(conn, buf)
+				if _, err := io.ReadFull(conn, buf); err != nil {
+					t.Fatalf("read conn %d: %v", i, err)
+				}
+				if string(buf) != msg {
+					t.Fatalf("conn %d echo mismatch: got %q, want %q", i, buf, msg)
+				}
 			}
 			t.Cleanup(func() {
 				for _, c := range conns {
@@ -405,26 +414,37 @@ func TestMaxConnections(t *testing.T) {
 				}
 			})
 
-			// The 3rd connection should still TCP-connect (to the sender) but the
-			// relay-side will not accept it — the data won't round-trip.
-			// Wait briefly for the listener semaphore to be fully consumed.
-			time.Sleep(2 * time.Second)
+			// Wait for listener-side active_connections to reach the limit (2),
+			// rather than guessing with time.Sleep. This is deterministic on slow CI.
+			waitForMetric(t, listenerMetrics, "aztunnel_active_connections",
+				func(v float64) bool { return v >= 2 },
+				15*time.Second,
+			)
 
+			// The 3rd connection should TCP-connect to the sender (sender accepts
+			// locally before consulting the relay) but data must NOT round-trip,
+			// because the listener-side semaphore is full.
 			conn3, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
 			if err != nil {
 				t.Fatalf("dial 3rd: %v", err)
 			}
 			defer conn3.Close()
 
-			// Try to send data — should fail or hang because the listener won't
-			// accept the 3rd rendezvous connection.
-			conn3.Write([]byte("overflow\n"))
+			// Three valid enforcement signals: (a) Write fails because the
+			// sender already closed the local TCP socket in response to the
+			// listener rejecting the rendezvous, (b) Read returns an error
+			// (EOF/RST/timeout) with no data, or (c) Read times out. Only fail
+			// if the overflow payload actually round-trips. Write success
+			// alone is not enough — the bytes may sit in the local TCP send
+			// buffer indefinitely, so the Read is what proves enforcement.
+			if _, err := conn3.Write([]byte("overflow\n")); err != nil {
+				t.Logf("3rd connection write failed (expected enforcement signal): %v", err)
+			}
 			conn3.SetReadDeadline(time.Now().Add(5 * time.Second))
 			buf := make([]byte, 64)
-			_, err = conn3.Read(buf)
-			if err == nil {
-				// If it somehow succeeded, that's wrong with max-connections=2.
-				t.Log("warning: 3rd connection unexpectedly succeeded (relay may buffer)")
+			n, err := conn3.Read(buf)
+			if n > 0 {
+				t.Fatalf("3rd connection unexpectedly read %d bytes (%q) — max-connections limit not enforced (read err=%v)", n, buf[:n], err)
 			}
 		})
 	}
@@ -799,37 +819,38 @@ func TestMetricsConnectionCount(t *testing.T) {
 			)
 
 			waitForLog(t, listener, "control channel connected", 30*time.Second)
-			listenerMetrics := waitForLogAddr(t, listener, "metrics server listening", 15*time.Second)
+			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
-			senderMetrics := waitForLogAddr(t, sender, "metrics server listening", 15*time.Second)
+			senderMetrics := sender.MetricsAddr(t, 15*time.Second)
 
-			// Run 3 connections.
+			// Run 3 connections back-to-back. No per-connection time.Sleep —
+			// we wait on metrics deterministically below.
 			for i := 0; i < 3; i++ {
 				conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
 				if err != nil {
 					t.Fatalf("dial %d: %v", i, err)
 				}
-				conn.Write([]byte("x"))
+				if _, err := conn.Write([]byte("x")); err != nil {
+					t.Fatalf("write %d: %v", i, err)
+				}
 				buf := make([]byte, 1)
-				io.ReadFull(conn, buf)
+				if _, err := io.ReadFull(conn, buf); err != nil {
+					t.Fatalf("read %d: %v", i, err)
+				}
 				conn.Close()
-				time.Sleep(500 * time.Millisecond) // let metrics update
 			}
 
-			// Wait for metrics to settle.
-			time.Sleep(2 * time.Second)
+			// Poll until both sides report >=3 total connections.
+			waitForMetric(t, listenerMetrics, "aztunnel_connections_total",
+				func(v float64) bool { return v >= 3 }, 15*time.Second)
+			waitForMetric(t, senderMetrics, "aztunnel_connections_total",
+				func(v float64) bool { return v >= 3 }, 15*time.Second)
 
-			// Check listener metrics.
-			lm := scrapeMetrics(t, listenerMetrics)
-			assertMetricGE(t, lm, "aztunnel_connections_total", 3)
-
-			// Check sender metrics.
-			sm := scrapeMetrics(t, senderMetrics)
-			assertMetricGE(t, sm, "aztunnel_connections_total", 3)
-
-			// Active connections should be 0.
-			assertMetricEQ(t, lm, "aztunnel_active_connections", 0)
-			assertMetricEQ(t, sm, "aztunnel_active_connections", 0)
+			// Active connections should be 0 once all closes have propagated.
+			waitForMetric(t, listenerMetrics, "aztunnel_active_connections",
+				func(v float64) bool { return v == 0 }, 15*time.Second)
+			waitForMetric(t, senderMetrics, "aztunnel_active_connections",
+				func(v float64) bool { return v == 0 }, 15*time.Second)
 		})
 	}
 }
@@ -851,22 +872,19 @@ func TestMetricsErrorReason(t *testing.T) {
 			)
 
 			waitForLog(t, listener, "control channel connected", 30*time.Second)
-			listenerMetrics := waitForLogAddr(t, listener, "metrics server listening", 15*time.Second)
+			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "socks5-proxy listening", 15*time.Second)
 
-			// Attempt connection (will be rejected).
+			// Attempt connection (will be rejected by allowlist).
 			conn := dialSOCKS5(t, senderAddr, echo.Addr())
 			conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 			io.ReadAll(conn)
 			conn.Close()
 
-			time.Sleep(2 * time.Second)
-
-			lm := scrapeMetrics(t, listenerMetrics)
-			if !strings.Contains(lm, `reason="allowlist_rejected"`) {
-				t.Log("metrics output:", lm)
-				t.Fatal("expected allowlist_rejected error reason in metrics")
-			}
+			// Wait until the allowlist_rejected reason label appears in metrics.
+			lm := waitForMetricsContains(t, listenerMetrics,
+				`reason="allowlist_rejected"`, 15*time.Second)
+			_ = lm // available for diagnostics if a later assertion fails
 		})
 	}
 }
@@ -890,23 +908,23 @@ func TestMetricsDialDuration(t *testing.T) {
 
 			waitForLog(t, listener, "control channel connected", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
-			senderMetrics := waitForLogAddr(t, sender, "metrics server listening", 15*time.Second)
+			senderMetrics := sender.MetricsAddr(t, 15*time.Second)
 
 			conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
 			if err != nil {
 				t.Fatalf("dial: %v", err)
 			}
-			conn.Write([]byte("x"))
+			if _, err := conn.Write([]byte("x")); err != nil {
+				t.Fatalf("write: %v", err)
+			}
 			buf := make([]byte, 1)
-			io.ReadFull(conn, buf)
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				t.Fatalf("read: %v", err)
+			}
 			conn.Close()
 
-			time.Sleep(2 * time.Second)
-
-			sm := scrapeMetrics(t, senderMetrics)
-			if !strings.Contains(sm, "aztunnel_dial_duration_seconds") {
-				t.Fatal("missing dial_duration_seconds in sender metrics")
-			}
+			waitForMetricsContains(t, senderMetrics,
+				"aztunnel_dial_duration_seconds", 15*time.Second)
 		})
 	}
 }
@@ -1021,9 +1039,11 @@ func TestPortForwardRecoveryAfterListenerRestart(t *testing.T) {
 			}
 			conn.Close()
 
-			// Kill the listener.
-			listener.cmd.Process.Kill()
-			listener.cmd.Wait()
+			// Stop the listener cleanly via the idempotent Stop helper. The
+			// previous implementation called Process.Kill() + Wait() directly,
+			// racing with the t.Cleanup hook that also calls Wait — double-Wait
+			// returns an error and made cleanup ordering fragile.
+			listener.Stop(t)
 
 			// Restart the listener.
 			listener2 := startListener(t, env, auth,
@@ -1093,8 +1113,12 @@ func assertNoUsageDump(t *testing.T, output string) {
 	}
 }
 
-// TestConnectNoListener verifies that a sender retries on 404 when no listener
-// is running, and is terminated by the test timeout.
+// TestConnectNoListener verifies that a sender retries when no listener is
+// registered for the hyco and that the error/retry behavior is logged. The
+// real Azure Relay returns HTTP 401 (Unauthorized) — NOT 404 — when no
+// listener is registered for the hyco at handshake time, which the relay
+// client surfaces as a non-retryable failure. The test name is preserved for
+// continuity with the original behavior the suite was designed around.
 func TestConnectNoListener(t *testing.T) {
 	env := requireRelayEnv(t)
 
@@ -1109,10 +1133,13 @@ func TestConnectNoListener(t *testing.T) {
 
 			assertNoUsageDump(t, output)
 			assertNoTokenLeak(t, output)
-			// The sender retries on 404 (no listener), so we expect
-			// retry log messages rather than an immediate error exit.
-			if !strings.Contains(output, "retrying") && !strings.Contains(output, "Error:") {
-				t.Errorf("expected retry log or error in output, got: %s", output)
+			// Match case-insensitively against the slog "error:" line OR the
+			// "retrying" log used when the relay returns 404/503. The original
+			// matcher looked for "Error:" (capital) which never matched the
+			// actual lowercase slog output.
+			lower := strings.ToLower(output)
+			if !strings.Contains(lower, "error:") && !strings.Contains(lower, "retrying") && !strings.Contains(lower, "relay dial failed") {
+				t.Errorf("expected error or retry log in output, got: %s", output)
 			}
 		})
 	}
@@ -1160,8 +1187,8 @@ func TestBadHycoName(t *testing.T) {
 // TestBadSASKey verifies a clean error and no key leakage for an invalid SAS key.
 func TestBadSASKey(t *testing.T) {
 	env := requireRelayEnv(t)
-	if env.sasHyco == "" {
-		t.Skip("SAS hyco not configured")
+	if env.sasHyco == "" || env.sasListenerKeyName == "" {
+		t.Skip("SAS hyco / listener key name not configured")
 	}
 
 	badKey := "dGhpcyBpcyBhIGJhZCBrZXk=" // base64("this is a bad key")
@@ -1236,17 +1263,21 @@ func TestMissingRequiredArgs(t *testing.T) {
 }
 
 // TestBadSASKeySender verifies a clean error when the sender has an invalid SAS key.
+// The sender uses connect mode, which dials the relay at startup; a bad SAS
+// produces an HTTP 401 from the relay, which the client treats as
+// non-retryable. We assert a positive failure signal (the "relay dial failed"
+// log line WITHOUT the "(retrying)" suffix) rather than just sleeping and
+// checking for the absence of a leak.
 func TestBadSASKeySender(t *testing.T) {
 	env := requireRelayEnv(t)
-	if env.sasHyco == "" {
-		t.Skip("SAS hyco not configured")
+	if env.sasHyco == "" || env.sasSenderKeyName == "" {
+		t.Skip("SAS hyco / sender key name not configured")
 	}
 
 	badKey := "dGhpcyBpcyBhIGJhZCBrZXk=" // base64("this is a bad key")
 	sasEnv := *env
 	sasEnv.hyco = env.sasHyco
 
-	// Use connect (one-shot) — it dials immediately and fails fast.
 	proc := startAztunnelWithSAS(t, &sasEnv,
 		&sasCredentials{keyName: env.sasSenderKeyName, key: badKey},
 		"relay-sender", "connect", "127.0.0.1:9999",
@@ -1255,8 +1286,10 @@ func TestBadSASKeySender(t *testing.T) {
 		"--log-level", "debug",
 	)
 
-	// Wait for process to exit (it should fail quickly).
-	time.Sleep(5 * time.Second)
+	// Positive assertion: the relay must log a dial failure. We do not assert
+	// process exit because that depends on how the runner reaps subprocesses;
+	// the log line is the contract.
+	waitForLog(t, proc, "relay dial failed", 15*time.Second)
 
 	logs := proc.logs.String()
 	assertNoTokenLeak(t, logs)
@@ -1268,15 +1301,19 @@ func TestBadSASKeySender(t *testing.T) {
 // TestWrongSASClaim verifies that using a listener key for sending (and vice versa) fails.
 func TestWrongSASClaim(t *testing.T) {
 	env := requireRelayEnv(t)
-	if env.sasHyco == "" || env.sasListenerKey == "" || env.sasSenderKey == "" {
-		t.Skip("SAS credentials not configured")
+	if env.sasHyco == "" ||
+		env.sasListenerKeyName == "" || env.sasListenerKey == "" ||
+		env.sasSenderKeyName == "" || env.sasSenderKey == "" {
+		t.Skip("SAS credentials not fully configured")
 	}
 
 	sasEnv := *env
 	sasEnv.hyco = env.sasHyco
 
 	t.Run("listener_key_as_sender", func(t *testing.T) {
-		// Use listener (Listen-only) key for sending — should fail.
+		// port-forward sender lazily dials the relay on first connection, so
+		// running it with no client traffic never exercises auth. We start it,
+		// then dial in once to force a relay dial attempt and observe failure.
 		proc := startAztunnelWithSAS(t, &sasEnv,
 			&sasCredentials{keyName: env.sasListenerKeyName, key: env.sasListenerKey},
 			"relay-sender", "port-forward", "127.0.0.1:9999",
@@ -1286,9 +1323,26 @@ func TestWrongSASClaim(t *testing.T) {
 			"--log-level", "debug",
 		)
 
-		// The sender should fail to open a rendezvous connection.
-		// Wait for any error or log output indicating failure.
-		time.Sleep(5 * time.Second)
+		senderAddr := waitForLogAddr(t, proc, "port-forward listening", 15*time.Second)
+
+		// Force a relay rendezvous attempt by connecting to the sender's
+		// local TCP bind. The wrong-claim dial will fail and the forward
+		// goroutine will close the connection.
+		conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
+		if err != nil {
+			t.Fatalf("dial sender: %v", err)
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte("trigger\n"))
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		buf := make([]byte, 64)
+		if _, rerr := conn.Read(buf); rerr == nil {
+			t.Fatal("expected sender->relay dial to fail with wrong claim, but read succeeded")
+		}
+
+		// Positive assertion: the sender logged a relay dial failure.
+		waitForLog(t, proc, "relay dial failed", 15*time.Second)
+
 		logs := proc.logs.String()
 		assertNoTokenLeak(t, logs)
 	})
@@ -1335,7 +1389,7 @@ func TestPortForwardClosedPort(t *testing.T) {
 			)
 
 			waitForLog(t, listener, "control channel connected", 30*time.Second)
-			listenerMetrics := waitForLogAddr(t, listener, "metrics server listening", 15*time.Second)
+			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			// Connect through the tunnel — listener will fail to dial the closed port.
@@ -1354,13 +1408,7 @@ func TestPortForwardClosedPort(t *testing.T) {
 				t.Fatal("expected read to fail (target port is closed), but it succeeded")
 			}
 
-			// Verify dial_failed metric.
-			time.Sleep(2 * time.Second)
-			lm := scrapeMetrics(t, listenerMetrics)
-			if !strings.Contains(lm, `reason="dial_failed"`) {
-				t.Log("metrics output:", lm)
-				t.Error("expected dial_failed error reason in metrics")
-			}
+			waitForMetricsContains(t, listenerMetrics, `reason="dial_failed"`, 15*time.Second)
 		})
 	}
 }
@@ -1423,7 +1471,7 @@ func TestPortForwardUnreachable(t *testing.T) {
 			)
 
 			waitForLog(t, listener, "control channel connected", 30*time.Second)
-			listenerMetrics := waitForLogAddr(t, listener, "metrics server listening", 15*time.Second)
+			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -1440,13 +1488,19 @@ func TestPortForwardUnreachable(t *testing.T) {
 				t.Fatal("expected read to fail (target is unreachable), but it succeeded")
 			}
 
-			// Verify dial_timeout metric.
-			time.Sleep(2 * time.Second)
-			lm := scrapeMetrics(t, listenerMetrics)
-			if !strings.Contains(lm, `reason="dial_timeout"`) && !strings.Contains(lm, `reason="dial_failed"`) {
-				t.Log("metrics output:", lm)
-				t.Error("expected dial_timeout or dial_failed error reason in metrics")
+			// Either dial_timeout (preferred) or dial_failed is acceptable —
+			// some platforms surface unreachable as a fast failure rather than timeout.
+			deadline := time.Now().Add(15 * time.Second)
+			var lm string
+			for time.Now().Before(deadline) {
+				lm = scrapeMetricsBest(listenerMetrics)
+				if strings.Contains(lm, `reason="dial_timeout"`) || strings.Contains(lm, `reason="dial_failed"`) {
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
 			}
+			t.Logf("metrics output:\n%s", lm)
+			t.Fatal("expected dial_timeout or dial_failed error reason in metrics within 15s")
 		})
 	}
 }

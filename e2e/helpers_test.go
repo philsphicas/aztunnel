@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,9 +161,31 @@ func aztunnelBinary(t *testing.T) string {
 
 // aztunnelProcess represents a running aztunnel process with log capture.
 type aztunnelProcess struct {
-	cmd    *exec.Cmd
-	logs   *logBuffer
-	cancel func()
+	cmd      *exec.Cmd
+	logs     *logBuffer
+	cancel   func()
+	stopOnce sync.Once
+}
+
+// Stop kills the process and waits for it to exit. Safe to call multiple times;
+// the second and subsequent calls are no-ops. The Cleanup hook registered by
+// startAztunnelWithSAS calls Stop too, so tests only need to call this when
+// they want to terminate a process mid-test (e.g. listener restart scenarios).
+func (p *aztunnelProcess) Stop(t *testing.T) {
+	t.Helper()
+	p.stopOnce.Do(func() {
+		if p.cmd.Process != nil {
+			_ = p.cmd.Process.Kill()
+		}
+		_ = p.cmd.Wait()
+	})
+}
+
+// MetricsAddr waits for the "metrics server listening addr=…" log line and
+// returns the address. Use this in tests that pass --metrics-addr 127.0.0.1:0.
+func (p *aztunnelProcess) MetricsAddr(t *testing.T, timeout time.Duration) string {
+	t.Helper()
+	return waitForLogAddr(t, p, "metrics server listening", timeout)
 }
 
 // logBuffer is a thread-safe buffer that captures log output and supports
@@ -277,14 +300,71 @@ func startAztunnelWithSAS(t *testing.T, env *relayEnv, sas *sasCredentials, args
 		logs: logs,
 	}
 
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			cmd.Process.Kill()
-		}
-		cmd.Wait()
-	})
+	t.Cleanup(func() { proc.Stop(t) })
 
 	return proc
+}
+
+// metricsScrapeClient is used by scrapeMetricsBest so that polling helpers
+// don't get wedged on a stalled /metrics response (the default http.Client
+// has no timeout, which would defeat the deadline in waitForMetric /
+// waitForMetricsContains). The timeout is generous relative to the 100ms
+// polling cadence but well below typical test timeouts.
+var metricsScrapeClient = &http.Client{Timeout: 2 * time.Second}
+
+// scrapeMetricsBest fetches /metrics from addr and returns the body, or "" on
+// any error. Use this inside polling loops (waitForMetric) where transient
+// fetch failures are tolerable. For one-shot reads with hard failure on error,
+// use scrapeMetrics (defined in e2e_test.go).
+func scrapeMetricsBest(addr string) string {
+	resp, err := metricsScrapeClient.Get("http://" + addr + "/metrics")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
+}
+
+// waitForMetric polls /metrics on addr at 100ms intervals until sumMetric(text,
+// name) satisfies predicate, then returns the satisfying value. Calls
+// t.Fatalf if the predicate is not satisfied before timeout. Replaces the
+// time.Sleep+scrapeMetrics idiom that was previously sprinkled through e2e
+// tests and made them racy on slow CI.
+func waitForMetric(t *testing.T, addr, name string, predicate func(float64) bool, timeout time.Duration) float64 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last float64
+	for time.Now().Before(deadline) {
+		text := scrapeMetricsBest(addr)
+		last = sumMetric(text, name)
+		if predicate(last) {
+			return last
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("waitForMetric: %s on %s did not satisfy predicate within %v (last value %v)", name, addr, timeout, last)
+	return 0 // unreachable; t.Fatalf terminates the goroutine
+}
+
+// waitForMetricsContains polls /metrics on addr at 100ms intervals until the
+// response body contains want, then returns the body. Calls t.Fatalf on
+// timeout. Use this for label-presence checks (e.g. `reason="dial_failed"`)
+// or histogram-presence checks (e.g. `aztunnel_dial_duration_seconds`) that
+// sumMetric can't express.
+func waitForMetricsContains(t *testing.T, addr, want string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		last = scrapeMetricsBest(addr)
+		if strings.Contains(last, want) {
+			return last
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("waitForMetricsContains: /metrics on %s did not contain %q within %v\nlast body:\n%s", addr, want, timeout, last)
+	return last // unreachable
 }
 
 // sasCredentials holds a SAS key name and key for a specific role.

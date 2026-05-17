@@ -74,6 +74,34 @@ make e2e
 - **TestMetricsErrorReason** — allowlist rejection recorded with correct reason
 - **TestMetricsDialDuration** — dial duration histogram populated
 
+### Multi-Instance
+
+- **TestMultiListenerPortForwardSmoke** — two listeners on the same hyco serve
+  a single port-forward sender; asserts all flows round-trip and neither
+  listener emits an error-level log line. Per-listener distribution is logged,
+  not asserted, because Azure Relay's listener-selection is not specified as
+  round-robin.
+
+## Test Harness Conventions
+
+The Phase 1 harness pass (see `helpers_test.go` + `multi_test.go`) introduces
+a small set of helpers that new tests should prefer over ad-hoc sleeps and
+manual process management:
+
+- `(*aztunnelProcess).Stop(t)` — idempotent kill + wait. Safe to call from a
+  test that also has the implicit `t.Cleanup` Stop registered.
+- `(*aztunnelProcess).MetricsAddr(t, timeout)` — block until the subprocess
+  logs `metrics server listening`, return the bound `host:port`. Use with
+  `--metrics-addr 127.0.0.1:0`.
+- `waitForMetric(t, addr, name, predicate, timeout)` — poll `/metrics` until
+  `predicate(sumMetric(name))` is true. Prefer over `time.Sleep` before
+  scraping counters.
+- `waitForMetricsContains(t, addr, substr, timeout)` — same shape but for
+  label-keyed assertions (e.g., `reason="dial_failed"`).
+- `scrapeMetricsBest(addr)` — non-fatal scrape returning `""` on error;
+  intended for use inside polling loops where transient failures are
+  expected.
+
 ## Running Specific Tests
 
 ```bash
