@@ -29,6 +29,12 @@ type PortForwardConfig struct {
 	TCPKeepAlive  time.Duration
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
+	// Ready, if non-nil, is invoked once after the local bind succeeds
+	// and before the accept loop starts. Tests use this to learn the
+	// chosen bind address (when BindAddress is :0) without having to
+	// probe with a real TCP dial that would consume a listener slot
+	// under MaxConnections. Production callers leave this nil.
+	Ready func(net.Addr)
 }
 
 // PortForward starts a local TCP listener and forwards each connection
@@ -47,6 +53,9 @@ func PortForward(ctx context.Context, cfg PortForwardConfig) error {
 	}
 	defer ln.Close() //nolint:errcheck // best-effort cleanup
 	cfg.Logger.Info("port-forward listening", "bind", ln.Addr(), "target", cfg.Target)
+	if cfg.Ready != nil {
+		cfg.Ready(ln.Addr())
+	}
 
 	go func() {
 		<-ctx.Done()
