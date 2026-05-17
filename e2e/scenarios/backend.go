@@ -252,6 +252,36 @@ type SetupOptions struct {
 	// valid; scenarios that need this override should scope-gate
 	// themselves on mock).
 	OverrideHycoName string
+
+	// NoMux, when true, runs the sender in v1-only mode: passes
+	// --no-mux to the CLI (Azure backend) or sets MuxDisabled=true on
+	// PortForwardConfig/SOCKS5Config (mock backend). The sender skips
+	// the v2 mux probe entirely on every connection. Ignored for
+	// SenderMode==ModeConnect (the stdio path has no mux concept).
+	// Set by the WithMuxAxis decorator when the cell's mux value is
+	// "v1"; scenarios may also set it directly to pin a single mode.
+	NoMux bool
+
+	// MuxSessions caps the sender's mux pool size. 0 means leave at
+	// the sender default (1). Threaded to --mux-sessions on Azure and
+	// to PortForwardConfig.MuxSessions / SOCKS5Config.MuxSessions on
+	// the mock backend. Ignored when NoMux is true.
+	MuxSessions int
+
+	// MaxStreamsPerSession caps in-flight streams per mux session
+	// before back-pressure kicks in. 0 means leave at the sender
+	// default (256). Threaded to --max-streams-per-session on Azure
+	// and to the corresponding mock Config field. Ignored when NoMux
+	// is true.
+	MaxStreamsPerSession int
+
+	// ListenerRejectMux, when true, configures every listener in the
+	// topology to refuse v2 mux handshakes with a v1-style rejection
+	// (--reject-mux on Azure, listener.Config.RejectMux on mock). This
+	// simulates a v1-only listener fleet so the sender's mux
+	// fallback path can be driven end-to-end, e.g. by the rolling-
+	// deployment scenario.
+	ListenerRejectMux bool
 }
 
 // AuthOverride substitutes auth credentials when SetupExpectingFailure

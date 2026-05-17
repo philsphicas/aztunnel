@@ -129,8 +129,18 @@ func scenarioDistributionPerListener(t *testing.T, b Backend, n, m int) {
 	AssertNoLeaks(t)
 	echo := StartPlainEcho(t)
 	tun := b.Setup(t, SetupOptions{
-		NumListeners:   m,
-		NumSenders:     n,
+		NumListeners: m,
+		NumSenders:   n,
+		// Pin v1: the test contract is rendezvous-level
+		// distribution ("every listener gets traffic"). Under
+		// mux a single sender opens one mux session bound to a
+		// single rendezvous, so other listeners never see
+		// traffic regardless of how many connections the test
+		// drives through that one sender. v1 mints one
+		// rendezvous per accepted TCP connection, restoring
+		// the per-listener-distribution invariant the test
+		// asserts.
+		NoMux:          true,
 		SenderMode:     ModePortForward,
 		Target:         echo.Addr(),
 		AllowedTargets: []string{echo.Addr()},
@@ -272,8 +282,19 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 	AssertNoLeaks(t)
 	echo := StartPlainEcho(t)
 	tun := b.Setup(t, SetupOptions{
-		NumListeners:   m,
-		NumSenders:     n,
+		NumListeners: m,
+		NumSenders:   n,
+		// Pin v1: the test contract is "drop one listener,
+		// observe exactly A0 flows broken on the survivors".
+		// Under mux each sender opens one mux session bound to
+		// a single rendezvous, so all K long flows from a
+		// sender land on the same listener; with N=1 or N=2
+		// vs M=2 the bound listener can easily be the one we
+		// then drop (or the wrong one), and Active() on the
+		// drop target reads 0 even after kMax flows. v1's per-
+		// connection rendezvous gives the natural distribution
+		// the snapshot/drop assertion depends on.
+		NoMux:          true,
 		SenderMode:     ModePortForward,
 		Target:         echo.Addr(),
 		AllowedTargets: []string{echo.Addr()},
@@ -406,8 +427,16 @@ func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 	AssertNoLeaks(t)
 	echo := StartPlainEcho(t)
 	tun := b.Setup(t, SetupOptions{
-		NumListeners:   m,
-		NumSenders:     n,
+		NumListeners: m,
+		NumSenders:   n,
+		// Pin v1: the test contract is "a newly added listener
+		// picks up traffic". Under mux the sender's existing
+		// session(s) are bound to the original listeners; new
+		// connections multiplex onto those, so the freshly-
+		// added listener never receives a rendezvous. v1's
+		// per-connection rendezvous restores the convergence
+		// the test waits for.
+		NoMux:          true,
 		SenderMode:     ModePortForward,
 		Target:         echo.Addr(),
 		AllowedTargets: []string{echo.Addr()},

@@ -315,7 +315,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 
 		acceptLogger.Info(EventAcceptAttempted)
 
-		if !sem.tryAcquire(loopCtx) {
+		if !sem.tryAcquire() {
 			acceptLogger.Warn(EventAcceptDropped, "reason", AcceptDroppedSemaphoreFull)
 			continue
 		}

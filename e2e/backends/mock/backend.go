@@ -284,6 +284,7 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 			ConnectTimeout: opts.ConnectTimeout,
 			Logger:         slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			Metrics:        m,
+			RejectMux:      opts.ListenerRejectMux,
 		}
 
 		wg.Add(1)
@@ -358,26 +359,32 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 			switch opts.SenderMode {
 			case scenarios.ModePortForward:
 				err = sender.PortForward(sctx, sender.PortForwardConfig{
-					Endpoint:      host,
-					EntityPath:    entity,
-					TokenProvider: senderTP,
-					ClientOptions: clientOpts,
-					Target:        opts.Target,
-					BindAddress:   "127.0.0.1:0",
-					Logger:        senderLogger,
-					Metrics:       m,
-					Ready:         ready,
+					Endpoint:             host,
+					EntityPath:           entity,
+					TokenProvider:        senderTP,
+					ClientOptions:        clientOpts,
+					Target:               opts.Target,
+					BindAddress:          "127.0.0.1:0",
+					Logger:               senderLogger,
+					Metrics:              m,
+					Ready:                ready,
+					MuxDisabled:          opts.NoMux,
+					MuxSessions:          opts.MuxSessions,
+					MaxStreamsPerSession: opts.MaxStreamsPerSession,
 				})
 			case scenarios.ModeSOCKS5:
 				err = sender.SOCKS5Proxy(sctx, sender.SOCKS5Config{
-					Endpoint:      host,
-					EntityPath:    entity,
-					TokenProvider: senderTP,
-					ClientOptions: clientOpts,
-					BindAddress:   "127.0.0.1:0",
-					Logger:        senderLogger,
-					Metrics:       m,
-					Ready:         ready,
+					Endpoint:             host,
+					EntityPath:           entity,
+					TokenProvider:        senderTP,
+					ClientOptions:        clientOpts,
+					BindAddress:          "127.0.0.1:0",
+					Logger:               senderLogger,
+					Metrics:              m,
+					Ready:                ready,
+					MuxDisabled:          opts.NoMux,
+					MuxSessions:          opts.MuxSessions,
+					MaxStreamsPerSession: opts.MaxStreamsPerSession,
 				})
 			}
 			if err != nil && sctx.Err() == nil && ctx.Err() == nil {
@@ -630,6 +637,7 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 				AllowList:     opts.AllowedTargets,
 				Logger:        listenerLogger,
 				Metrics:       metrics.New(),
+				RejectMux:     opts.ListenerRejectMux,
 			})
 			if err != nil && lctx.Err() == nil && ctx.Err() == nil {
 				listenerLogger.Debug("listener exited", "err", err)
@@ -670,6 +678,7 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 				ConnectTimeout: opts.ConnectTimeout,
 				Logger:         listenerLogger,
 				Metrics:        m,
+				RejectMux:      opts.ListenerRejectMux,
 			})
 			if err != nil && lctx.Err() == nil && ctx.Err() == nil {
 				listenerLogger.Debug("listener exited", "err", err)
@@ -712,26 +721,32 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 		switch opts.SenderMode {
 		case scenarios.ModePortForward:
 			err = sender.PortForward(sctx, sender.PortForwardConfig{
-				Endpoint:      host,
-				EntityPath:    entity,
-				TokenProvider: senderProvider,
-				ClientOptions: clientOpts,
-				Target:        opts.Target,
-				BindAddress:   "127.0.0.1:0",
-				Logger:        senderLogger,
-				Metrics:       metrics.New(),
-				Ready:         ready,
+				Endpoint:             host,
+				EntityPath:           entity,
+				TokenProvider:        senderProvider,
+				ClientOptions:        clientOpts,
+				Target:               opts.Target,
+				BindAddress:          "127.0.0.1:0",
+				Logger:               senderLogger,
+				Metrics:              metrics.New(),
+				Ready:                ready,
+				MuxDisabled:          opts.NoMux,
+				MuxSessions:          opts.MuxSessions,
+				MaxStreamsPerSession: opts.MaxStreamsPerSession,
 			})
 		case scenarios.ModeSOCKS5:
 			err = sender.SOCKS5Proxy(sctx, sender.SOCKS5Config{
-				Endpoint:      host,
-				EntityPath:    entity,
-				TokenProvider: senderProvider,
-				ClientOptions: clientOpts,
-				BindAddress:   "127.0.0.1:0",
-				Logger:        senderLogger,
-				Metrics:       metrics.New(),
-				Ready:         ready,
+				Endpoint:             host,
+				EntityPath:           entity,
+				TokenProvider:        senderProvider,
+				ClientOptions:        clientOpts,
+				BindAddress:          "127.0.0.1:0",
+				Logger:               senderLogger,
+				Metrics:              metrics.New(),
+				Ready:                ready,
+				MuxDisabled:          opts.NoMux,
+				MuxSessions:          opts.MuxSessions,
+				MaxStreamsPerSession: opts.MaxStreamsPerSession,
 			})
 		}
 		if err != nil && sctx.Err() == nil && ctx.Err() == nil {
