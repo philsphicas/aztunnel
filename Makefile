@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean vulncheck help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean e2e-infra-env e2e-infra-janitor vulncheck help
 
 .DEFAULT_GOAL := help
 
@@ -64,10 +64,6 @@ fmt-check: ## Check formatting (same as CI)
 	npx --yes prettier --check .
 
 e2e: build ## Run end-to-end tests (requires Azure Relay credentials)
-	@if [ -z "$$E2E_RELAY_NAME" ]; then \
-		echo "Auto-discovering relay configuration..."; \
-		_envsh=$$(./e2e/infra/env.sh --show-secrets) || exit 1; eval "$$_envsh"; \
-	fi; \
 	go test -tags=e2e -timeout=10m -v ./e2e/...
 
 e2e-docker: ## Run container-to-container e2e tests
@@ -76,14 +72,20 @@ e2e-docker: ## Run container-to-container e2e tests
 	docker compose -f docker-compose.e2e.yml down; \
 	exit $$status
 
-e2e-infra-setup: ## Deploy e2e Azure infra + grant yourself access (SKIP_RBAC=1 to skip)
-	$(MAKE) -C e2e/infra setup
+e2e-infra-setup: ## Deploy e2e Azure infra + grant yourself access
+	cd e2e/infra && go run ./cmd/e2e-infra setup
 
 e2e-infra-ci: ## Full CI setup: infra + identity + GitHub secrets (maintainer)
-	$(MAKE) -C e2e/infra ci
+	cd e2e/infra && go run ./cmd/e2e-infra ci
 
-e2e-infra-clean: ## Delete e2e Azure resource group
-	$(MAKE) -C e2e/infra clean
+e2e-infra-clean: ## Delete e2e Azure resource group (requires --yes confirmation)
+	cd e2e/infra && go run ./cmd/e2e-infra clean
+
+e2e-infra-env: ## Print E2E_* env vars for local test runs (eval $$(make e2e-infra-env))
+	@cd e2e/infra && go run ./cmd/e2e-infra env
+
+e2e-infra-janitor: ## Delete orphaned per-invocation hybrid connections older than 4h
+	cd e2e/infra && go run ./cmd/e2e-infra janitor
 
 vulncheck: ## Check Go dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
