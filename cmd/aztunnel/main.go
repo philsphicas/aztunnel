@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	// Automatically set GOMEMLIMIT based on cgroup memory limits (container
@@ -15,8 +16,10 @@ import (
 	"github.com/KimMachineGun/automemlimit/memlimit"
 
 	"github.com/alecthomas/kong"
+	"github.com/philsphicas/aztunnel/internal/listener"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
+	"github.com/philsphicas/aztunnel/internal/sender"
 	"github.com/willabides/kongplete"
 )
 
@@ -33,6 +36,20 @@ func main() {
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
 		kong.Help(customHelpPrinter),
+		// Inject release-tracked defaults into kong tag substitutions so a
+		// single Go constant remains the source of truth across:
+		//   - the kong CLI default (resolved here),
+		//   - the sender library zero-value normalization
+		//     (NormalizeSenderMaxProtocolVersion in internal/sender),
+		//   - the protocol_version_test.go pin.
+		// This makes the 0.5.0 sender-default flip a single-constant change
+		// (see internal/sender/protocol_version.go DefaultSenderMaxProtocolVersion);
+		// help.go and docs/*.md still need the matching prose update, asserted
+		// by TestHelpDefault_MatchesSenderMaxProtocolVersionConstant.
+		kong.Vars{
+			"defaultSenderMaxProtocolVersion":   strconv.Itoa(sender.DefaultSenderMaxProtocolVersion),
+			"defaultListenerMaxProtocolVersion": strconv.Itoa(listener.DefaultListenerMaxProtocolVersion),
+		},
 	)
 
 	kongplete.Complete(parser)

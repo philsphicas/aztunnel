@@ -78,6 +78,8 @@ func reliabilityCases() []scenarioCase {
 			reason: "validates Azure Relay's ~120s idle-connection timeout via keepalive pings; mock relay has no idle timeout",
 			run:    ScenarioLongLivedConnection,
 		},
+		{name: "MuxFallback_V1Listener_PortForward", scope: AnyBackend, run: ScenarioMuxFallback_V1Listener_PortForward},
+		{name: "MuxFallback_V1Listener_SOCKS5", scope: AnyBackend, run: ScenarioMuxFallback_V1Listener_SOCKS5},
 	}
 }
 
@@ -1161,6 +1163,147 @@ func waitForLogSubstrAny(logs func() string, substrs []string, timeout time.Dura
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
+}
+
+// muxUnsupportedFallbackLog is the warn-level message the sender's
+// muxdialer emits when it observes a v1-style rejection of the v2
+// handshake and arms its sticky v1-fallback marker. Pinned here so
+// the rolling-deployment scenarios can assert against the exact log
+// shape the production sender emits.
+const muxUnsupportedFallbackLog = "listener does not support mux protocol; falling back to v1"
+
+// ScenarioMuxFallback_V1Listener_PortForward asserts the rolling-
+// deployment story end-to-end: a sender that speaks v2 (mux)
+// against a listener fleet that only speaks v1 must
+//
+//  1. detect the rejection on its first v2 probe and fall back to
+//     v1 transparently so the application-visible round-trip
+//     succeeds, AND
+//  2. cache the rejection for muxUnavailableTTL (60 s) so
+//     subsequent connections skip the probe and dial straight
+//     into v1 — proven here by observing exactly one fallback log
+//     line across two back-to-back round-trips.
+//
+// The v1-only listener is driven by ListenerMaxProtocolVersion=1,
+// which makes the listener respond to v2 mux handshakes with the same
+// "unsupported protocol version" rejection a pre-mux listener would
+// emit (internal/listener/listener.go honours Config.MaxProtocolVersion;
+// the Azure backend sets it via the --max-protocol-version CLI flag
+// and the mock backend via the equivalent Config field). The sender is
+// pinned with SenderMaxProtocolVersion=2 so the v2 probe always fires
+// regardless of the runtime default (which differs between 0.4.0 and
+// 0.5.0). Same production-grade flag an operator would use for an
+// emergency v2 rollback; no test-only seam involved.
+//
+// Scope: this scenario is NOT wrapped by WithMuxAxis in
+// RunReliabilityScenarios — running it under a v1 cell would still
+// run the same code (the sender starts in v2 mode then falls back),
+// but the test name would falsely suggest the v1 cell is exercising
+// something different. Pinning to one configuration keeps the
+// scenario's intent unambiguous in -v output.
+func ScenarioMuxFallback_V1Listener_PortForward(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:               1,
+		SenderMode:                 ModePortForward,
+		Target:                     echo.Addr(),
+		AllowedTargets:             []string{echo.Addr()},
+		ListenerMaxProtocolVersion: 1,
+		SenderMaxProtocolVersion:   2,
+	})
+
+	// First round-trip: triggers the v2 probe, observes the
+	// rejection, falls back to v1, succeeds. Assert at least one
+	// fallback log line was emitted.
+	doPortForwardEcho(t, tun.SenderAddr, []byte("mux-fallback round 1\n"))
+	if !waitForLogSubstring(tun.Senders[0].Logs, muxUnsupportedFallbackLog, 10*time.Second) {
+		t.Fatalf("sender never logged mux-unsupported fallback within 10s\n--- sender logs ---\n%s",
+			tun.Senders[0].Logs())
+	}
+	count1 := strings.Count(tun.Senders[0].Logs(), muxUnsupportedFallbackLog)
+
+	// Second round-trip: sticky cache should hold (muxUnavailableTTL
+	// is 60 s, well beyond the few-ms gap here), so the sender must
+	// NOT emit another fallback log line — that would mean it
+	// re-probed mux and burned the listener's reject again.
+	doPortForwardEcho(t, tun.SenderAddr, []byte("mux-fallback round 2\n"))
+	// Give any in-flight log writes a brief moment to flush before
+	// we count, otherwise a second fallback could race past us.
+	time.Sleep(250 * time.Millisecond)
+	count2 := strings.Count(tun.Senders[0].Logs(), muxUnsupportedFallbackLog)
+	if count2 != count1 {
+		t.Errorf("sticky v1-fallback cache did not hold: fallback log count went from %d to %d after second round-trip (expected unchanged)\n--- sender logs ---\n%s",
+			count1, count2, tun.Senders[0].Logs())
+	}
+}
+
+// ScenarioMuxFallback_V1Listener_SOCKS5 is the SOCKS5 counterpart of
+// ScenarioMuxFallback_V1Listener_PortForward. The SOCKS5 sender's
+// CONNECT handshake completes only after the underlying tunnel
+// stream is established, so this also pins that the SOCKS5 reply
+// REP=0x00 (succeeded) is delivered even when the first attempt's
+// v2 probe is rejected and the sender silently falls back. Round-
+// trip semantics are identical: two back-to-back CONNECTs, with the
+// sticky cache asserted to suppress a second fallback log on call 2.
+func ScenarioMuxFallback_V1Listener_SOCKS5(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:               1,
+		SenderMode:                 ModeSOCKS5,
+		AllowedTargets:             []string{echo.Addr()},
+		ListenerMaxProtocolVersion: 1,
+		SenderMaxProtocolVersion:   2,
+	})
+
+	doSOCKS5Echo(t, tun.SenderAddr, echo.Addr(), []byte("mux-fallback socks5 round 1\n"))
+	if !waitForLogSubstring(tun.Senders[0].Logs, muxUnsupportedFallbackLog, 10*time.Second) {
+		t.Fatalf("sender never logged mux-unsupported fallback within 10s\n--- sender logs ---\n%s",
+			tun.Senders[0].Logs())
+	}
+	count1 := strings.Count(tun.Senders[0].Logs(), muxUnsupportedFallbackLog)
+
+	doSOCKS5Echo(t, tun.SenderAddr, echo.Addr(), []byte("mux-fallback socks5 round 2\n"))
+	time.Sleep(250 * time.Millisecond)
+	count2 := strings.Count(tun.Senders[0].Logs(), muxUnsupportedFallbackLog)
+	if count2 != count1 {
+		t.Errorf("sticky v1-fallback cache did not hold: fallback log count went from %d to %d after second round-trip (expected unchanged)\n--- sender logs ---\n%s",
+			count1, count2, tun.Senders[0].Logs())
+	}
+}
+
+// doPortForwardEcho runs one port-forward dial → write → readN →
+// close round-trip and Fatals the test on any error. Used by the
+// mux-fallback scenarios to keep their bodies focused on the
+// fallback-log assertions.
+func doPortForwardEcho(t *testing.T, senderAddr string, payload []byte) {
+	t.Helper()
+	conn := dialWithRetry(t, senderAddr, 10*time.Second)
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	writeAll(t, conn, payload)
+	got := readN(t, conn, len(payload), 15*time.Second)
+	if string(got) != string(payload) {
+		t.Fatalf("port-forward echo mismatch\n got=%q\nwant=%q", got, payload)
+	}
+}
+
+// doSOCKS5Echo runs one SOCKS5 CONNECT → write → readN → close
+// round-trip and Fatals the test on any error.
+func doSOCKS5Echo(t *testing.T, proxyAddr, target string, payload []byte) {
+	t.Helper()
+	conn, err := dialSOCKS5WithRetry(proxyAddr, target, 10*time.Second)
+	if err != nil {
+		t.Fatalf("socks5 dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	writeAll(t, conn, payload)
+	got := readN(t, conn, len(payload), 15*time.Second)
+	if string(got) != string(payload) {
+		t.Fatalf("socks5 echo mismatch\n got=%q\nwant=%q", got, payload)
+	}
 }
 
 // assertNoTokenLeak fails the test if output contains a raw

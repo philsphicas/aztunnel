@@ -94,20 +94,20 @@ fmt-check: ## Check formatting (same as CI)
 # timeout still covers the whole job (checkout, build, azrelay,
 # backend) so the workflow envelope remains the outer cap if the
 # preceding steps consume too much of it. See golang/go#24929.
-e2e-mock: ## Run e2e scenarios against the in-process mock relay (both auth methods, default delay profile)
-	cd e2e && go test -tags=e2e -timeout=20m -v ./backends/mock/...
+e2e-mock: ## Run e2e scenarios against the in-process mock relay (both auth methods, default delay profile, both mux versions)
+	cd e2e && go test -tags=e2e -timeout=40m -v ./backends/mock/...
 
 e2e-mock-fast: ## Run mock e2e as fast as possible: zero delay profile, no synthetic token-acquisition cost (both auth methods)
-	cd e2e && E2E_DELAY=zero go test -tags=e2e -timeout=20m -v ./backends/mock/...
+	cd e2e && E2E_DELAY=zero go test -tags=e2e -timeout=40m -v ./backends/mock/...
 
 e2e-mock-matrix: ## Run mock e2e over the full auth x delay-profile matrix (both auth methods x the curated functional delay set: zero + default)
-	cd e2e && E2E_DELAY=all go test -tags=e2e -timeout=40m -v ./backends/mock/...
+	cd e2e && E2E_DELAY=all go test -tags=e2e -timeout=60m -v ./backends/mock/...
 
 e2e-azure: build ## Run e2e scenarios against a real Azure Relay namespace (configure via `make e2e-setup`)
 	@cd e2e && { \
 		status=0; \
 		go test -tags=e2e -timeout=20m -v ./azrelay/ || status=$$?; \
-		go test -tags=e2e -timeout=50m -v ./backends/azure/... || status=$$?; \
+		go test -tags=e2e -timeout=90m -v ./backends/azure/... || status=$$?; \
 		exit $$status; \
 	}
 
@@ -194,7 +194,17 @@ space := $(empty) $(empty)
 # `default,default` collapse to one word and add no layer.
 PERF_MOCK_AUTH_LAYER = $(if $(strip $(E2E_AUTH)),,[^/]+/)
 PERF_MOCK_DELAY_LAYER = $(if $(filter all,$(E2E_DELAY)),[^/]+/,$(if $(word 2,$(sort $(subst $(comma),$(space),$(E2E_DELAY)))),[^/]+/,))
-PERF_AXIS_PREFIX_MOCK = $(PERF_MOCK_AUTH_LAYER)$(PERF_MOCK_DELAY_LAYER)
+# Mux: scenarios.RunPerformanceScenarios wraps every perf cell with
+# WithMuxAxis, so a v1/v2 t.Run layer ALWAYS sits between the outer
+# auth/delay cell and the scenario name in the perf subtest path.
+# Other suites (Core/Topology/Reliability/Observability) are NOT
+# wrapped, so this layer applies only to the perf -run patterns
+# below.
+PERF_MOCK_MUX_LAYER = [^/]+/
+PERF_AXIS_PREFIX_MOCK = $(PERF_MOCK_AUTH_LAYER)$(PERF_MOCK_DELAY_LAYER)$(PERF_MOCK_MUX_LAYER)
+# Azure: WithMuxAxis adds a v1/v2 layer for perf scenarios there too,
+# below the always-present auth layer.
+PERF_AXIS_PREFIX_AZURE = [^/]+/[^/]+/
 PERF_ALL_SCENARIOS = ^(ConnectLatency|ShortSession|Serial_Conn|Parallel_Conn|Stream_)
 PERF_SCENARIO_FILTER = $(or $(PERF),$(PERF_ALL_SCENARIOS))
 
@@ -213,7 +223,7 @@ perf-azure: build ## Run performance characterization scenarios against a real A
 	cd e2e && PERF_MATRIX_BACKEND=azure \
 		PERF_MATRIX_GIT_SHA="$$(git rev-parse --short HEAD 2>/dev/null)" \
 		go test -tags=e2e -count=1 -timeout=35m -v \
-		-run='TestE2E_Azure/[^/]+/$(PERF_SCENARIO_FILTER)' \
+		-run='TestE2E_Azure/$(PERF_AXIS_PREFIX_AZURE)$(PERF_SCENARIO_FILTER)' \
 		./backends/azure/
 
 perf: perf-mock perf-azure ## Run performance scenarios against both backends
@@ -287,7 +297,7 @@ perf-placement: ## Sweep the PERF MATRIX across the 3x3 mock sender/listener pla
 		PERF_MATRIX_BACKEND=mock \
 		PERF_MATRIX_GIT_SHA="$$(git rev-parse --short HEAD 2>/dev/null)" \
 		E2E_AUTH=sas E2E_DELAY=$(PERF_PLACEMENT) go test -tags=e2e -count=1 -timeout=20m \
-			-run='TestE2E_Mock/[^/]+/$(PERF_PLACEMENT_SCENARIO)' \
+			-run='TestE2E_Mock/[^/]+/[^/]+/$(PERF_PLACEMENT_SCENARIO)' \
 			./backends/mock/; \
 		status=$$?; \
 		echo; \
@@ -316,7 +326,7 @@ perf-placement-azure: build ## Run the perf scenarios against a real Azure Relay
 		PERF_MATRIX_BACKEND=azure \
 		PERF_MATRIX_GIT_SHA="$$(git rev-parse --short HEAD 2>/dev/null)" \
 		go test -tags=e2e -count=1 -timeout=35m \
-			-run='TestE2E_Azure/[^/]+/$(PERF_SCENARIO_FILTER)' \
+			-run='TestE2E_Azure/$(PERF_AXIS_PREFIX_AZURE)$(PERF_SCENARIO_FILTER)' \
 			./backends/azure/; \
 		status=$$?; \
 		echo; \
@@ -356,7 +366,7 @@ perf-axes-mock: build ## Sweep mock UNPINNED over auth x delay; render named-axi
 		PERF_MATRIX_BACKEND=mock \
 		PERF_MATRIX_GIT_SHA="$$(git rev-parse --short HEAD 2>/dev/null)" \
 		E2E_DELAY=$(PERF_AXES_DELAY) go test -tags=e2e -count=1 -timeout=20m \
-			-run='TestE2E_Mock/[^/]+/[^/]+/$(PERF_AXES_SCENARIO)' \
+			-run='TestE2E_Mock/[^/]+/[^/]+/[^/]+/$(PERF_AXES_SCENARIO)' \
 			./backends/mock/; \
 		status=$$?; \
 		echo; \

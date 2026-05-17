@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"context"
 	"net"
 	"time"
 )
@@ -33,15 +32,15 @@ func newConnSemaphore(max int) *connSemaphore {
 	return &connSemaphore{ch: make(chan struct{}, max)}
 }
 
-func (s *connSemaphore) tryAcquire(ctx context.Context) bool {
+// tryAcquire is non-blocking: it returns true if a slot was reserved,
+// false if the semaphore is at capacity.
+func (s *connSemaphore) tryAcquire() bool {
 	if s.ch == nil {
 		return true
 	}
 	select {
 	case s.ch <- struct{}{}:
 		return true
-	case <-ctx.Done():
-		return false
 	default:
 		return false
 	}

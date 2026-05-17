@@ -253,6 +253,7 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 		listenerArgs = append(listenerArgs, "--connect-timeout",
 			opts.ConnectTimeout.String())
 	}
+	listenerArgs = appendListenerProtocolArgs(listenerArgs, opts)
 
 	spawnListener := func(t testing.TB) *scenarios.Listener {
 		t.Helper()
@@ -270,6 +271,7 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 	}
 
 	senderArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
+	senderArgs = appendSenderProtocolArgs(senderArgs, opts)
 
 	listeners := make([]*scenarios.Listener, 0, opts.NumListeners)
 	for i := 0; i < opts.NumListeners; i++ {
@@ -295,11 +297,14 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 		senders = append(senders, &scenarios.Sender{
 			Addr:                bindAddr,
 			Completed:           scrapeCounter(metricsAddr, "aztunnel_connections_total"),
-			Active:              scrapeGauge(metricsAddr, "aztunnel_active_connections"),
-			DialDurationSamples: scrapeHistogramCount(metricsAddr, "aztunnel_dial_duration_seconds"),
-			TokenFetchOK:        scrapeTokenFetchOK(metricsAddr),
-			Stop:                func() { proc.Stop(t) },
-			Logs:                func() string { return proc.logs.String() },
+			Active:                scrapeGauge(metricsAddr, "aztunnel_active_connections"),
+			DialDurationSamples:   scrapeHistogramCount(metricsAddr, "aztunnel_dial_duration_seconds"),
+			TokenFetchOK:          scrapeTokenFetchOK(metricsAddr),
+			MuxSessionsActive:     scrapeGauge(metricsAddr, "aztunnel_mux_sessions_active"),
+			MuxStreamOpenSamples:  scrapeHistogramCount(metricsAddr, "aztunnel_mux_stream_open_seconds"),
+			MuxPoolSaturatedTotal: scrapeGauge(metricsAddr, "aztunnel_mux_pool_saturated_total"),
+			Stop:                  func() { proc.Stop(t) },
+			Logs:                  func() string { return proc.logs.String() },
 		})
 	}
 
@@ -546,6 +551,7 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	for _, target := range opts.AllowedTargets {
 		listenerArgs = append(listenerArgs, "--allow", target)
 	}
+	listenerArgs = appendListenerProtocolArgs(listenerArgs, opts)
 
 	listenerLogs := func() string { return "" }
 	senderLogs := func() string { return "" }
@@ -562,7 +568,9 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	// Sender-side failure: bring up a healthy listener (if asked)
 	// then start the sender with bad creds and observe.
 	if opts.NumListeners > 0 {
-		lp := startListener(t, env, auth, "--metrics-addr", "127.0.0.1:0", "--log-level", "debug")
+		healthyListenerArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
+		healthyListenerArgs = appendListenerProtocolArgs(healthyListenerArgs, opts)
+		lp := startListener(t, env, auth, healthyListenerArgs...)
 		listenerLogs = func() string { return lp.logs.String() }
 		waitForLog(t, lp, "control_started", 30*time.Second)
 	}
@@ -583,27 +591,30 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	// Port-forward or SOCKS5: start sender with bad creds, dial
 	// locally to trigger the relay dial, wait for the failure log.
 	var proc *aztunnelProcess
+	senderExtra := appendSenderProtocolArgs(nil, opts)
 	switch opts.SenderMode {
 	case scenarios.ModePortForward:
 		target := opts.Target
 		if target == "" {
 			target = "127.0.0.1:9999"
 		}
-		proc = startAztunnelWithSAS(t, env, senderSAS,
+		args := append([]string{
 			"relay-sender", "port-forward", target,
 			"--relay", env.relayName,
 			"--hyco", hyco,
 			"--bind", "127.0.0.1:0",
 			"--log-level", "debug",
-		)
+		}, senderExtra...)
+		proc = startAztunnelWithSAS(t, env, senderSAS, args...)
 	case scenarios.ModeSOCKS5:
-		proc = startAztunnelWithSAS(t, env, senderSAS,
+		args := append([]string{
 			"relay-sender", "socks5-proxy",
 			"--relay", env.relayName,
 			"--hyco", hyco,
 			"--bind", "127.0.0.1:0",
 			"--log-level", "debug",
-		)
+		}, senderExtra...)
+		proc = startAztunnelWithSAS(t, env, senderSAS, args...)
 	}
 	senderLogs = func() string { return proc.logs.String() }
 
@@ -677,6 +688,40 @@ type azureFailureHandle struct {
 func (h *azureFailureHandle) ListenerLogs() string { return h.listenerLogs() }
 func (h *azureFailureHandle) SenderLogs() string   { return h.senderLogs() }
 func (h *azureFailureHandle) Close()               {}
+
+// appendListenerProtocolArgs threads the harness's listener protocol
+// knobs onto the listener subprocess command line. Centralised because
+// every code path that spawns a listener (Setup, SetupExpectingFailure
+// healthy-listener branch, SetupExpectingFailure listener-side failure
+// branch) must add the same flags in the same order — letting them
+// drift caused the original NoMux/ListenerRejectMux churn the
+// 0.4.0 redesign cleaned up.
+func appendListenerProtocolArgs(args []string, opts scenarios.SetupOptions) []string {
+	if opts.ListenerMaxProtocolVersion != 0 {
+		args = append(args, "--max-protocol-version",
+			strconv.Itoa(opts.ListenerMaxProtocolVersion))
+	}
+	return args
+}
+
+// appendSenderProtocolArgs threads the harness's sender protocol knobs
+// onto the sender subprocess command line. Mirrors
+// appendListenerProtocolArgs.
+func appendSenderProtocolArgs(args []string, opts scenarios.SetupOptions) []string {
+	if opts.SenderMaxProtocolVersion != 0 {
+		args = append(args, "--max-protocol-version",
+			strconv.Itoa(opts.SenderMaxProtocolVersion))
+	}
+	if opts.MuxSessions > 0 {
+		args = append(args, "--mux-sessions",
+			strconv.Itoa(opts.MuxSessions))
+	}
+	if opts.MaxStreamsPerSession > 0 {
+		args = append(args, "--max-streams-per-session",
+			strconv.Itoa(opts.MaxStreamsPerSession))
+	}
+	return args
+}
 
 // OpenConnect lets ModeConnect failure scenarios drive a connect
 // invocation against this handle's overridden auth credentials.

@@ -14,6 +14,7 @@ import (
 type Socks5ProxyCmd struct {
 	AuthFlags
 	BindFlags
+	MuxFlags
 }
 
 // Run executes the socks5-proxy command.
@@ -46,13 +47,17 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 	defer stop()
 
 	cfg := sender.SOCKS5Config{
-		Endpoint:      endpoint,
-		EntityPath:    hyco,
-		TokenProvider: tp,
-		ClientOptions: opts,
-		BindAddress:   bind,
-		TCPKeepAlive:  s.TCPKeepAlive,
-		Logger:        logger,
+		Endpoint:                  endpoint,
+		EntityPath:                hyco,
+		TokenProvider:             tp,
+		ClientOptions:             opts,
+		BindAddress:               bind,
+		TCPKeepAlive:              s.TCPKeepAlive,
+		Logger:                    logger,
+		MuxStreamHandshakeTimeout: s.MuxStreamHandshakeTimeout,
+		MaxProtocolVersion:        s.MaxProtocolVersion,
+		MuxSessions:               s.MuxSessions,
+		MaxStreamsPerSession:      s.MaxStreamsPerSession,
 	}
 	if cfg.Metrics, err = resolveMetrics(ctx, globals.MetricsAddr, globals.MetricsMaxTargets, logger); err != nil {
 		return err

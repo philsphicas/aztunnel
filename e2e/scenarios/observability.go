@@ -47,6 +47,7 @@ func observabilityCases() []scenarioCase {
 		{name: "ListenerID_PropagatesAndChangesOnRestart", scope: AnyBackend, run: ScenarioListenerID_PropagatesAndChangesOnRestart},
 		{name: "AcceptID_Saturation", scope: AnyBackend, run: ScenarioAcceptID_Saturation},
 		{name: "TokenFetchMetric", scope: AnyBackend, run: ScenarioTokenFetchMetric},
+		{name: "Metrics_MuxSessionsActive", scope: AnyBackend, run: ScenarioMetrics_MuxSessionsActive},
 	}
 }
 
@@ -86,6 +87,17 @@ func ScenarioBridgeID_Correlation(t *testing.T, b Backend) {
 		SenderMode:     ModeSOCKS5,
 		AllowedTargets: []string{echo.Addr(), refused},
 		ConnectTimeout: 5 * time.Second,
+		// Pin v1: the per-bridge retry filter (bridgeIDForTarget
+		// requires a per-bridge "relay connected" log to anchor
+		// the canonical bridge_id, see senderLogsWithRetry in
+		// observability_test.go) is a v1-path log shape. On v2
+		// the relay dial fires once per mux session — not per
+		// stream — so "relay connected" never carries the
+		// stream's bridge_id, and bridgeIDForTarget returns ""
+		// for every bridge. The cross-side bridge_id correlation
+		// guarantee itself is identical on v1 and v2; only the
+		// retry-disambiguation mechanism is v1-coupled.
+		SenderMaxProtocolVersion: 1,
 	})
 	requireLogs(t, tun)
 
@@ -716,6 +728,91 @@ func ScenarioMetrics_DialDuration(t *testing.T, b Backend) {
 	t.Errorf("aztunnel_dial_duration_seconds histogram has %d samples after round-trip, want >= 1", got)
 }
 
+// ScenarioMetrics_MuxSessionsActive asserts the v2-only mux metrics
+// surface lights up when the sender is opted into protocol v2:
+//
+//   - aztunnel_mux_sessions_active flips from 0 to >= 1 once the pool
+//     dials its first session, and stays >= 1 while the workload is
+//     live (the pool holds the session open).
+//   - aztunnel_mux_stream_open_seconds_count grows by at least N after
+//     N concurrent round-trips, proving the per-stream path went through
+//     pool.OpenStream rather than the v1 single-rendezvous path.
+//   - aztunnel_mux_pool_saturated_total stays at 0 under a workload
+//     well below MaxStreamsPerSession × MuxSessions (the default 2 ×
+//     256 = 512 caps, vs N=8 here). A non-zero saturation count would
+//     mean callers were giving up on the pool, which would invalidate
+//     what the other two metrics are telling us.
+//
+// Pinned to ModeSOCKS5 because it's the canonical many-distinct-target
+// workload the mux pool was sized for, and to SenderMaxProtocolVersion=2
+// because the metrics only exist when the pool is built — under the
+// 0.4.0 default (v1) the metrics surface returns 0 for everything and
+// the scenario would falsely fail. Skips when the backend handle
+// doesn't expose the mux accessors (no implementation gates the
+// scenario via Skip rather than Fail).
+//
+// Verifies the metrics actually fire end-to-end against a real mux
+// session, complementing the unit-level coverage in
+// internal/metrics/metrics_test.go.
+func ScenarioMetrics_MuxSessionsActive(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:             1,
+		SenderMode:               ModeSOCKS5,
+		AllowedTargets:           []string{echo.Addr()},
+		SenderMaxProtocolVersion: 2,
+	})
+
+	sender := tun.Senders[0]
+	if sender.MuxSessionsActive == nil ||
+		sender.MuxStreamOpenSamples == nil ||
+		sender.MuxPoolSaturatedTotal == nil {
+		t.Skipf("Metrics_MuxSessionsActive: %s backend does not expose mux metric accessors", b.Name())
+	}
+
+	// Drive 8 sequential SOCKS5 round-trips against the echo target.
+	// Serial (rather than concurrent) so the assertion is purely
+	// about "did the per-stream path increment the histogram N times"
+	// without depending on goroutine-safe Fatalf semantics. The first
+	// round-trip lazily dials the mux session; the remaining 7 reuse
+	// it as smux streams.
+	const flows = 8
+	for i := 0; i < flows; i++ {
+		doSOCKS5Echo(t, tun.SenderAddr, echo.Addr(), []byte("mux-metrics\n"))
+	}
+	if t.Failed() {
+		return
+	}
+
+	// Poll: subprocess backends scrape /metrics, in-process backends
+	// read the registry directly. Both reach steady state quickly,
+	// but allow up to 15s to absorb a slow Azure scrape.
+	deadline := time.Now().Add(15 * time.Second)
+	var (
+		sessions int64
+		opens    uint64
+	)
+	for time.Now().Before(deadline) {
+		sessions = sender.MuxSessionsActive()
+		opens = sender.MuxStreamOpenSamples()
+		if sessions >= 1 && opens >= flows {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if sessions < 1 {
+		t.Errorf("aztunnel_mux_sessions_active = %d after %d round-trips, want >= 1 (pool never dialed a session — is the sender on v1?)", sessions, flows)
+	}
+	if opens < flows {
+		t.Errorf("aztunnel_mux_stream_open_seconds_count = %d after %d round-trips, want >= %d (per-stream path didn't go through pool.OpenStream)", opens, flows, flows)
+	}
+	if got := sender.MuxPoolSaturatedTotal(); got != 0 {
+		t.Errorf("aztunnel_mux_pool_saturated_total = %d, want 0 (test workload below pool capacity should never saturate; non-zero invalidates the other assertions)", got)
+	}
+}
+
 // ScenarioListenerID_PropagatesAndChangesOnRestart: assert the
 // listener_id slog attribute appears on sender-side accept logs
 // and changes after a listener restart. Subsumes the legacy
@@ -803,9 +900,19 @@ func ScenarioAcceptID_Saturation(t *testing.T, b Backend) {
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
 		MaxConnections: maxConns,
-		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		// Pin v1: the test contract is the control-loop's
+		// per-rendezvous accept semaphore ("MaxConnections
+		// drops past N concurrent accepts"). Under mux all N
+		// client TCP connections multiplex over a single mux
+		// session bound to one rendezvous; the listener's
+		// accept semaphore sees one accept regardless of N
+		// and never saturates. v1's per-connection rendezvous
+		// surfaces the accept-saturation events the test
+		// inspects (accept_dropped + reason=semaphore_full).
+		SenderMaxProtocolVersion: 1,
+		SenderMode:               ModePortForward,
+		Target:                   echo.Addr(),
+		AllowedTargets:           []string{echo.Addr()},
 	})
 	requireLogs(t, tun)
 

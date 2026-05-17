@@ -43,6 +43,10 @@ import (
 // Scenarios run sequentially. Each builds its own topology via
 // b.Setup so the timing measurement is dominated by the per-
 // connection cost, not by amortised setup.
+//
+// Scenarios run sequentially. b is the fully-cell-pinned backend the
+// caller (typically RunAllScenarios) hands in; b.Axes() is expected
+// to be nil/empty.
 func RunPerformanceScenarios(t *testing.T, b Backend) {
 	t.Helper()
 	runScenarioCases(t, b, performanceCases())
