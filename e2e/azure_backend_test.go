@@ -40,7 +40,7 @@ func (b *azureBackend) Name() string { return "azure-" + b.auth.name }
 // address, then attaches metrics-scrape closures and returns the
 // Tunnel handle. All subprocesses are torn down via the existing
 // t.Cleanup wiring inside startAztunnelWithSAS.
-func (b *azureBackend) Setup(t *testing.T, opts relayparity.SetupOptions) *relayparity.Tunnel {
+func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relayparity.Tunnel {
 	t.Helper()
 	if opts.NumListeners < 1 {
 		t.Fatalf("NumListeners must be >= 1, got %d", opts.NumListeners)
@@ -59,7 +59,7 @@ func (b *azureBackend) Setup(t *testing.T, opts relayparity.SetupOptions) *relay
 			strconv.Itoa(opts.MaxConnections))
 	}
 
-	spawnListener := func(t *testing.T) *relayparity.Listener {
+	spawnListener := func(t testing.TB) *relayparity.Listener {
 		t.Helper()
 		lst := startListener(t, b.env, b.auth, listenerArgs...)
 		waitForLog(t, lst, "control channel connected", 30*time.Second)

@@ -38,7 +38,7 @@ type authConfig struct {
 }
 
 // requireRelayEnv reads config from env vars and skips if nothing is configured.
-func requireRelayEnv(t *testing.T) *relayEnv {
+func requireRelayEnv(t testing.TB) *relayEnv {
 	t.Helper()
 	relay := os.Getenv("E2E_RELAY_NAME")
 	if relay == "" {
@@ -63,7 +63,7 @@ func requireRelayEnv(t *testing.T) *relayEnv {
 // availableAuths returns auth configurations for each available method.
 // Tests can iterate over these to run against both Entra and SAS.
 // Set E2E_AUTH=entra or E2E_AUTH=sas to restrict to a single method.
-func availableAuths(t *testing.T, env *relayEnv) []authConfig {
+func availableAuths(t testing.TB, env *relayEnv) []authConfig {
 	t.Helper()
 	filter := os.Getenv("E2E_AUTH") // "", "entra", "sas"
 	switch filter {
@@ -94,7 +94,7 @@ func availableAuths(t *testing.T, env *relayEnv) []authConfig {
 }
 
 // startListener starts an aztunnel relay-listener with the given auth config.
-func startListener(t *testing.T, env *relayEnv, auth authConfig, extraArgs ...string) *aztunnelProcess {
+func startListener(t testing.TB, env *relayEnv, auth authConfig, extraArgs ...string) *aztunnelProcess {
 	t.Helper()
 	args := append([]string{
 		"relay-listener",
@@ -105,7 +105,7 @@ func startListener(t *testing.T, env *relayEnv, auth authConfig, extraArgs ...st
 }
 
 // startPortForwardSender starts an aztunnel relay-sender port-forward with the given auth config.
-func startPortForwardSender(t *testing.T, env *relayEnv, auth authConfig, target string, extraArgs ...string) *aztunnelProcess {
+func startPortForwardSender(t testing.TB, env *relayEnv, auth authConfig, target string, extraArgs ...string) *aztunnelProcess {
 	t.Helper()
 	args := append([]string{
 		"relay-sender", "port-forward", target,
@@ -117,7 +117,7 @@ func startPortForwardSender(t *testing.T, env *relayEnv, auth authConfig, target
 }
 
 // startSOCKS5Sender starts an aztunnel relay-sender socks5-proxy with the given auth config.
-func startSOCKS5Sender(t *testing.T, env *relayEnv, auth authConfig, extraArgs ...string) *aztunnelProcess {
+func startSOCKS5Sender(t testing.TB, env *relayEnv, auth authConfig, extraArgs ...string) *aztunnelProcess {
 	t.Helper()
 	args := append([]string{
 		"relay-sender", "socks5-proxy",
@@ -135,7 +135,7 @@ var (
 )
 
 // aztunnelBinary builds the aztunnel binary once and returns its path.
-func aztunnelBinary(t *testing.T) string {
+func aztunnelBinary(t testing.TB) string {
 	t.Helper()
 	buildOnce.Do(func() {
 		// Find the repo root (parent of e2e/).
@@ -171,7 +171,7 @@ type aztunnelProcess struct {
 // the second and subsequent calls are no-ops. The Cleanup hook registered by
 // startAztunnelWithSAS calls Stop too, so tests only need to call this when
 // they want to terminate a process mid-test (e.g. listener restart scenarios).
-func (p *aztunnelProcess) Stop(t *testing.T) {
+func (p *aztunnelProcess) Stop(t testing.TB) {
 	t.Helper()
 	p.stopOnce.Do(func() {
 		if p.cmd.Process != nil {
@@ -183,7 +183,7 @@ func (p *aztunnelProcess) Stop(t *testing.T) {
 
 // MetricsAddr waits for the "metrics server listening addr=…" log line and
 // returns the address. Use this in tests that pass --metrics-addr 127.0.0.1:0.
-func (p *aztunnelProcess) MetricsAddr(t *testing.T, timeout time.Duration) string {
+func (p *aztunnelProcess) MetricsAddr(t testing.TB, timeout time.Duration) string {
 	t.Helper()
 	return waitForLogAddr(t, p, "metrics server listening", timeout)
 }
@@ -275,12 +275,12 @@ func (lb *logBuffer) waitFor(substr string, timeout time.Duration) (string, bool
 
 // startAztunnel starts an aztunnel process with the given args and returns
 // a handle. The process is killed on test cleanup.
-func startAztunnel(t *testing.T, env *relayEnv, args ...string) *aztunnelProcess {
+func startAztunnel(t testing.TB, env *relayEnv, args ...string) *aztunnelProcess {
 	return startAztunnelWithSAS(t, env, nil, args...)
 }
 
 // startAztunnelWithSAS starts an aztunnel process with explicit SAS credentials.
-func startAztunnelWithSAS(t *testing.T, env *relayEnv, sas *sasCredentials, args ...string) *aztunnelProcess {
+func startAztunnelWithSAS(t testing.TB, env *relayEnv, sas *sasCredentials, args ...string) *aztunnelProcess {
 	t.Helper()
 	binary := aztunnelBinary(t)
 
@@ -388,7 +388,7 @@ func setAztunnelEnv(cmd *exec.Cmd, env *relayEnv, sas *sasCredentials) {
 }
 
 // waitForLog waits for a log line containing the given substring.
-func waitForLog(t *testing.T, proc *aztunnelProcess, substr string, timeout time.Duration) string {
+func waitForLog(t testing.TB, proc *aztunnelProcess, substr string, timeout time.Duration) string {
 	t.Helper()
 	line, ok := proc.logs.waitFor(substr, timeout)
 	if !ok {
@@ -401,7 +401,7 @@ func waitForLog(t *testing.T, proc *aztunnelProcess, substr string, timeout time
 var addrRe = regexp.MustCompile(`addr=([^\s]+)`)
 
 // waitForLogAddr waits for a log line and extracts the addr= value.
-func waitForLogAddr(t *testing.T, proc *aztunnelProcess, substr string, timeout time.Duration) string {
+func waitForLogAddr(t testing.TB, proc *aztunnelProcess, substr string, timeout time.Duration) string {
 	t.Helper()
 	line := waitForLog(t, proc, substr, timeout)
 	m := addrRe.FindStringSubmatch(line)

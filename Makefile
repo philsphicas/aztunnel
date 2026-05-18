@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean e2e-infra-env e2e-infra-janitor vulncheck help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean e2e-infra-env e2e-infra-janitor vulncheck bench bench-compare help
 
 .DEFAULT_GOAL := help
 
@@ -89,6 +89,19 @@ e2e-infra-janitor: ## Delete orphaned per-invocation hybrid connections older th
 
 vulncheck: ## Check Go dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+bench: ## Run mock parity benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
+	cd mockrelay && go test -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
+		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
+		./testharness/parity/...
+
+bench-compare: ## Compare parity benchmarks across two refs: BASE=<sha> [HEAD=<sha>]
+	@if [ -z "$(BASE)" ]; then \
+		echo "usage: make bench-compare BASE=<sha> [HEAD=<sha>] [BACKEND=mock|azure] [COUNT=N] [BENCHTIME=...]" >&2; \
+		exit 2; \
+	fi
+	BACKEND='$(or $(BACKEND),mock)' COUNT='$(or $(COUNT),5)' BENCHTIME='$(BENCHTIME)' \
+		scripts/bench-compare.sh '$(BASE)' '$(HEAD)'
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
