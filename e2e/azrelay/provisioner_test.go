@@ -1,8 +1,17 @@
 package azrelay
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 )
 
 func TestHycoNamePattern(t *testing.T) {
@@ -164,6 +173,260 @@ func TestProvisionerHycoNamesUsesSuffix(t *testing.T) {
 	for _, n := range []string{entra, sas} {
 		if !HycoNamePattern.MatchString(n) {
 			t.Errorf("generated name %q does not satisfy HycoNamePattern", n)
+		}
+	}
+}
+
+// fastAuthRuleRetry returns a retry config that runs the same number of
+// attempts as production but with near-zero delays so unit tests don't
+// pay the 500ms…8s backoff schedule. Behaviour-equivalent for the loop's
+// control flow (success/error/exhaust/cancel) and jitter is bounded by
+// initialDelay so even at full jitter the test budget is microseconds.
+func fastAuthRuleRetry() authRuleRetry {
+	return authRuleRetry{
+		maxAttempts:  authRuleMaxAttempts,
+		initialDelay: time.Microsecond,
+		maxDelay:     10 * time.Microsecond,
+	}
+}
+
+// newMessagingGatewayErr builds a *azcore.ResponseError that mirrors the
+// shape Azure Relay returns for a 429 MessagingGatewayTooManyRequests:
+// the StatusCode/ErrorCode fields plus a RawResponse whose body carries
+// the SubCode marker that azcore.Error() embeds in its rendered string.
+// The SubCode the caller specifies is what isAuthRuleConflict will see.
+func newMessagingGatewayErr(subCode int) error {
+	body := fmt.Sprintf(
+		`{"error":{"code":"MessagingGatewayTooManyRequests","message":"SubCode=%d. Another conflicting operation is in progress."}}`,
+		subCode,
+	)
+	req, _ := http.NewRequest(http.MethodPut, "http://example.com/rule", nil)
+	return &azcore.ResponseError{
+		StatusCode: http.StatusTooManyRequests,
+		ErrorCode:  "MessagingGatewayTooManyRequests",
+		RawResponse: &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Status:     "429 Too Many Requests",
+			Body:       io.NopCloser(bytes.NewBufferString(body)),
+			Header:     http.Header{},
+			Request:    req,
+		},
+	}
+}
+
+// newConflictErr returns the 40901 SubCode shape isAuthRuleConflict
+// recognises (the exact failure mode the retry exists to absorb).
+func newConflictErr() error { return newMessagingGatewayErr(40901) }
+
+func TestIsAuthRuleConflict(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "non-ResponseError",
+			err:  errors.New("plain error"),
+			want: false,
+		},
+		{
+			name: "matches 429 + MessagingGatewayTooManyRequests + SubCode=40901",
+			err:  newConflictErr(),
+			want: true,
+		},
+		{
+			name: "wrapped match still recognised",
+			err:  fmt.Errorf("create rule: %w", newConflictErr()),
+			want: true,
+		},
+		{
+			name: "same ErrorCode but different SubCode is not retried",
+			err:  newMessagingGatewayErr(40902),
+			want: false,
+		},
+		{
+			name: "same ErrorCode with no SubCode marker is not retried",
+			err: &azcore.ResponseError{
+				StatusCode: http.StatusTooManyRequests,
+				ErrorCode:  "MessagingGatewayTooManyRequests",
+			},
+			want: false,
+		},
+		{
+			name: "429 with different ErrorCode is not retried",
+			err: &azcore.ResponseError{
+				StatusCode: http.StatusTooManyRequests,
+				ErrorCode:  "SomeOtherThrottling",
+			},
+			want: false,
+		},
+		{
+			name: "429 with empty ErrorCode is not retried",
+			err: &azcore.ResponseError{
+				StatusCode: http.StatusTooManyRequests,
+			},
+			want: false,
+		},
+		{
+			name: "503 with matching ErrorCode + SubCode is not retried (wrong status)",
+			err: &azcore.ResponseError{
+				StatusCode: http.StatusServiceUnavailable,
+				ErrorCode:  "MessagingGatewayTooManyRequests",
+			},
+			want: false,
+		},
+		{
+			name: "401 is not retried",
+			err: &azcore.ResponseError{
+				StatusCode: http.StatusUnauthorized,
+				ErrorCode:  "MessagingGatewayTooManyRequests",
+			},
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isAuthRuleConflict(tc.err); got != tc.want {
+				t.Fatalf("isAuthRuleConflict(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRetryOnAuthRuleConflict_SuccessFirstAttempt(t *testing.T) {
+	calls := 0
+	err := retryOnAuthRuleConflict(t.Context(), fastAuthRuleRetry(), func() error {
+		calls++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+}
+
+func TestRetryOnAuthRuleConflict_RetriesThenSucceeds(t *testing.T) {
+	calls := 0
+	const succeedOn = 4
+	err := retryOnAuthRuleConflict(t.Context(), fastAuthRuleRetry(), func() error {
+		calls++
+		if calls < succeedOn {
+			return newConflictErr()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != succeedOn {
+		t.Fatalf("calls = %d, want %d", calls, succeedOn)
+	}
+}
+
+func TestRetryOnAuthRuleConflict_NonConflictReturnsImmediately(t *testing.T) {
+	calls := 0
+	sentinel := errors.New("hard failure")
+	err := retryOnAuthRuleConflict(t.Context(), fastAuthRuleRetry(), func() error {
+		calls++
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err = %v, want %v", err, sentinel)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (non-conflict must not retry)", calls)
+	}
+}
+
+// A 429 with a different ErrorCode (e.g. SubscriptionThrottle) must not be
+// retried by this loop — the issue is explicit that we only retry the
+// specific 40901 class.
+func TestRetryOnAuthRuleConflict_Generic429NotRetried(t *testing.T) {
+	calls := 0
+	generic := &azcore.ResponseError{
+		StatusCode: http.StatusTooManyRequests,
+		ErrorCode:  "SubscriptionRequestThrottled",
+	}
+	err := retryOnAuthRuleConflict(t.Context(), fastAuthRuleRetry(), func() error {
+		calls++
+		return generic
+	})
+	if !errors.Is(err, generic) {
+		t.Fatalf("err = %v, want %v", err, generic)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (generic 429 must not retry)", calls)
+	}
+}
+
+func TestRetryOnAuthRuleConflict_ExhaustWrapsLastErr(t *testing.T) {
+	calls := 0
+	last := newConflictErr()
+	err := retryOnAuthRuleConflict(t.Context(), fastAuthRuleRetry(), func() error {
+		calls++
+		return last
+	})
+	if err == nil {
+		t.Fatal("expected error after exhausting attempts, got nil")
+	}
+	if !errors.Is(err, last) {
+		t.Fatalf("err %v does not wrap last %v", err, last)
+	}
+	if !strings.Contains(err.Error(), "after") {
+		t.Fatalf("err %q does not mention attempts", err.Error())
+	}
+	if calls != authRuleMaxAttempts {
+		t.Fatalf("calls = %d, want %d", calls, authRuleMaxAttempts)
+	}
+}
+
+func TestRetryOnAuthRuleConflict_ContextCancelledBetweenAttempts(t *testing.T) {
+	// Drive the cancellation deterministically from inside fn so the test
+	// doesn't depend on scheduler wall-clock timing: the first attempt
+	// cancels ctx and returns a retriable conflict; the loop's select
+	// then observes ctx.Done immediately and returns context.Canceled
+	// without a second fn call.
+	cfg := authRuleRetry{
+		maxAttempts:  authRuleMaxAttempts,
+		initialDelay: time.Second, // never actually waited
+		maxDelay:     time.Second,
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	calls := 0
+	err := retryOnAuthRuleConflict(ctx, cfg, func() error {
+		calls++
+		cancel()
+		return newConflictErr()
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 (cancel must abort before second attempt)", calls)
+	}
+}
+
+func TestJitterBounds(t *testing.T) {
+	// jitter(d) must lie in [d/2, d] for positive d, and be 0 for d <= 0.
+	if got := jitter(0); got != 0 {
+		t.Fatalf("jitter(0) = %v, want 0", got)
+	}
+	if got := jitter(-time.Second); got != 0 {
+		t.Fatalf("jitter(-1s) = %v, want 0", got)
+	}
+	for range 256 {
+		d := 4 * time.Millisecond
+		got := jitter(d)
+		if got < d/2 || got > d {
+			t.Fatalf("jitter(%v) = %v outside [%v, %v]", d, got, d/2, d)
 		}
 	}
 }
