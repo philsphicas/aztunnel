@@ -51,6 +51,19 @@ func TestMain(m *testing.M) {
 }
 
 func testMain(m *testing.M) int {
+	// Pre-build cmd/aztunnel before any test runs. The build is
+	// reused via sync.Once, but evaluating it lazily inside a test
+	// races against any per-test context deadline the test has
+	// already set on its exec.CommandContext (e.g. the 5s budget in
+	// TestMissingRequiredArgs). On a cold CI machine the cmd/aztunnel
+	// build is well over that budget, so the first test to call
+	// aztunnelBinary would see its exec immediately fail with a
+	// deadline-exceeded error and empty stderr. Pay the build cost
+	// once, here, before m.Run().
+	if err := buildAztunnelBinary(); err != nil {
+		fatal("pre-build aztunnel: %v", err)
+	}
+
 	if os.Getenv("E2E_RELAY_NAME") == "" {
 		fmt.Fprintln(os.Stderr, "==> e2e: E2E_RELAY_NAME is unset — TestMain will not construct a Provider")
 		fmt.Fprintln(os.Stderr, "==> e2e: every test will be SKIPPED. Run `eval \"$(make e2e-infra-env)\"` first, or set E2E_RELAY_NAME explicitly.")

@@ -239,9 +239,15 @@ var (
 	buildErr    error
 )
 
-// aztunnelBinary builds the aztunnel binary once and returns its path.
-func aztunnelBinary(t testing.TB) string {
-	t.Helper()
+// buildAztunnelBinary compiles cmd/aztunnel into ./bin/aztunnel under
+// the repo root. Safe to call repeatedly: only the first call does
+// the work (sync.Once), subsequent calls are free.
+//
+// Called from TestMain so the build cost is paid before any test
+// starts and is never charged against a per-test deadline. Tests
+// keep going through aztunnelBinary(t) which surfaces any build
+// error through t.Fatalf on the calling goroutine.
+func buildAztunnelBinary() error {
 	buildOnce.Do(func() {
 		// Find the repo root (parent of e2e/).
 		dir, _ := os.Getwd()
@@ -258,8 +264,18 @@ func aztunnelBinary(t testing.TB) string {
 			buildErr = fmt.Errorf("build: %w\n%s", err, out)
 		}
 	})
-	if buildErr != nil {
-		t.Fatalf("build aztunnel: %v", buildErr)
+	return buildErr
+}
+
+// aztunnelBinary returns the path to the pre-built aztunnel binary.
+// TestMain pre-warms the build before tests start; tests that call
+// this on a cold sync.Once (e.g. running a single test through `go
+// test -run`) will still trigger the build on first use, but every
+// CI / `go test ./...` path goes through TestMain first.
+func aztunnelBinary(t testing.TB) string {
+	t.Helper()
+	if err := buildAztunnelBinary(); err != nil {
+		t.Fatalf("build aztunnel: %v", err)
 	}
 	return builtBinary
 }
