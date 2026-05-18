@@ -12,12 +12,34 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 )
+
+// entraRefreshSkew is the safety margin before an access token's ExpiresOn at
+// which EntraTokenProvider considers its cached entry stale and refreshes it.
+// Set small (5 minutes) so the cache remains useful even when the underlying
+// credential returns tokens with short remaining lifetimes — notably
+// AzureCLICredential, which passes through whatever the `az` shell-out
+// reports, often only 10–15 minutes when az's own MSAL cache is mid-cycle.
+// A larger skew here would invalidate the cache on nearly every call in that
+// regime, restoring the per-dial `az` shell-out the cache exists to avoid.
+//
+// This skew does not — and cannot — guarantee that the token handed to
+// control.go's renewLoop survives until the next renewal pass: the upstream
+// token lifetime is whatever the credential gives us, with or without the
+// cache. A short-lifetime token reaching renewLoop is a property of the
+// underlying credential, not of the cache.
+const entraRefreshSkew = 5 * time.Minute
+
+// entraTokenScope is the OAuth2 scope Azure Relay requires for Entra ID
+// authentication. The control plane rejects tokens issued for any other
+// audience, so the scope is fixed regardless of the caller's resource URI.
+const entraTokenScope = "https://relay.azure.net/.default"
 
 // TokenProvider generates authentication tokens for Azure Relay.
 type TokenProvider interface {
@@ -37,9 +59,26 @@ func (p *SASTokenProvider) GetToken(_ context.Context, resourceURI string) (stri
 	return GenerateSASToken(resourceURI, p.KeyName, p.Key, tokenExpiry)
 }
 
-// EntraTokenProvider obtains OAuth2 tokens via Azure Identity (DefaultAzureCredential).
+// EntraTokenProvider obtains OAuth2 tokens via Azure Identity
+// (DefaultAzureCredential) and caches the most recent successful result in
+// memory until shortly before its ExpiresOn. The cache eliminates per-dial
+// blocking on credentials that lack their own in-memory cache — notably
+// AzureCLICredential, which shells out to `az account get-access-token` on
+// every call under a per-instance mutex.
+//
+// Concurrent callers single-flight via a refresh-in-flight channel: at most
+// one goroutine ever calls into the underlying credential at a time, and
+// queued callers can still abort via their own context (so a hung `az`
+// invocation cannot keep a deadline-bound dial waiting past its deadline).
+// Errors from the underlying credential are returned to the caller and
+// intentionally not cached, so a subsequent call retries the underlying
+// fetch instead of repeating a stale failure.
 type EntraTokenProvider struct {
 	cred azcore.TokenCredential
+
+	mu         sync.Mutex
+	cached     azcore.AccessToken
+	refreshing chan struct{} // non-nil while a refresh is in flight; closed when it ends
 }
 
 // NewEntraTokenProvider creates a token provider using DefaultAzureCredential.
@@ -57,15 +96,98 @@ func NewEntraTokenProviderWithCredential(cred azcore.TokenCredential) *EntraToke
 	return &EntraTokenProvider{cred: cred}
 }
 
-// GetToken obtains an OAuth2 token for Azure Relay.
-// The resourceURI parameter is ignored; the token is scoped to
-// https://relay.azure.net/.default as required by Azure Relay.
+// GetToken obtains an OAuth2 token for Azure Relay, returning a cached token
+// when one is available and not yet stale. Staleness mirrors azcore's
+// canonical BearerTokenPolicy.shouldRefresh: if the credential set a
+// non-zero RefreshOn, the token is stale once RefreshOn has passed (no
+// offset; the authority has supplied the exact refresh window); otherwise
+// the token is stale once it is within entraRefreshSkew of its ExpiresOn.
+// Concurrent callers that arrive during an in-flight refresh wait on a
+// channel rather than the cache mutex, so they can abort via their own
+// context if the refresh stalls. The resourceURI parameter is ignored; the
+// token is scoped to https://relay.azure.net/.default as required by Azure
+// Relay.
 func (p *EntraTokenProvider) GetToken(ctx context.Context, _ string) (string, error) {
-	tk, err := p.cred.GetToken(ctx, policy.TokenRequestOptions{
-		Scopes: []string{"https://relay.azure.net/.default"},
+	for {
+		p.mu.Lock()
+		if tokenFresh(p.cached) {
+			tk := p.cached.Token
+			p.mu.Unlock()
+			return tk, nil
+		}
+		if p.refreshing != nil {
+			// Another goroutine is fetching a fresh token. Wait for it to
+			// finish (or for our context to expire). When it finishes we
+			// loop and re-check: on success the cache will hit; on failure
+			// we'll try our own refresh with our own context.
+			ch := p.refreshing
+			p.mu.Unlock()
+			select {
+			case <-ch:
+				continue
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+		}
+		// Become the refresher. Publishing p.refreshing under the mutex
+		// guarantees later arrivals either observe this channel and wait,
+		// or arrive after the refresh ends and see the updated cache.
+		ch := make(chan struct{})
+		p.refreshing = ch
+		p.mu.Unlock()
+
+		token, err := p.refreshOnce(ctx, ch)
+		if err != nil {
+			return "", fmt.Errorf("acquire Entra token: %w", err)
+		}
+		return token, nil
+	}
+}
+
+// tokenFresh reports whether a cached AccessToken can be served without
+// refreshing it. The check mirrors azcore.runtime.shouldRefresh so cached
+// tokens are not considered fresh past the credential's own refresh
+// guidance: when RefreshOn is non-zero the authority has supplied an
+// explicit refresh window (RefreshOn..ExpiresOn) and we refresh as soon as
+// we pass RefreshOn; otherwise we fall back to ExpiresOn minus skew.
+func tokenFresh(tk azcore.AccessToken) bool {
+	if tk.Token == "" {
+		return false
+	}
+	if !tk.RefreshOn.IsZero() {
+		return time.Now().Before(tk.RefreshOn)
+	}
+	return time.Until(tk.ExpiresOn) > entraRefreshSkew
+}
+
+// refreshOnce performs a single underlying credential fetch on behalf of the
+// caller that won the right to refresh. It always closes ch and clears
+// p.refreshing — even if the underlying credential panics — so that waiters
+// and future callers can make progress instead of wedging on the in-flight
+// signal forever. Defer-driven cleanup is the cheapest correct insurance
+// against an unlikely-but-possible panic in third-party credential code.
+func (p *EntraTokenProvider) refreshOnce(ctx context.Context, ch chan struct{}) (string, error) {
+	var (
+		tk        azcore.AccessToken
+		fetchErr  error
+		completed bool
+	)
+	defer func() {
+		p.mu.Lock()
+		if completed && fetchErr == nil {
+			p.cached = tk
+		}
+		p.refreshing = nil
+		close(ch)
+		p.mu.Unlock()
+	}()
+
+	tk, fetchErr = p.cred.GetToken(ctx, policy.TokenRequestOptions{
+		Scopes: []string{entraTokenScope},
 	})
-	if err != nil {
-		return "", fmt.Errorf("acquire Entra token: %w", err)
+	completed = true
+	if fetchErr != nil {
+		return "", fetchErr
 	}
 	return tk.Token, nil
 }
