@@ -18,11 +18,14 @@ package azrelay
 
 import (
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	mrand "math/rand/v2"
+	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -54,6 +57,30 @@ const suffixLen = 12
 // under a second; we allow more to absorb the occasional regional blip
 // without forcing tests to handle the transient 404 themselves.
 const readinessMaxWait = 30 * time.Second
+
+// Bounds on the createRule / bestEffortDelete retry loop that absorbs the
+// transient 40901 MessagingGatewayTooManyRequests conflict produced when
+// Azure Relay's control plane serialises authorizationRule mutations per
+// hybrid connection: the ARM SDK returns 2xx for one mutation before the
+// backend has committed it, so a back-to-back mutation on the same hyco
+// (e.g. listener-rule then sender-rule, or delete-during-pending-create)
+// can race the per-hyco serialization gate and get rejected with 40901.
+// This is the same constraint that requires `@batchSize(1)` in Bicep on
+// Microsoft.Relay/namespaces/hybridConnections/authorizationRules.
+//
+// Six attempts with equal-jittered exponential backoff (500ms → 8s, cap)
+// is comfortably more than empirically observed convergence (sub-second)
+// while still bounded so a genuinely stuck control plane fails the run
+// rather than hanging. Note: the underlying azcore HTTP pipeline already
+// retries 429s a small number of times honouring Retry-After before
+// surfacing the error here, so the real cumulative wall time of a fully
+// exhausted createRule call is larger than ~15.5s of sleep alone — the
+// 30s ceiling in bestEffortDelete still dominates that path.
+const (
+	authRuleMaxAttempts  = 6
+	authRuleInitialDelay = 500 * time.Millisecond
+	authRuleMaxDelay     = 8 * time.Second
+)
 
 // dataPlaneSettleAfterKeys gives Relay's data plane a brief grace period
 // to propagate a newly-created SAS auth rule after the control plane
@@ -263,12 +290,14 @@ func (p *Provisioner) createHyco(ctx context.Context, name string) error {
 }
 
 func (p *Provisioner) createRule(ctx context.Context, hyco, ruleName string, right armrelay.AccessRights) error {
-	_, err := p.hycos.CreateOrUpdateAuthorizationRule(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, hyco, ruleName, armrelay.AuthorizationRule{
-		Properties: &armrelay.AuthorizationRuleProperties{
-			Rights: []*armrelay.AccessRights{&right},
-		},
-	}, nil)
-	return err
+	return retryOnAuthRuleConflict(ctx, defaultAuthRuleRetry(), func() error {
+		_, err := p.hycos.CreateOrUpdateAuthorizationRule(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, hyco, ruleName, armrelay.AuthorizationRule{
+			Properties: &armrelay.AuthorizationRuleProperties{
+				Rights: []*armrelay.AccessRights{&right},
+			},
+		}, nil)
+		return err
+	})
 }
 
 // readKey fetches the primary key for the given auth rule, retrying on
@@ -303,16 +332,114 @@ func (p *Provisioner) readKey(ctx context.Context, hyco, ruleName string) (strin
 func (p *Provisioner) bestEffortDelete(ctx context.Context, name string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	_, _ = p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, name, nil)
+	// Failure-path cleanup can race a not-yet-committed rule create on the
+	// same hyco; absorb the 40901 conflict the same way createRule does so
+	// we maximise cleanup success and reduce janitor load. Other errors
+	// (404, 403, ...) are swallowed by best-effort semantics.
+	_ = retryOnAuthRuleConflict(ctx, defaultAuthRuleRetry(), func() error {
+		_, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, name, nil)
+		return err
+	})
 }
 
 // newSuffix returns a fresh suffixLen-character lowercase hex string.
 func newSuffix() (string, error) {
 	raw := make([]byte, suffixLen/2)
-	if _, err := rand.Read(raw); err != nil {
+	if _, err := crand.Read(raw); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(raw), nil
+}
+
+// authRuleRetry parameterises the bounded retry loop used to absorb the
+// transient 40901 MessagingGatewayTooManyRequests conflict on Relay
+// authorizationRule mutations. Kept as a struct so tests can drive the
+// loop with tiny delays without sleeping for real.
+type authRuleRetry struct {
+	maxAttempts  int
+	initialDelay time.Duration
+	maxDelay     time.Duration
+}
+
+func defaultAuthRuleRetry() authRuleRetry {
+	return authRuleRetry{
+		maxAttempts:  authRuleMaxAttempts,
+		initialDelay: authRuleInitialDelay,
+		maxDelay:     authRuleMaxDelay,
+	}
+}
+
+// retryOnAuthRuleConflict invokes fn, retrying with jittered exponential
+// backoff while fn returns a transient Azure Relay 40901 conflict (see
+// isAuthRuleConflict). Any other error — including generic 429s — is
+// returned to the caller immediately so we never paper over a real fault.
+// The function honours ctx cancellation between retries.
+func retryOnAuthRuleConflict(ctx context.Context, cfg authRuleRetry, fn func() error) error {
+	var lastErr error
+	delay := cfg.initialDelay
+	for attempt := 1; attempt <= cfg.maxAttempts; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !isAuthRuleConflict(err) {
+			return err
+		}
+		lastErr = err
+		if attempt == cfg.maxAttempts {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(jitter(delay)):
+		}
+		if delay < cfg.maxDelay {
+			delay *= 2
+			if delay > cfg.maxDelay {
+				delay = cfg.maxDelay
+			}
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", cfg.maxAttempts, lastErr)
+}
+
+// isAuthRuleConflict reports whether err is the transient Azure Relay
+// 40901 MessagingGatewayTooManyRequests conflict produced when sequential
+// authorizationRule mutations race the per-hybrid-connection serialization
+// gate. Only this specific class is retried; generic 429s, other ARM
+// errors, and other SubCodes under the same ErrorCode (e.g. namespace-
+// level throttling that wouldn't benefit from short-window backoff
+// against a single hyco's commit window) are returned as-is.
+//
+// The SubCode marker is matched against ResponseError.Error() — azcore
+// embeds the raw response body in that string, and the body is the
+// authoritative carrier of the SubCode value in Service Bus / Relay
+// control-plane responses.
+func isAuthRuleConflict(err error) bool {
+	var respErr *azcore.ResponseError
+	if !errors.As(err, &respErr) {
+		return false
+	}
+	if respErr.StatusCode != http.StatusTooManyRequests ||
+		respErr.ErrorCode != "MessagingGatewayTooManyRequests" {
+		return false
+	}
+	return strings.Contains(respErr.Error(), "SubCode=40901")
+}
+
+// jitter returns a duration in the range [d/2, d]. Equal jitter is chosen
+// over full jitter so backoff still grows monotonically in expectation —
+// the race is a narrow per-hyco serialization window, not a thundering
+// herd against a shared fleet, so we want to keep growing the gap between
+// retries rather than risk re-firing near zero.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	half := d / 2
+	// #nosec G404 -- jitter is timing noise, not a security boundary.
+	return half + time.Duration(mrand.Int64N(int64(half)+1))
 }
 
 // isTransient classifies an error from ARM as retriable. Newly-created
