@@ -102,9 +102,16 @@ type Config struct {
 	// will construct a DefaultAzureCredential.
 	Cred azcore.TokenCredential
 
-	// ClientOptions is forwarded to the armrelay clients. Nil uses Azure
-	// Public Cloud defaults.
+	// ClientOptions is forwarded to the armrelay clients. Nil applies
+	// the per-test-tuned retry policy returned by DefaultClientOptions
+	// (azcore MaxRetries=DefaultARMMaxRetries, honouring Retry-After
+	// headers up to DefaultARMMaxRetryDelay).
 	ClientOptions *arm.ClientOptions
+
+	// Concurrency caps the number of in-flight Provider.Provision
+	// calls. Zero applies DefaultProvisionerConcurrency. Ignored by
+	// the single-use Provisioner type (it serialises by construction).
+	Concurrency int
 }
 
 // Result holds the data needed by tests to connect to the freshly-created
@@ -146,6 +153,11 @@ type Provisioner struct {
 
 // New constructs a Provisioner. It does not call Azure — that happens in
 // Provision. The returned Provisioner is single-use.
+//
+// Prefer NewProvider for code paths that may need multiple provisions:
+// Provisioner exists for back-compat with the original single-pair-per-
+// process TestMain shape and is implemented today as a thin wrapper
+// over the same per-call helpers Provider uses internally.
 func New(cfg Config) (*Provisioner, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -158,7 +170,11 @@ func New(cfg Config) (*Provisioner, error) {
 		}
 		cred = c
 	}
-	hycos, err := armrelay.NewHybridConnectionsClient(cfg.SubscriptionID, cred, cfg.ClientOptions)
+	opts := cfg.ClientOptions
+	if opts == nil {
+		opts = DefaultClientOptions()
+	}
+	hycos, err := armrelay.NewHybridConnectionsClient(cfg.SubscriptionID, cred, opts)
 	if err != nil {
 		return nil, fmt.Errorf("new hybrid connections client: %w", err)
 	}
