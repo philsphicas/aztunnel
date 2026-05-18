@@ -45,7 +45,7 @@ func (*MockBackend) Name() string { return "mock" }
 // until every listener's control channel is attached and every sender
 // bind is accepting TCP. All goroutines, the mock HTTP server, and
 // the sender binds are released via t.Cleanup.
-func (*MockBackend) Setup(t *testing.T, opts relayparity.SetupOptions) *relayparity.Tunnel {
+func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relayparity.Tunnel {
 	t.Helper()
 	if opts.NumListeners < 1 {
 		t.Fatalf("NumListeners must be >= 1, got %d", opts.NumListeners)
@@ -87,7 +87,7 @@ func (*MockBackend) Setup(t *testing.T, opts relayparity.SetupOptions) *relaypar
 	// its relayparity handle. Each listener owns a private metrics
 	// surface so Completed() / Active() report only that listener's
 	// bridges.
-	startListener := func(t *testing.T) *relayparity.Listener {
+	startListener := func(t testing.TB) *relayparity.Listener {
 		t.Helper()
 		m := metrics.New()
 		lctx, lcancel := context.WithCancel(ctx)
@@ -249,7 +249,7 @@ func (*MockBackend) Setup(t *testing.T, opts relayparity.SetupOptions) *relaypar
 // messages and rely on the rendezvous timing out — fail-fast on each
 // retry instead of waiting the default. 1s is plenty for in-process
 // rendezvous round-trips.
-func startMockRelay(t *testing.T) (host string, opts relay.ClientOptions) {
+func startMockRelay(t testing.TB) (host string, opts relay.ClientOptions) {
 	t.Helper()
 	rs, err := server.NewServer(server.Config{
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -270,7 +270,7 @@ func startMockRelay(t *testing.T) (host string, opts relay.ClientOptions) {
 
 // mustEntityName returns a short random suffix appended to the
 // caller's test name. Keeps entities unique across scenarios.
-func mustEntityName(t *testing.T) string {
+func mustEntityName(t testing.TB) string {
 	t.Helper()
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {

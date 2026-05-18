@@ -32,6 +32,12 @@ func (m SenderMode) String() string {
 // Backend is the abstraction parity scenarios run against. Each
 // implementation knows how to bring up a topology that satisfies
 // SetupOptions and to tear it down cleanly via t.Cleanup.
+//
+// Setup takes testing.TB rather than *testing.T so the same backend
+// implementation is reachable from both tests (RunCoreSuite,
+// RunTopologySuite) and benchmarks (RunBenchSuite). The only TB
+// methods used are Helper / Fatalf / Logf / Cleanup, all on the
+// shared interface.
 type Backend interface {
 	// Name identifies the backend in test output (e.g. "mock",
 	// "azure-entra", "azure-sas"). Used to make sub-test paths
@@ -50,7 +56,7 @@ type Backend interface {
 	// the in-process backend, the aztunnel_control_channel_connected
 	// gauge). Scenarios assume the tunnel is fully connected on
 	// return.
-	Setup(t *testing.T, opts SetupOptions) *Tunnel
+	Setup(t testing.TB, opts SetupOptions) *Tunnel
 }
 
 // SetupOptions configures the topology a backend should create.
