@@ -260,9 +260,12 @@ func (p *Provisioner) Provision(ctx context.Context) (*Result, error) {
 // call even if Provision failed partway through — entities that no longer
 // exist are silently ignored. Callers typically defer this from TestMain.
 //
-// Teardown uses its own context derived from the supplied parent so that
-// cleanup still runs when the parent has been cancelled (e.g. on test
-// timeout). The caller is responsible for the outer lifetime.
+// Teardown strips cancellation from ctx so it still runs when the
+// caller's parent has been cancelled (e.g. on test timeout) but it
+// preserves any deadline the caller set so the cleanup budget is
+// what the caller declared. If ctx has no deadline, Teardown applies
+// a defensive 60s ceiling so a stuck control plane cannot hang the
+// run indefinitely.
 //
 // Note: Azure Relay's HCO Delete cascades to the SAS authorization rules
 // created on the SAS hyco — we deliberately do not delete rules
@@ -272,8 +275,7 @@ func (p *Provisioner) Teardown(ctx context.Context) error {
 	if p.result == nil {
 		return nil
 	}
-	// Detach from caller cancellation; cleanup needs a fresh budget.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	ctx, cancel := detachAndBoundContext(ctx, 60*time.Second)
 	defer cancel()
 
 	var errs []error

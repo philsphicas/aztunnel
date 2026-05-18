@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/philsphicas/aztunnel/e2e/azrelay"
 )
 
 // relayEnv holds the Azure Relay configuration for e2e tests.
@@ -38,6 +41,15 @@ type authConfig struct {
 }
 
 // requireRelayEnv reads config from env vars and skips if nothing is configured.
+//
+// Phase 2 of the per-test isolation work (#49) introduces
+// requireDedicatedHyco as the preferred entry point: each test owns
+// its own freshly-provisioned hyco pair, and the test is free to
+// call t.Parallel(). requireRelayEnv reads the legacy shared pair
+// established by TestMain and is kept for callers that have not yet
+// migrated; Phase 3 will convert this function into a thin forwarder
+// over requireDedicatedHyco so the migration cannot silently skip
+// any unmigrated tests once TestMain stops pre-provisioning.
 func requireRelayEnv(t testing.TB) *relayEnv {
 	t.Helper()
 	relay := os.Getenv("E2E_RELAY_NAME")
@@ -57,6 +69,103 @@ func requireRelayEnv(t testing.TB) *relayEnv {
 		sasListenerKey:     os.Getenv("E2E_SAS_LISTENER_KEY"),
 		sasSenderKeyName:   os.Getenv("E2E_SAS_SENDER_KEY_NAME"),
 		sasSenderKey:       os.Getenv("E2E_SAS_SENDER_KEY"),
+	}
+}
+
+// hycoProvisionTimeout bounds a single Provider.Provision call from
+// requireDedicatedHyco. The provisioner already retries 429s and
+// transient 5xx through azcore (MaxRetries=6, MaxRetryDelay=60s) and
+// 40901 conflicts through retryOnAuthRuleConflict; this ceiling
+// stops a genuinely stuck control plane from hanging the test until
+// the suite-wide go-test -timeout fires.
+const hycoProvisionTimeout = 3 * time.Minute
+
+// hycoTeardownTimeout bounds the t.Cleanup-registered Teardown call.
+// Teardown also gates on the Provider semaphore so a swarm of test
+// cleanups cannot stampede the namespace 429 envelope; the budget
+// here must be larger than the worst-case sem wait + 2 × ARM Delete.
+const hycoTeardownTimeout = 90 * time.Second
+
+// requireProvider returns the process-scoped Provider. Skips the
+// test when E2E_RELAY_NAME is unset (i.e. when TestMain did not
+// construct a Provider).
+func requireProvider(t testing.TB) *azrelay.Provider {
+	t.Helper()
+	if relayProvider == nil {
+		t.Skip("E2E_RELAY_NAME must be set for e2e tests")
+	}
+	return relayProvider
+}
+
+// requireDedicatedHyco provisions a fresh (entra, sas) hyco pair for
+// the calling test, registers a t.Cleanup that tears the pair down,
+// and returns its connection metadata in the legacy *relayEnv shape.
+// The pair is independent of every other test's pair: there is no
+// way for a stray listener or sender from another test to route
+// through it.
+//
+// # Ordering requirement
+//
+// Callers MUST invoke t.Parallel() BEFORE calling this function:
+//
+//	func TestSomething(t *testing.T) {
+//	    t.Parallel()                            // FIRST
+//	    env := requireDedicatedHyco(t)          // THEN provision
+//	    auth := availableAuths(t, env)[0]
+//	    // ...
+//	}
+//
+// Go's testing package only releases a test to run in parallel with
+// its peers once it calls t.Parallel(). If a test calls
+// requireDedicatedHyco BEFORE t.Parallel(), the Provision will
+// happen on the serial path and the Provider's concurrency semaphore
+// cannot overlap it with peer provisions — the suite-wide wall-clock
+// win collapses. Reviewing this ordering is a code-review checklist
+// item; the function cannot enforce it because the testing package
+// exposes no "am I parallel yet?" signal.
+//
+// Skips the test when E2E_RELAY_NAME is unset.
+//
+// Backend contract (for callers wiring this into a parity Backend
+// implementation): one call → one fresh hyco pair. Scenarios that
+// need multiple hyco pairs (e.g. cross-version listeners on
+// different hycos) call requireDedicatedHyco multiple times and pay
+// N× provisioning. Cross-call sharing within one scenario is out of
+// scope for the Backend.Setup contract.
+func requireDedicatedHyco(t testing.TB) *relayEnv {
+	t.Helper()
+	p := requireProvider(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), hycoProvisionTimeout)
+	defer cancel()
+	tok, err := p.Provision(ctx)
+	if err != nil {
+		t.Fatalf("provision dedicated hyco pair: %v", err)
+	}
+
+	entra, sas := tok.HycoNames()
+	t.Logf("provisioned dedicated hyco pair: %s, %s", entra, sas)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), hycoTeardownTimeout)
+		defer cancel()
+		if err := tok.Teardown(ctx); err != nil {
+			// Log only — the janitor will reap anything we miss,
+			// and failing the test on cleanup errors would mask
+			// the actual test outcome.
+			t.Logf("teardown dedicated hyco pair %s/%s: %v", entra, sas, err)
+		}
+	})
+
+	r := tok.Result()
+	return &relayEnv{
+		relayName:          r.RelayName,
+		hyco:               r.EntraHycoName,
+		sasHyco:            r.SASHycoName,
+		sasListenerKeyName: r.ListenerKeyName,
+		sasListenerKey:     r.ListenerKey,
+		sasSenderKeyName:   r.SenderKeyName,
+		sasSenderKey:       r.SenderKey,
 	}
 }
 

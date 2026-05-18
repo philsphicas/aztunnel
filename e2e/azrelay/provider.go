@@ -200,24 +200,28 @@ func (t *PairToken) HycoNames() (entra, sas string) {
 // times: only the first call performs the deletes; subsequent calls
 // return the same error.
 //
-// Teardown uses a fresh context derived from ctx (via
-// context.WithoutCancel) so cleanup completes even when ctx has been
-// cancelled (e.g. on test timeout).
+// Teardown strips cancellation from ctx (via context.WithoutCancel)
+// so cleanup completes even when the test's ctx has been cancelled
+// (e.g. on test timeout), but it preserves any deadline the caller
+// set so the cleanup budget is what the caller declared. If ctx has
+// no deadline, Teardown applies a defensive 60s ceiling so a stuck
+// control plane cannot hang the run indefinitely; callers wanting a
+// longer budget must pass a context with that deadline themselves.
 //
 // When the token was created by Provider.Provision (i.e. provider
 // and deleteFn are non-nil) Teardown also acquires the provider's
 // concurrency slot for the duration of the ARM Delete calls so a
 // wave of test cleanups cannot stampede the relay control plane and
 // exhaust the namespace 429 envelope. If the slot acquire fails
-// (e.g. the detached context's 60s budget expires while the sem is
-// saturated) Teardown proceeds without the slot rather than orphan
-// the hyco — the janitor will reap anything we leak.
+// (e.g. the deadline expires while the sem is saturated) Teardown
+// proceeds without the slot rather than orphan the hyco — the
+// janitor will reap anything we leak.
 //
 // Individual delete failures are joined and returned. The janitor
 // will also reap anything we can't clean up here.
 func (t *PairToken) Teardown(ctx context.Context) error {
 	t.teardownOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		ctx, cancel := detachAndBoundContext(ctx, 60*time.Second)
 		defer cancel()
 		if t.provider != nil {
 			if err := t.provider.acquire(ctx); err == nil {
@@ -237,4 +241,20 @@ func (t *PairToken) Teardown(ctx context.Context) error {
 		}
 	})
 	return t.teardownErr
+}
+
+// detachAndBoundContext returns a context that ignores ctx's
+// cancellation but preserves ctx's deadline. If ctx has no deadline
+// the returned context applies fallback as the deadline so callers
+// passing context.Background() still get a hang ceiling. Used by
+// Teardown / Provisioner.Teardown to decouple cleanup from the
+// caller's cancellation (so test timeouts don't abort cleanup) while
+// still honouring an explicit cleanup budget the caller wired in.
+func detachAndBoundContext(ctx context.Context, fallback time.Duration) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	ctx = context.WithoutCancel(ctx)
+	if ok {
+		return context.WithDeadline(ctx, deadline)
+	}
+	return context.WithTimeout(ctx, fallback)
 }

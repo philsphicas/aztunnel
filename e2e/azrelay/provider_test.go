@@ -257,6 +257,67 @@ func TestPairToken_ResultPassesThrough(t *testing.T) {
 	}
 }
 
+// TestPairToken_TeardownHonoursCallerDeadline verifies that a
+// deadline set on the caller's context is preserved across the
+// cancellation strip in Teardown. Specifically: a deadline shorter
+// than the fallback 60s ceiling should fire and abort the deletes.
+// Without this contract, callers wiring an explicit budget into
+// requireDedicatedHyco's t.Cleanup would silently fall back to the
+// internal ceiling.
+func TestPairToken_TeardownHonoursCallerDeadline(t *testing.T) {
+	var calls atomic.Int32
+	tok := &PairToken{
+		suffix: "feedface0001",
+		deleteFn: func(ctx context.Context, name string) error {
+			calls.Add(1)
+			// Block until the context fires so we can observe
+			// whether the caller's deadline propagated.
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	if err := tok.Teardown(ctx); err == nil {
+		t.Fatal("expected Teardown to surface context deadline error")
+	}
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		t.Errorf("Teardown ran for %v; caller's 30ms deadline was not honoured (internal 60s ceiling leaked through)", elapsed)
+	}
+	if got := calls.Load(); got < 1 {
+		t.Errorf("deleteFn invoked %d times, want >= 1 (first delete should have started)", got)
+	}
+}
+
+// TestPairToken_TeardownStripsCallerCancellation asserts that an
+// already-cancelled caller context does NOT short-circuit Teardown —
+// cleanup must still run so test-timeout aborts don't orphan hycos.
+// We use a context that's both cancelled AND has a deadline well in
+// the future; Teardown should ignore the cancellation, honour the
+// future deadline, and complete the deletes.
+func TestPairToken_TeardownStripsCallerCancellation(t *testing.T) {
+	var calls atomic.Int32
+	tok := &PairToken{
+		suffix: "deadbabe0002",
+		deleteFn: func(ctx context.Context, name string) error {
+			calls.Add(1)
+			return nil
+		},
+	}
+	parent, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	cancel()
+
+	if err := tok.Teardown(parent); err != nil {
+		t.Fatalf("Teardown returned err on already-cancelled parent: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("deleteFn invoked %d times, want 2 (both deletes should have run despite parent cancellation)", got)
+	}
+}
+
 // TestPairToken_TeardownGatesOnProviderSemaphore asserts that Teardown
 // acquires the same concurrency slot used by Provision, so a swarm of
 // test cleanups cannot stampede the relay control plane beyond the
