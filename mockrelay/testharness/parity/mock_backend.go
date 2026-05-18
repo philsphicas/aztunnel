@@ -1,5 +1,5 @@
 // Package parity wires the shared relay-parity scenario suite
-// (internal/relayparity) up against an in-process mock relay.
+// (internal/testharness/relayparity) up against an in-process mock relay.
 //
 // MockBackend brings up a real aztunnel listener + sender (the same
 // code paths exercised against Azure Relay) talking to a mock relay
@@ -27,8 +27,8 @@ import (
 	"github.com/philsphicas/aztunnel/internal/listener"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
-	"github.com/philsphicas/aztunnel/internal/relayparity"
 	"github.com/philsphicas/aztunnel/internal/sender"
+	"github.com/philsphicas/aztunnel/internal/testharness/relayparity"
 	"github.com/philsphicas/aztunnel/mockrelay/server"
 )
 

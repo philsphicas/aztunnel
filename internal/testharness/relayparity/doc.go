@@ -3,7 +3,7 @@
 //
 // Two implementations exist:
 //
-//   - github.com/philsphicas/aztunnel/mockrelay/parity.MockBackend
+//   - github.com/philsphicas/aztunnel/mockrelay/testharness/parity.MockBackend
 //     runs the mock relay server (mockrelay/server) and the aztunnel
 //     listener and sender in-process. Fast, deterministic, no external
 //     dependencies. Lives in the mockrelay module so the in-process

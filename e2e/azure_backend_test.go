@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/philsphicas/aztunnel/internal/relayparity"
+	"github.com/philsphicas/aztunnel/internal/testharness/relayparity"
 )
 
 // azureBackend implements relayparity.Backend against a real Azure
 // Relay namespace. It is the source-of-truth side of the parity
 // matrix: any scenario divergence between this backend and the
-// in-process MockBackend (mockrelay/parity) is a behavioural gap in
+// in-process MockBackend (mockrelay/testharness/parity) is a behavioural gap in
 // the mock that we have to either fix or document.
 //
 // Each instance is bound to a single authConfig (Entra or SAS) so the
