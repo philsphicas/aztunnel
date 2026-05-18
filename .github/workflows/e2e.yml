@@ -35,7 +35,17 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # The CI service principal has resource-scoped RBAC on the
+          # relay namespace but no subscription-level Reader, so
+          # `az login` (which enumerates subscriptions via ARM) fails
+          # with "No subscriptions found". `allow-no-subscriptions`
+          # lets `az login` succeed tenant-only, and `subscription-id`
+          # is omitted because azure/login would otherwise run
+          # `az account set --subscription <id>` against an empty
+          # local cache, which also fails. AZURE_SUBSCRIPTION_ID is
+          # still passed explicitly to the ARM clients via the test
+          # step's `env:` block below.
+          allow-no-subscriptions: true
 
       - name: Build
         run: make build
