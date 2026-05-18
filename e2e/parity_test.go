@@ -21,6 +21,7 @@ func TestParity_Azure(t *testing.T) {
 			b := &azureBackend{env: env, auth: auth}
 			relayparity.RunCoreSuite(t, b)
 			relayparity.RunTopologySuite(t, b)
+			relayparity.RunReliabilitySuite(t, b)
 		})
 	}
 }

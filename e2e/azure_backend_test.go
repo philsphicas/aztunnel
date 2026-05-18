@@ -58,6 +58,10 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 		listenerArgs = append(listenerArgs, "--max-connections",
 			strconv.Itoa(opts.MaxConnections))
 	}
+	if opts.ConnectTimeout > 0 {
+		listenerArgs = append(listenerArgs, "--connect-timeout",
+			opts.ConnectTimeout.String())
+	}
 
 	spawnListener := func(t testing.TB) *relayparity.Listener {
 		t.Helper()

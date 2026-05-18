@@ -7,9 +7,11 @@ package listener
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -117,7 +119,7 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	cfg.Metrics.ObserveDialDuration("listener", time.Since(dialStart).Seconds())
 	if err != nil {
 		logger.Warn("dial target failed", "target", env.Target, "error", err)
-		_ = sendResponse(ctx, ws, false, "connection failed")
+		_ = sendResponseWithCode(ctx, ws, false, "connection failed", classifyDialError(err))
 		cfg.Metrics.ConnectionError("listener", metrics.DialReason(err, metrics.ReasonDialFailed))
 		return
 	}
@@ -140,13 +142,52 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 }
 
 func sendResponse(ctx context.Context, ws *websocket.Conn, ok bool, errMsg string) error {
+	return sendResponseWithCode(ctx, ws, ok, errMsg, "")
+}
+
+// sendResponseWithCode is the variant of sendResponse that includes a
+// machine-readable code so the sender can map listener-side dial
+// failures onto client-visible status (e.g. SOCKS5 REP bytes).
+func sendResponseWithCode(ctx context.Context, ws *websocket.Conn, ok bool, errMsg, code string) error {
 	resp := protocol.ConnectResponse{
 		Version: protocol.CurrentVersion,
 		OK:      ok,
 		Error:   errMsg,
+		Code:    code,
 	}
 	data, _ := json.Marshal(resp) // simple struct, cannot fail
 	return ws.Write(ctx, websocket.MessageText, data)
+}
+
+// classifyDialError maps a net.Dial error to one of the protocol Code
+// constants. Empty string when no classification applies — the sender
+// treats that the same as "generic failure".
+//
+// The order matters: timeouts (both context.DeadlineExceeded and the
+// net.Error Timeout() form for OS-level connect timeouts) are checked
+// first because the underlying syscall errno can vary by platform on
+// timeouts; classifying by surface error type is more portable.
+func classifyDialError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return protocol.CodeTimeout
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return protocol.CodeTimeout
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return protocol.CodeConnectionRefused
+	}
+	if errors.Is(err, syscall.EHOSTUNREACH) {
+		return protocol.CodeHostUnreachable
+	}
+	if errors.Is(err, syscall.ENETUNREACH) {
+		return protocol.CodeNetworkUnreachable
+	}
+	return ""
 }
 
 // isAllowed checks if the target matches the allowlist.

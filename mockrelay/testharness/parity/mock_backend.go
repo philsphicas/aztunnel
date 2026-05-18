@@ -100,6 +100,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			ClientOptions:  clientOpts,
 			AllowList:      opts.AllowedTargets,
 			MaxConnections: opts.MaxConnections,
+			ConnectTimeout: opts.ConnectTimeout,
 			Logger:         silentLogger,
 			Metrics:        m,
 		}

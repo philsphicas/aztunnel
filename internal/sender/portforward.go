@@ -103,6 +103,12 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 }
 
 // sendEnvelopeAndCheck sends a ConnectEnvelope and reads the ConnectResponse.
+// On a listener-side rejection (ConnectResponse.OK == false), the returned
+// error wraps a *connectRejected carrying both the human-readable message
+// and the machine-readable Code. Callers that need to surface the code to
+// the client (SOCKS5 sender → REP byte) inspect the wrapped value via
+// errors.As; callers that only care about the failure (port-forward) can
+// treat it as an opaque error.
 func sendEnvelopeAndCheck(ctx context.Context, ws *websocket.Conn, target string) error {
 	env := protocol.ConnectEnvelope{
 		Version: protocol.CurrentVersion,
@@ -122,9 +128,24 @@ func sendEnvelopeAndCheck(ctx context.Context, ws *websocket.Conn, target string
 		return fmt.Errorf("parse response: %w", err)
 	}
 	if !resp.OK {
-		return fmt.Errorf("connection rejected: %s", resp.Error)
+		return &connectRejected{Message: resp.Error, Code: resp.Code}
 	}
 	return nil
+}
+
+// connectRejected is returned from sendEnvelopeAndCheck when the
+// listener answers with OK=false. It carries the wire-level Code so
+// the SOCKS5 sender can map dial classifications back to REP bytes.
+type connectRejected struct {
+	Message string
+	Code    string
+}
+
+func (e *connectRejected) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("connection rejected (%s): %s", e.Code, e.Message)
+	}
+	return fmt.Sprintf("connection rejected: %s", e.Message)
 }
 
 // stdioConn adapts stdin/stdout to net.Conn for use with Bridge.

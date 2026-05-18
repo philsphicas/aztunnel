@@ -31,7 +31,38 @@ type ConnectResponse struct {
 	// Error is a human-readable error message if OK is false.
 	// Must not leak internal details (IPs, paths, etc.).
 	Error string `json:"error,omitempty"`
+
+	// Code is a machine-readable error classification when OK is false.
+	// Empty when OK is true or when the listener could not classify the
+	// failure. Senders treat unknown values the same as an empty string
+	// (generic failure). Optional and backward-compatible: senders and
+	// listeners pinned to earlier versions will ignore it.
+	Code string `json:"code,omitempty"`
 }
 
 // CurrentVersion is the current protocol version.
 const CurrentVersion = 1
+
+// Connection-failure codes carried in ConnectResponse.Code. Used to map
+// listener-side dial failures to client-visible status (e.g. SOCKS5 REP
+// bytes). The set is intentionally small; new categories should only be
+// added when they map to a distinct user-visible outcome.
+const (
+	// CodeConnectionRefused indicates the target actively refused the
+	// connection (TCP RST), e.g. nothing is listening on the port.
+	CodeConnectionRefused = "connection_refused"
+
+	// CodeHostUnreachable indicates the target host is reachable on the
+	// network but the route to it failed (ICMP host-unreachable, ARP
+	// failure, etc.).
+	CodeHostUnreachable = "host_unreachable"
+
+	// CodeNetworkUnreachable indicates the target's network is not
+	// reachable from the listener.
+	CodeNetworkUnreachable = "network_unreachable"
+
+	// CodeTimeout indicates the dial did not complete within the
+	// listener's configured connect timeout (no SYN-ACK from the
+	// target, typical of black-holed addresses).
+	CodeTimeout = "timeout"
+)
