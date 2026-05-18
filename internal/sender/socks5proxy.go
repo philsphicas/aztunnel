@@ -2,12 +2,14 @@ package sender
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"time"
 
 	"github.com/philsphicas/aztunnel/internal/metrics"
+	"github.com/philsphicas/aztunnel/internal/protocol"
 	"github.com/philsphicas/aztunnel/internal/relay"
 	"github.com/philsphicas/aztunnel/internal/sender/socks5"
 )
@@ -101,7 +103,7 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 
 	// Send envelope and check response.
 	if err := sendEnvelopeAndCheck(ctx, ws, target); err != nil {
-		_ = socks5.SendReply(conn, socks5.RepHostUnreachable, nil)
+		_ = socks5.SendReply(conn, socks5RepForError(err), nil)
 		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
 		return err
 	}
@@ -113,4 +115,23 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	// Bridge data.
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
 	return bridgeErr
+}
+
+// socks5RepForError maps a listener-side connect failure to the
+// matching SOCKS5 REP byte. Unclassified failures fall through to
+// RepHostUnreachable so the client still sees a non-success REP — the
+// historical default before per-code propagation existed.
+func socks5RepForError(err error) byte {
+	var ce *connectRejected
+	if errors.As(err, &ce) {
+		switch ce.Code {
+		case protocol.CodeConnectionRefused:
+			return socks5.RepConnectionRefused
+		case protocol.CodeNetworkUnreachable:
+			return socks5.RepNetworkUnreachable
+		case protocol.CodeHostUnreachable, protocol.CodeTimeout:
+			return socks5.RepHostUnreachable
+		}
+	}
+	return socks5.RepHostUnreachable
 }

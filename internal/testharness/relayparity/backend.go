@@ -2,6 +2,7 @@ package relayparity
 
 import (
 	"testing"
+	"time"
 )
 
 // SenderMode selects which aztunnel sender to bring up.
@@ -89,6 +90,13 @@ type SetupOptions struct {
 	// (`aztunnel relay-listener --max-connections=N`). 0 means
 	// unlimited.
 	MaxConnections int
+
+	// ConnectTimeout overrides the listener's dial timeout for target
+	// connections (`aztunnel relay-listener --connect-timeout=DUR`).
+	// 0 means leave at the listener default (30 s). Scenarios that
+	// provoke dial failures use a shorter value so the test isn't
+	// dominated by the default 30 s wait.
+	ConnectTimeout time.Duration
 }
 
 // Listener is a handle to a single listener in a Tunnel. Backends

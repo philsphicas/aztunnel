@@ -16,5 +16,6 @@ func TestParity_Mock(t *testing.T) {
 	t.Run(b.Name(), func(t *testing.T) {
 		relayparity.RunCoreSuite(t, &b)
 		relayparity.RunTopologySuite(t, &b)
+		relayparity.RunReliabilitySuite(t, &b)
 	})
 }
