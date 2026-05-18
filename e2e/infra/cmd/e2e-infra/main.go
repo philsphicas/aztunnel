@@ -231,17 +231,22 @@ func main() {
 }
 
 func run() int {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
 	cliCtx := kong.Parse(&CLI,
 		kong.Name("e2e-infra"),
 		kong.Description("Maintainer-facing setup CLI for aztunnel E2E test infrastructure."),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true}),
+		// BindTo (not Bind/Run-arg) is required for interface types: kong's
+		// runtime binding uses reflect.TypeOf, which on an interface value
+		// returns the concrete type, so binding via `cliCtx.Run(ctx)` would
+		// register the concrete *signalCtx rather than context.Context.
+		kong.BindTo(ctx, (*context.Context)(nil)),
 	)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	if err := cliCtx.Run(ctx); err != nil {
+	if err := cliCtx.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
