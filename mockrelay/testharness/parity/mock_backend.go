@@ -61,11 +61,11 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 	}
 
 	host, clientOpts := startMockRelay(t)
-	// Cleanup ordering carry-over from PR #50 review: startMockRelay's
-	// own t.Cleanup registers srv.Close. Register cancel+wg.Wait AFTER
-	// it so LIFO teardown runs cancel first → drains the listener /
-	// sender goroutines → THEN closes the mock relay. This stops the
-	// "listener exited: <error>" log lines that fired when the relay
+	// Cleanup ordering: startMockRelay's own t.Cleanup registers
+	// srv.Close. Register cancel+wg.Wait AFTER it so LIFO teardown
+	// runs cancel first → drains the listener / sender goroutines
+	// → THEN closes the mock relay. This stops the "listener
+	// exited: <error>" log lines that fired when the relay
 	// disappeared while listeners were still running.
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup

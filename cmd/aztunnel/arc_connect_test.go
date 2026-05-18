@@ -13,7 +13,7 @@ import (
 // whether to enable the first-connection explanatory logging. Both
 // `arc connect` and `arc port-forward` call this on the initial
 // GetRelayCredentials error; misclassifying it would silently disable
-// (or incorrectly enable) the UX path covered by the rest of this PR.
+// (or incorrectly enable) the explanatory-logging UX path.
 func TestIsHybridConnectivitySetupErr(t *testing.T) {
 	tests := []struct {
 		name string

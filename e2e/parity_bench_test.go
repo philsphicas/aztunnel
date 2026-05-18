@@ -12,7 +12,8 @@ import (
 // against a real Azure Relay namespace. Pair with the mock variant
 // (BenchmarkParity_Mock in mockrelay/testharness/parity) for fast
 // iteration; the Azure variant produces source-of-truth numbers for
-// characterising PR #47.
+// characterising the relay's connect-latency and short-session-
+// throughput dimensions on a real namespace.
 //
 // Only one auth method is exercised — whichever availableAuths
 // returns first — to keep the run time bounded. Run with E2E_AUTH=sas

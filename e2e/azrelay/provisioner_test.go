@@ -346,8 +346,8 @@ func TestRetryOnAuthRuleConflict_NonConflictReturnsImmediately(t *testing.T) {
 }
 
 // A 429 with a different ErrorCode (e.g. SubscriptionThrottle) must not be
-// retried by this loop — the issue is explicit that we only retry the
-// specific 40901 class.
+// retried by this loop — the retry contract is explicit: only the
+// specific 40901 class is retried.
 func TestRetryOnAuthRuleConflict_Generic429NotRetried(t *testing.T) {
 	calls := 0
 	generic := &azcore.ResponseError{

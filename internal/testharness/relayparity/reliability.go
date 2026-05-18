@@ -17,12 +17,12 @@ import (
 // scenarios against b. Each runs as a sub-test of the caller's t and
 // must pass against both the in-process mock backend and the real
 // Azure backend — this is the "behavior is the same shape on both
-// sides of the relay" gate from #55.
+// sides of the relay" parity gate.
 //
 // ScenarioHalfClose_RequestResponse is registered here for shape
-// (i.e. the test name shows up in output) but t.Skip()s with a reason
-// that names PR #47. Removing the skip is part of #47's acceptance
-// criteria.
+// (i.e. the test name shows up in output) but t.Skip()s until the
+// bridge propagates half-close. The skip exists so the suite stays
+// green while that capability is missing.
 func RunReliabilitySuite(t *testing.T, b Backend) {
 	t.Helper()
 	scenarios := []struct {
@@ -69,7 +69,7 @@ const slowConsumerTestDuration = 8 * time.Second
 // because nothing is listening — produced by binding then immediately
 // closing a listener.
 //
-// SOCKS5 reply parity (issue #55): aztunnel propagates the
+// SOCKS5 reply parity: aztunnel propagates the
 // listener-side connect-error classification through
 // ConnectResponse.Code so the SOCKS5 sender returns the matching REP
 // byte instead of the historical "always RepHostUnreachable" default.
@@ -103,8 +103,8 @@ func ScenarioErrorPropagation_TargetRefused(t *testing.T, b Backend) {
 	// once the relay → listener handshake propagates the failure
 	// back. We assert non-nil error within the budget; the exact
 	// error class differs across backends (EOF on mock vs. RST on
-	// some Azure paths), which is why the issue scope says "don't
-	// assert exact error type".
+	// some Azure paths), which is why the scenario does not assert
+	// on exact error type.
 	target2 := refusedAddr(t)
 	tunPF := b.Setup(t, SetupOptions{
 		NumListeners:   1,
@@ -129,7 +129,8 @@ func ScenarioErrorPropagation_TargetRefused(t *testing.T, b Backend) {
 // never receives SYN-ACK, classified as CodeTimeout → mapped to
 // RepHostUnreachable (0x04). Some networks instead emit ICMP
 // host/network unreachable, surfacing as 0x03 or 0x04 directly. The
-// assertion accepts either, matching the issue spec.
+// assertion accepts either, since both are valid responses for an
+// unreachable target.
 func ScenarioErrorPropagation_TargetUnreachable(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
@@ -256,9 +257,9 @@ func ScenarioErrorPropagation_TargetHangs(t *testing.T, b Backend) {
 //   - At least some bytes flowed (>= 1 KiB) — sanity that the test
 //     isn't reporting a no-op as success.
 //
-// SlowConsumerMemBound is the SAME constant for mock and Azure
-// (issue #55 acceptance criterion); the comparability of the two
-// backends under the same bound is the parity claim.
+// SlowConsumerMemBound is the SAME constant for mock and Azure;
+// the comparability of the two backends under the same bound is
+// the parity claim.
 func ScenarioSlowConsumer_BackPressure(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
@@ -393,15 +394,12 @@ sampling:
 // bridge.go), so a client that does CloseWrite to signal "I'm done
 // writing, please send the response" loses its response stream.
 //
-// PR #47 reworks the bridge to honour half-close. When that PR
-// merges, removing the t.Skip below and watching this scenario pass
-// is its acceptance criterion (issue #55 spec).
-//
-// The body is fully written so the skip is the only code path that
-// changes when #47 lands.
+// The body is fully written; only the t.Skip itself gates this
+// scenario — when the bridge supports half-close, deleting the skip
+// is sufficient to enable it.
 func ScenarioHalfClose_RequestResponse(t *testing.T, b Backend) {
 	t.Helper()
-	t.Skip("blocked on PR #47 (stream multiplexing): current bridge tears down both directions on EOF; removing this skip is part of #47's acceptance criteria")
+	t.Skip("current bridge tears down both directions on EOF instead of preserving the response stream after client CloseWrite")
 
 	AssertNoLeaks(t)
 
@@ -633,10 +631,10 @@ func (s *slowDrainTarget) closeAcceptedConns() {
 // requestResponseTarget is a TCP server that, on each accepted conn,
 // reads until EOF, compares the received bytes against an expected
 // request, and only writes its response when the request matches.
-// Used by the half-close scenario (currently skipped); when PR #47
-// lands and the bridge propagates EOF in one direction only, this
-// exercises the full request-then-response contract — both directions
-// must deliver intact payloads, not just an EOF + reply.
+// Used by the half-close scenario (currently skipped); on a bridge
+// that propagates EOF in one direction only, this exercises the
+// full request-then-response contract — both directions must
+// deliver intact payloads, not just an EOF + reply.
 type requestResponseTarget struct {
 	ln       net.Listener
 	request  string
@@ -670,8 +668,8 @@ func (rr *requestResponseTarget) Addr() string { return rr.ln.Addr().String() }
 
 // Received returns the last bytes the target read from a client and
 // any mismatch error recorded when the bytes diverged from the
-// expected request. Intended for diagnostic assertions in the
-// scenario body once PR #47 unskips this test.
+// expected request. Intended for diagnostic assertions when the
+// half-close scenario runs.
 func (rr *requestResponseTarget) Received() ([]byte, error) {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
@@ -725,9 +723,8 @@ func (rr *requestResponseTarget) stop() {
 // expectPortForwardFails dials addr (a port-forward sender bind),
 // attempts a tiny write+read, and asserts the operation does not
 // hang past timeout and produces an error. It does not assert on the
-// exact error type — the issue spec calls that "backend-specific"
-// (mock surfaces EOF; Azure subprocesses sometimes surface RST or
-// short read first).
+// exact error type — that's backend-specific (mock surfaces EOF;
+// Azure subprocesses sometimes surface RST or short read first).
 func expectPortForwardFails(senderAddr string, timeout time.Duration) error {
 	conn, err := net.DialTimeout("tcp", senderAddr, timeout)
 	if err != nil {
