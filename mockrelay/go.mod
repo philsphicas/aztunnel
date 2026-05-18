@@ -7,7 +7,7 @@
 // aztunnel module for end-to-end verification (one-way dependency).
 module github.com/philsphicas/aztunnel/mockrelay
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/KimMachineGun/automemlimit v0.7.5

@@ -29,6 +29,7 @@ linters:
         - G602 # slice bounds (false positive after ReadFull)
         - G101 # hardcoded credentials (false positive on test strings)
         - G304 # file inclusion via variable: githubrepo.go reads .git/config from a small fixed set of relative paths under the cwd
+        - G118 # context.Background in goroutine is intentional (graceful shutdown; ctx decoupled from caller is required)
 
   exclusions:
     rules:
