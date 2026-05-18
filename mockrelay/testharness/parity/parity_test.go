@@ -3,8 +3,8 @@ package parity_test
 import (
 	"testing"
 
-	"github.com/philsphicas/aztunnel/internal/relayparity"
-	"github.com/philsphicas/aztunnel/mockrelay/parity"
+	"github.com/philsphicas/aztunnel/internal/testharness/relayparity"
+	"github.com/philsphicas/aztunnel/mockrelay/testharness/parity"
 )
 
 // TestParity_Mock runs the shared parity suites against the in-process
