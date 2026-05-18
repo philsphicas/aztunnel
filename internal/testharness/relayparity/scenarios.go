@@ -21,9 +21,9 @@ import (
 // topology and tears it down before the next starts.
 //
 // Scenarios in the core suite are required to pass on current main.
-// Behaviors that PR #47 (mux) is expected to change (e.g. half-close
-// propagation) live outside the core suite so this gate stays green
-// pre- and post-#47.
+// Behaviors that depend on capabilities the bridge does not yet
+// implement (e.g. half-close propagation) live outside the core
+// suite so this gate stays green regardless of bridge architecture.
 func RunCoreSuite(t *testing.T, b Backend) {
 	t.Helper()
 	scenarios := []struct {
@@ -99,7 +99,7 @@ func ScenarioEcho_SOCKS5(t *testing.T, b Backend) {
 // index in big-endian; the remaining 1020 bytes are deterministic
 // filler. Read-back must arrive in the same order, identical bytes.
 //
-// Catches reordering or interleaving inside the bridge / future mux.
+// Catches reordering or interleaving inside the bridge.
 func ScenarioOrdering_PortForward(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)

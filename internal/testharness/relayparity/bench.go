@@ -15,11 +15,11 @@ import (
 // b. Mirrors RunCoreSuite for tests: a single entry point keeps the
 // per-backend bench_test.go files trivial.
 //
-// The sub-benches measure the exact dimensions PR #47 (connection
-// muxing) is supposed to improve, plus a control benchmark
-// (SteadyThroughput) that should NOT regress under mux. Run with
-// `-count=5 -benchmem` and feed both outputs into benchstat to
-// quantify the change.
+// The sub-benches measure the connection-setup and concurrent-
+// connect dimensions of the relay path, plus a control benchmark
+// (SteadyThroughput) that should NOT regress under architectural
+// changes. Run with `-count=5 -benchmem` and feed both outputs into
+// benchstat to quantify the change.
 //
 // Each sub-bench stands up its own topology via backend.Setup(b, ...)
 // and tears it down through t.Cleanup. AssertNoLeaks is deliberately
@@ -54,12 +54,13 @@ func RunBenchSuite(b *testing.B, backend Backend) {
 //
 //	Dial → write 1 byte → read 1 byte echoed back → close.
 //
-// Single connection per iteration, no concurrency. The headline #47
-// metric: each iteration pays one full relay rendezvous round-trip
-// (~1–2 s on Azure today; expected to drop to milliseconds with mux).
+// Single connection per iteration, no concurrency. The headline
+// connect-latency metric: each iteration pays one full relay
+// rendezvous round-trip (~1–2 s on Azure today).
 //
 // Run against both modes (port-forward, SOCKS5) because the SOCKS5
-// path adds a handshake that may behave differently under mux.
+// path adds a per-connection handshake that may carry different
+// setup costs than raw port-forward.
 func benchConnectLatencySerial(b *testing.B, backend Backend, mode SenderMode) {
 	b.Helper()
 	echo := StartPlainEcho(b)
@@ -99,9 +100,9 @@ func benchConnectLatencySerial(b *testing.B, backend Backend, mode SenderMode) {
 
 // benchConcurrentConnect measures the wall time of opening n
 // concurrent connections, each of which round-trips 1 byte, per
-// iteration. Surfaces the concurrency-amplified setup cost: pre-#47
-// every flow waits its turn through the listener's serial rendezvous;
-// post-#47 they should fan out cheaply.
+// iteration. Surfaces the concurrency-amplified setup cost: when
+// flows share a single listener they queue at rendezvous; lower
+// results indicate connection setup can fan out cheaply instead.
 //
 // Each iteration owns n goroutines; b.N controls how many iterations
 // run. Worker errors are collected and surfaced from the benchmark
@@ -153,13 +154,14 @@ func benchConcurrentConnect(b *testing.B, backend Backend, n int) {
 }
 
 // benchShortSessionRate measures ops/sec of the
-// open → write 1 KB → read 1 KB → close cycle. The workload PR #47
-// explicitly cites as "intolerable" without mux.
+// open → write 1 KB → read 1 KB → close cycle. The canonical
+// short-session workload — sustained rate of fresh connections,
+// each carrying a small payload.
 //
 // numSenders controls how many sender binds receive the load round-
 // robin. The single-sender variant is the strict baseline; the
-// multi-sender variant probes whether scaling out senders is a
-// workaround for the missing mux.
+// multi-sender variant probes whether scaling out senders compensates
+// for serial per-sender rendezvous.
 //
 // b.SetBytes(1024) makes MB/s appear alongside ns/op for benchstat,
 // counting payload bytes written per iteration.
@@ -210,10 +212,10 @@ func benchShortSessionRate(b *testing.B, backend Backend, numSenders int) {
 // connection is dialed once before the timer starts and reused for
 // every iteration so setup cost is excluded.
 //
-// This is the control benchmark: it should NOT regress under mux.
-// Writes and reads run concurrently to avoid socket-buffer deadlock,
-// and each iteration drains exactly transferSize bytes before
-// starting the next.
+// This is the control benchmark: it should NOT regress under
+// architectural changes. Writes and reads run concurrently to avoid
+// socket-buffer deadlock, and each iteration drains exactly
+// transferSize bytes before starting the next.
 func benchSteadyThroughput(b *testing.B, backend Backend) {
 	b.Helper()
 	echo := StartPlainEcho(b)

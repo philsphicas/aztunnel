@@ -64,7 +64,8 @@ fmt-check: ## Check formatting (same as CI)
 	npx --yes prettier --check .
 
 e2e: build ## Run end-to-end tests (requires Azure Relay credentials)
-	go test -tags=e2e -timeout=20m -v ./e2e/...
+	go test -tags=e2e -timeout=20m -v ./e2e/azrelay/
+	go test -tags=e2e -timeout=20m -v ./e2e/
 
 e2e-docker: ## Run container-to-container e2e tests
 	@status=0; \

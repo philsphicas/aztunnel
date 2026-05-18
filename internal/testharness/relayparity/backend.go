@@ -164,7 +164,8 @@ type Sender struct {
 type Tunnel struct {
 	// SenderAddr is the host:port clients dial for the first (or
 	// only) sender. Always equal to SenderAddrs[0]. Kept as a top-
-	// level field so the four #50 scenarios compile unchanged.
+	// level field so the original single-sender scenarios compile
+	// unchanged.
 	SenderAddr string
 
 	// SenderAddrs holds every sender's bind address in the order
