@@ -47,6 +47,7 @@ func RunCoreSuite(t *testing.T, b Backend) {
 // tunnel routes bytes end-to-end.
 func ScenarioEcho_PortForward(t *testing.T, b Backend) {
 	t.Helper()
+	AssertNoLeaks(t)
 	echo := StartPlainEcho(t)
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
@@ -71,6 +72,7 @@ func ScenarioEcho_PortForward(t *testing.T, b Backend) {
 // trips bytes correctly.
 func ScenarioEcho_SOCKS5(t *testing.T, b Backend) {
 	t.Helper()
+	AssertNoLeaks(t)
 	echo := StartPlainEcho(t)
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
@@ -100,6 +102,7 @@ func ScenarioEcho_SOCKS5(t *testing.T, b Backend) {
 // Catches reordering or interleaving inside the bridge / future mux.
 func ScenarioOrdering_PortForward(t *testing.T, b Backend) {
 	t.Helper()
+	AssertNoLeaks(t)
 	echo := StartPlainEcho(t)
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
@@ -168,6 +171,7 @@ func ScenarioOrdering_PortForward(t *testing.T, b Backend) {
 // "echo passes but bytes got rearranged" failure mode).
 func ScenarioBidirectional_PortForward(t *testing.T, b Backend) {
 	t.Helper()
+	AssertNoLeaks(t)
 	echo := StartPlainEcho(t)
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,

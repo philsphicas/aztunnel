@@ -22,6 +22,11 @@ type SOCKS5Config struct {
 	TCPKeepAlive  time.Duration
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
+	// Ready, if non-nil, is invoked once after the local bind succeeds
+	// and before the accept loop starts. Tests use this to learn the
+	// chosen bind address (when BindAddress is :0) without having to
+	// open a probe TCP connection. Production callers leave this nil.
+	Ready func(net.Addr)
 }
 
 // SOCKS5Proxy starts a local SOCKS5 proxy and forwards each connection
@@ -41,6 +46,9 @@ func SOCKS5Proxy(ctx context.Context, cfg SOCKS5Config) error {
 	}
 	defer ln.Close() //nolint:errcheck // best-effort cleanup
 	cfg.Logger.Info("socks5-proxy listening", "bind", ln.Addr())
+	if cfg.Ready != nil {
+		cfg.Ready(ln.Addr())
+	}
 
 	go func() {
 		<-ctx.Done()

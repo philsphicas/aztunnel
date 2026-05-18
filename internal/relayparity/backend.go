@@ -43,11 +43,13 @@ type Backend interface {
 	// subprocesses, listeners, sockets) are registered for cleanup on
 	// t via t.Cleanup; the scenario does not have to release them.
 	//
-	// Setup must block until the topology is ready: the sender's bind
-	// address is accepting connections and every requested listener is
-	// reachable (control channel established for subprocess backends;
-	// goroutine running for in-process). Scenarios assume the tunnel
-	// is fully connected on return.
+	// Setup must block until the topology is ready: every sender's
+	// bind address is accepting connections and every requested
+	// listener has its control channel attached to the relay (for
+	// subprocess backends, the "control channel connected" log; for
+	// the in-process backend, the aztunnel_control_channel_connected
+	// gauge). Scenarios assume the tunnel is fully connected on
+	// return.
 	Setup(t *testing.T, opts SetupOptions) *Tunnel
 }
 
@@ -56,6 +58,13 @@ type SetupOptions struct {
 	// NumListeners is the count of listener processes/goroutines to
 	// start against the same entity. Must be >= 1.
 	NumListeners int
+
+	// NumSenders is the count of sender processes/goroutines to start
+	// against the same entity. 0 or 1 means a single sender (current
+	// single-sender behaviour, for back-compat with the original four
+	// scenarios). 2+ means N senders; each gets its own free bind and
+	// is exposed via Tunnel.Senders / Tunnel.SenderAddrs.
+	NumSenders int
 
 	// SenderMode picks port-forward vs SOCKS5.
 	SenderMode SenderMode
@@ -76,16 +85,96 @@ type SetupOptions struct {
 	MaxConnections int
 }
 
-// Tunnel is a running listener/sender/relay topology returned by
-// Backend.Setup. Scenarios drive it by dialing SenderAddr from client
-// goroutines.
+// Listener is a handle to a single listener in a Tunnel. Backends
+// populate Tunnel.Listeners with one entry per running listener.
 //
-// Per-listener handles (for distribution, hot-drop, hot-add scenarios)
-// will be added when the topology suite that needs them lands.
+// All accessor closures (Completed, Active) are safe to call
+// concurrently and return monotonically-updating values without
+// blocking on the listener.
+type Listener struct {
+	// Addr is the listener's metrics-scrape address for subprocess
+	// backends; it is left empty for in-process backends that expose
+	// counters directly via the Completed/Active closures.
+	Addr string
+
+	// Completed returns the number of bridged connections this
+	// listener has handled to completion (aztunnel_connections_total
+	// summed across all label combinations on this listener's
+	// metrics surface). Increments only after the bridge ends, so it
+	// is suitable for distribution-after-the-fact assertions but not
+	// for "is a connection currently in flight" checks — use Active
+	// for that.
+	Completed func() int64
+
+	// Active returns the number of bridges currently in flight on
+	// this listener (aztunnel_active_connections summed across all
+	// label combinations).
+	Active func() int64
+
+	// Stop drops this listener: in-process backends cancel the
+	// listener's context and wait for the goroutine to exit;
+	// subprocess backends kill and reap the listener process.
+	// Idempotent; safe to call from a scenario goroutine.
+	Stop func()
+}
+
+// Sender is a handle to a single sender in a Tunnel. Backends populate
+// Tunnel.Senders with one entry per running sender. Tunnel.SenderAddrs
+// holds the same Addr values in the same order for convenience.
+type Sender struct {
+	// Addr is the local bind clients dial. For ModePortForward it is
+	// a plain TCP target that forwards to SetupOptions.Target. For
+	// ModeSOCKS5 it is a SOCKS5 proxy.
+	Addr string
+
+	// Completed returns the number of bridged connections this
+	// sender has handled to completion. See Listener.Completed for
+	// caveats; the same metric semantics apply with role="sender".
+	Completed func() int64
+
+	// Active returns the number of bridges currently in flight on
+	// this sender.
+	Active func() int64
+
+	// Stop drops this sender. Idempotent.
+	Stop func()
+}
+
+// Tunnel is a running listener/sender/relay topology returned by
+// Backend.Setup. Scenarios drive it by dialing into SenderAddrs from
+// client goroutines.
+//
+// Back-compat with the four original scenarios is preserved: SenderAddr
+// remains the field they read and always equals SenderAddrs[0]. New
+// multi-sender scenarios index SenderAddrs directly.
 type Tunnel struct {
-	// SenderAddr is the host:port clients dial. For ModePortForward
-	// this is a plain TCP target that forwards to SetupOptions.Target.
-	// For ModeSOCKS5 this is a SOCKS5 proxy that accepts any allowed
-	// target via the SOCKS5 handshake.
+	// SenderAddr is the host:port clients dial for the first (or
+	// only) sender. Always equal to SenderAddrs[0]. Kept as a top-
+	// level field so the four #50 scenarios compile unchanged.
 	SenderAddr string
+
+	// SenderAddrs holds every sender's bind address in the order
+	// they were spawned. len(SenderAddrs) == len(Senders) ==
+	// max(NumSenders, 1).
+	SenderAddrs []string
+
+	// Senders is the per-sender handle slice, in the same order as
+	// SenderAddrs. Topology scenarios reach for Senders[i].Completed
+	// to verify per-sender distribution.
+	Senders []*Sender
+
+	// Listeners is the per-listener handle slice. len(Listeners) ==
+	// initial NumListeners; AddListener appends.
+	Listeners []*Listener
+
+	// AddListener spawns an additional listener against the same
+	// entity with the same SetupOptions used at Setup time, blocks
+	// until its control channel is attached, appends the handle to
+	// Listeners, and returns the new handle. The caller's t.Cleanup
+	// is already wired up; scenarios do not need to call Stop unless
+	// they want to drop the listener mid-scenario.
+	//
+	// May be nil for backends that haven't wired hot-add yet; the
+	// hot-add scenario calls t.Skip when it is.
+	AddListener func(t *testing.T) *Listener
 }
