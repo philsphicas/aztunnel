@@ -3,12 +3,10 @@
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/philsphicas/aztunnel/e2e/azrelay"
 )
@@ -25,20 +23,11 @@ import (
 // requireDedicatedHyco.
 var relayProvider *azrelay.Provider
 
-// sharedHycoToken keeps the legacy pre-provisioned pair alive for
-// the duration of the run so tests that have not yet been migrated
-// to requireDedicatedHyco can still read the E2E_* environment
-// variables and use the same pair across the suite. Phase 3 of the
-// per-test-isolation work will remove this pre-provisioning along
-// with the legacy env-var reads in requireRelayEnv.
-var sharedHycoToken *azrelay.PairToken
-
-// TestMain prepares the e2e suite by constructing the relay Provider
-// (which fronts a configurable-concurrency semaphore for per-test
-// provisioning) and provisioning one shared hyco pair for legacy
-// callers. The shared pair's connection metadata is exported through
-// the existing E2E_* environment variables; the per-test Provider is
-// reached via requireDedicatedHyco / requireProvider helpers.
+// TestMain constructs the process-scoped relay Provider so every
+// test can call requireDedicatedHyco to provision its own private
+// hyco pair. There is no shared pre-provisioned pair — each test
+// owns its hyco lifetime end-to-end, which lets the suite run with
+// t.Parallel().
 //
 // Required env vars:
 //
@@ -53,8 +42,8 @@ var sharedHycoToken *azrelay.PairToken
 //     when CI data shows headroom under the namespace-level 429
 //     envelope.
 //
-// If E2E_RELAY_NAME is unset, provisioning is skipped and tests fall
-// through to t.Skip via requireRelayEnv / requireProvider. This
+// If E2E_RELAY_NAME is unset, the Provider is not constructed and
+// every test falls through to t.Skip via requireProvider. This
 // preserves the historic ergonomics for contributors running
 // `go test` without an Azure account.
 func TestMain(m *testing.M) {
@@ -63,7 +52,7 @@ func TestMain(m *testing.M) {
 
 func testMain(m *testing.M) int {
 	if os.Getenv("E2E_RELAY_NAME") == "" {
-		fmt.Fprintln(os.Stderr, "==> e2e: E2E_RELAY_NAME is unset — TestMain will not provision hybrid connections")
+		fmt.Fprintln(os.Stderr, "==> e2e: E2E_RELAY_NAME is unset — TestMain will not construct a Provider")
 		fmt.Fprintln(os.Stderr, "==> e2e: every test will be SKIPPED. Run `eval \"$(make e2e-infra-env)\"` first, or set E2E_RELAY_NAME explicitly.")
 		return m.Run()
 	}
@@ -87,38 +76,10 @@ func testMain(m *testing.M) int {
 		fatal("azrelay.NewProvider: %v", err)
 	}
 	relayProvider = p
+	fmt.Fprintf(os.Stderr, "==> e2e: relay Provider ready (namespace=%s/%s, concurrency=%d)\n",
+		rg, os.Getenv("E2E_RELAY_NAME"), conc)
 
-	// Phase-2 transitional: provision one shared hyco pair so tests
-	// that still call requireRelayEnv (i.e. have not migrated to
-	// requireDedicatedHyco) continue to read working E2E_* env vars.
-	// Phase 3 removes both this block and the legacy env-var path.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	tok, err := relayProvider.Provision(ctx)
-	cancel()
-	if err != nil {
-		fatal("provision shared hyco pair: %v", err)
-	}
-	sharedHycoToken = tok
-	entra, sas := tok.HycoNames()
-	fmt.Fprintf(os.Stderr, "==> shared hyco pair provisioned in %s/%s: %s, %s (concurrency=%d)\n",
-		rg, os.Getenv("E2E_RELAY_NAME"), entra, sas, conc)
-	for k, v := range tok.Result().EnvVars() {
-		if err := os.Setenv(k, v); err != nil {
-			fatal("setenv %s: %v", k, err)
-		}
-	}
-
-	code := m.Run()
-
-	teardownCtx, teardownCancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer teardownCancel()
-	if err := sharedHycoToken.Teardown(teardownCtx); err != nil {
-		// Log but do not fail the run on teardown errors — the
-		// janitor workflow will reap anything we miss.
-		fmt.Fprintf(os.Stderr, "warning: shared hyco teardown: %v\n", err)
-	}
-
-	return code
+	return m.Run()
 }
 
 // readConcurrencyEnv parses E2E_PROVISIONER_CONCURRENCY. Anything

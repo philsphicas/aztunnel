@@ -20,20 +20,19 @@ import (
 // across multiple listeners on the same hyco is NOT specified as round-robin):
 //
 //   - all N connections through the sender round-trip data correctly;
+//   - distribution: every listener handles at least 1 connection AND
+//     no single listener handles all N (i.e. 0 ≤ min and max ≤ N-1).
+//     Empirically observed splits range from 1:7 to 6:2 with N=8, so
+//     this bound permits the full known variance while still catching
+//     pathological dropout (listener handling 0 connections, which
+//     would indicate a routing or registration bug);
 //   - neither listener subprocess emits a log line matching `level=error`.
 //
-// Logged but NOT asserted:
-//
-//   - per-listener aztunnel_connections_total via scrapeMetrics. A strong skew
-//     (e.g. one listener handles 0 of N) is a meaningful signal for humans
-//     reading the test log, but is not a hard assertion because Azure's
-//     selection is not guaranteed to be balanced — especially at small N.
-//
-// Strict distribution assertions belong in a mock-backed compatibility matrix
-// (Phase 2 of the e2e enhancements plan), where listener selection is
-// controllable. See plan.md in the session workspace for context.
+// Strict distribution assertions (e.g. expected round-robin) belong in a
+// mock-backed compatibility matrix where listener selection is controllable.
 func TestMultiListenerPortForwardSmoke(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	const numListeners = 2
 	const numFlows = 8
@@ -107,10 +106,28 @@ func TestMultiListenerPortForwardSmoke(t *testing.T) {
 				float64(numFlows), 15*time.Second)
 
 			// Log per-listener counts so a human reading the test output can
-			// see distribution. Not asserted — see function comment.
+			// see distribution, and assert the bounded shape: every listener
+			// handled at least 1 flow, and no single listener handled all
+			// numFlows. See the function comment for the rationale.
+			counts := make([]int, len(listenerMetricsAddrs))
 			for i, addr := range listenerMetricsAddrs {
-				count := sumMetric(scrapeMetricsBest(addr), "aztunnel_connections_total")
-				t.Logf("listener %d (%s) handled %v connections", i, addr, count)
+				counts[i] = int(sumMetric(scrapeMetricsBest(addr), "aztunnel_connections_total"))
+				t.Logf("listener %d (%s) handled %d connections", i, addr, counts[i])
+			}
+			minC, maxC := counts[0], counts[0]
+			for _, c := range counts[1:] {
+				if c < minC {
+					minC = c
+				}
+				if c > maxC {
+					maxC = c
+				}
+			}
+			if minC < 1 {
+				t.Errorf("distribution: some listener handled 0 connections (counts=%v); expected every listener to handle at least 1 of %d flows", counts, numFlows)
+			}
+			if maxC > numFlows-1 {
+				t.Errorf("distribution: one listener handled %d of %d connections (counts=%v); expected at most %d per listener", maxC, numFlows, counts, numFlows-1)
 			}
 
 			// Assertion: neither listener subprocess emitted an error-level log

@@ -49,7 +49,8 @@ import (
 
 // TestPortForwardBasic verifies a simple echo round-trip through port-forward mode.
 func TestPortForwardBasic(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -90,7 +91,8 @@ func TestPortForwardBasic(t *testing.T) {
 
 // TestSOCKS5Basic verifies a SOCKS5 proxy echo round-trip.
 func TestSOCKS5Basic(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -127,7 +129,8 @@ func TestSOCKS5Basic(t *testing.T) {
 
 // TestConnectStdio verifies the connect (stdin/stdout) mode with raw TCP data.
 func TestConnectStdio(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -187,7 +190,8 @@ func TestConnectStdio(t *testing.T) {
 
 // TestSSHProxyCommand runs a real SSH session through the tunnel.
 func TestSSHProxyCommand(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	// Check that ssh client is available.
 	if _, err := exec.LookPath("ssh"); err != nil {
@@ -237,7 +241,8 @@ func TestSSHProxyCommand(t *testing.T) {
 
 // TestSASKeyAuth verifies port-forward works with separate listener/sender SAS keys.
 func TestSASKeyAuth(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 	if env.sasHyco == "" || env.sasListenerKeyName == "" || env.sasListenerKey == "" || env.sasSenderKeyName == "" || env.sasSenderKey == "" {
 		t.Skip("SAS credentials not configured (E2E_SAS_HYCO_NAME, E2E_SAS_*_KEY_NAME, E2E_SAS_*_KEY)")
 	}
@@ -294,7 +299,8 @@ func TestSASKeyAuth(t *testing.T) {
 func TestAllowlistAllow(t *testing.T) {
 	// This is covered by TestSOCKS5Basic (which uses --allow).
 	// Explicit test with CIDR notation.
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -334,7 +340,8 @@ func TestAllowlistAllow(t *testing.T) {
 
 // TestAllowlistDeny verifies that connections to non-allowed targets are rejected.
 func TestAllowlistDeny(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -368,7 +375,8 @@ func TestAllowlistDeny(t *testing.T) {
 
 // TestMaxConnections verifies the --max-connections limit.
 func TestMaxConnections(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -452,7 +460,8 @@ func TestMaxConnections(t *testing.T) {
 
 // TestSmallPayload sends 1-byte writes.
 func TestSmallPayload(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -491,7 +500,8 @@ func TestSmallPayload(t *testing.T) {
 
 // TestLargePayload sends a 1MB payload and verifies SHA256.
 func TestLargePayload(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -539,7 +549,8 @@ func TestBulkTransfer(t *testing.T) {
 	if os.Getenv("E2E_LARGE_TRANSFER") != "1" {
 		t.Skip("set E2E_LARGE_TRANSFER=1 to enable (sends 100MB through relay)")
 	}
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -599,7 +610,8 @@ func TestLongLivedConnection(t *testing.T) {
 	if os.Getenv("E2E_LONG_LIVED") != "1" {
 		t.Skip("set E2E_LONG_LIVED=1 to enable (runs for >2 minutes)")
 	}
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -642,7 +654,8 @@ func TestLongLivedConnection(t *testing.T) {
 
 // TestConcurrentSameTarget opens 50 simultaneous connections through port-forward.
 func TestConcurrentSameTarget(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -697,7 +710,8 @@ func TestConcurrentSameTarget(t *testing.T) {
 
 // TestConcurrentDistinctTargets opens 50 SOCKS5 connections to 50 different echo servers.
 func TestConcurrentDistinctTargets(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -765,7 +779,8 @@ func TestConcurrentDistinctTargets(t *testing.T) {
 
 // TestMetricsEndpoint verifies the metrics HTTP endpoint returns valid Prometheus data.
 func TestMetricsEndpoint(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -803,7 +818,8 @@ func TestMetricsEndpoint(t *testing.T) {
 
 // TestMetricsConnectionCount verifies connection counters after traffic.
 func TestMetricsConnectionCount(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -857,7 +873,8 @@ func TestMetricsConnectionCount(t *testing.T) {
 
 // TestMetricsErrorReason verifies error reason labels from allowlist rejection.
 func TestMetricsErrorReason(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -891,7 +908,8 @@ func TestMetricsErrorReason(t *testing.T) {
 
 // TestMetricsDialDuration verifies the dial duration histogram has observations.
 func TestMetricsDialDuration(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -934,7 +952,8 @@ func TestMetricsDialDuration(t *testing.T) {
 // TestSenderRetriesUntilListenerReady verifies that the sender connect mode
 // retries on 404 and succeeds once the listener becomes available.
 func TestSenderRetriesUntilListenerReady(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -1003,7 +1022,8 @@ func TestSenderRetriesUntilListenerReady(t *testing.T) {
 // TestPortForwardRecoveryAfterListenerRestart verifies that port-forward
 // mode recovers after the listener restarts.
 func TestPortForwardRecoveryAfterListenerRestart(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -1120,7 +1140,8 @@ func assertNoUsageDump(t *testing.T, output string) {
 // client surfaces as a non-retryable failure. The test name is preserved for
 // continuity with the original behavior the suite was designed around.
 func TestConnectNoListener(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -1147,7 +1168,8 @@ func TestConnectNoListener(t *testing.T) {
 
 // TestBadRelayName verifies a clean error for a non-existent relay namespace.
 func TestBadRelayName(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -1167,7 +1189,8 @@ func TestBadRelayName(t *testing.T) {
 
 // TestBadHycoName verifies a clean error for a non-existent hybrid connection.
 func TestBadHycoName(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -1186,7 +1209,8 @@ func TestBadHycoName(t *testing.T) {
 
 // TestBadSASKey verifies a clean error and no key leakage for an invalid SAS key.
 func TestBadSASKey(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 	if env.sasHyco == "" || env.sasListenerKeyName == "" {
 		t.Skip("SAS hyco / listener key name not configured")
 	}
@@ -1269,7 +1293,8 @@ func TestMissingRequiredArgs(t *testing.T) {
 // log line WITHOUT the "(retrying)" suffix) rather than just sleeping and
 // checking for the absence of a leak.
 func TestBadSASKeySender(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 	if env.sasHyco == "" || env.sasSenderKeyName == "" {
 		t.Skip("SAS hyco / sender key name not configured")
 	}
@@ -1300,7 +1325,8 @@ func TestBadSASKeySender(t *testing.T) {
 
 // TestWrongSASClaim verifies that using a listener key for sending (and vice versa) fails.
 func TestWrongSASClaim(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 	if env.sasHyco == "" ||
 		env.sasListenerKeyName == "" || env.sasListenerKey == "" ||
 		env.sasSenderKeyName == "" || env.sasSenderKey == "" {
@@ -1367,7 +1393,8 @@ func TestWrongSASClaim(t *testing.T) {
 
 // TestPortForwardClosedPort verifies clean behavior when the listener dials a closed port.
 func TestPortForwardClosedPort(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -1415,7 +1442,8 @@ func TestPortForwardClosedPort(t *testing.T) {
 
 // TestSOCKS5ClosedPort verifies clean behavior when SOCKS5 targets a closed port.
 func TestSOCKS5ClosedPort(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {
@@ -1453,7 +1481,8 @@ func TestSOCKS5ClosedPort(t *testing.T) {
 
 // TestPortForwardUnreachable verifies timeout behavior when the target is unreachable.
 func TestPortForwardUnreachable(t *testing.T) {
-	env := requireRelayEnv(t)
+	t.Parallel()
+	env := requireDedicatedHyco(t)
 
 	for _, auth := range availableAuths(t, env) {
 		t.Run(auth.name, func(t *testing.T) {

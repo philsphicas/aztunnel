@@ -40,36 +40,32 @@ type authConfig struct {
 	senderSAS   *sasCredentials // nil → Entra ID auth
 }
 
-// requireRelayEnv reads config from env vars and skips if nothing is configured.
+// requireRelayEnv is a thin compatibility forwarder over
+// requireDedicatedHyco. Every caller of this function now receives a
+// freshly-provisioned, dedicated hyco pair; the legacy shared
+// E2E_*_HYCO_NAME / E2E_SAS_*_KEY env vars are no longer consulted.
 //
-// Phase 2 of the per-test isolation work (#49) introduces
-// requireDedicatedHyco as the preferred entry point: each test owns
-// its own freshly-provisioned hyco pair, and the test is free to
-// call t.Parallel(). requireRelayEnv reads the legacy shared pair
-// established by TestMain and is kept for callers that have not yet
-// migrated; Phase 3 will convert this function into a thin forwarder
-// over requireDedicatedHyco so the migration cannot silently skip
-// any unmigrated tests once TestMain stops pre-provisioning.
+// Kept (rather than mechanically renaming all callers) for two
+// reasons during the per-test isolation migration (#49):
+//
+//  1. parity_test.go and parity_bench_test.go (slice-2 territory)
+//     intentionally do NOT call t.Parallel() and own their own
+//     migration path; they continue to call requireRelayEnv so the
+//     parallel-test rules in requireDedicatedHyco's godoc do not
+//     apply to them transitively. They still get a dedicated pair,
+//     just on the serial path.
+//
+//  2. Avoids a "silent t.Skip" failure mode during the migration
+//     window: if TestMain stopped pre-provisioning the legacy shared
+//     pair AND an unmigrated test still read E2E_ENTRA_HYCO_NAME,
+//     that test would skip without provisioning anything, leaving
+//     CI green but coverage gone.
+//
+// Phase 6 will delete this once parity tests have their own
+// per-scenario Backend wiring and there are no callers left.
 func requireRelayEnv(t testing.TB) *relayEnv {
 	t.Helper()
-	relay := os.Getenv("E2E_RELAY_NAME")
-	if relay == "" {
-		t.Skip("E2E_RELAY_NAME must be set for e2e tests")
-	}
-	hyco := os.Getenv("E2E_ENTRA_HYCO_NAME")
-	sasHyco := os.Getenv("E2E_SAS_HYCO_NAME")
-	if hyco == "" && sasHyco == "" {
-		t.Skip("at least one of E2E_ENTRA_HYCO_NAME or E2E_SAS_HYCO_NAME must be set")
-	}
-	return &relayEnv{
-		relayName:          relay,
-		hyco:               hyco,
-		sasHyco:            sasHyco,
-		sasListenerKeyName: os.Getenv("E2E_SAS_LISTENER_KEY_NAME"),
-		sasListenerKey:     os.Getenv("E2E_SAS_LISTENER_KEY"),
-		sasSenderKeyName:   os.Getenv("E2E_SAS_SENDER_KEY_NAME"),
-		sasSenderKey:       os.Getenv("E2E_SAS_SENDER_KEY"),
-	}
+	return requireDedicatedHyco(t)
 }
 
 // hycoProvisionTimeout bounds a single Provider.Provision call from
