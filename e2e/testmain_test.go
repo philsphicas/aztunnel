@@ -26,24 +26,18 @@ import (
 // own their own Teardown via t.Cleanup in requireDedicatedHyco.
 var relayProvider *azrelay.Provider
 
-// runRules holds the two namespace-scoped SAS authorization rules
-// (Listen-only + Send-only) provisioned once at TestMain startup and
-// shared by every PairToken's Result. Teardown is deferred from
-// testMain so the rules are released on every normal exit path; the
-// janitor reaps anything we leak (e.g. on os.Exit before defers).
+// runRules holds the two permanent namespace-scoped SAS authorization
+// rules (Listen-only + Send-only) provisioned out-of-band by
+// `e2e-infra setup`. The keys are read once at TestMain startup and
+// shared by every PairToken's Result. There is no per-run teardown —
+// the rules outlive every test invocation.
 var runRules *azrelay.RunRules
 
-// runRuleAcquireTimeout bounds the namespace-rule provisioning step
-// in TestMain. Two CreateOrUpdateAuthorizationRule + two ListKeys
-// + the 2 s data-plane settle; with the SDK's 6-retry tail factored
-// in, the worst-case observed wall-clock is well under a minute. 90 s
-// gives comfortable headroom for a regional blip without letting a
+// runRuleAcquireTimeout bounds the namespace-rule key-fetch step in
+// TestMain. Two ListKeys round-trips against permanent rules. 90 s
+// gives comfortable headroom for a regional ARM blip without letting a
 // stuck control plane hang the suite.
 const runRuleAcquireTimeout = 90 * time.Second
-
-// runRuleTeardownTimeout bounds the deferred Teardown call. Two
-// DeleteAuthorizationRule round-trips against the namespace.
-const runRuleTeardownTimeout = 60 * time.Second
 
 // TestMain constructs the process-scoped relay Provider so every
 // test can call requireDedicatedHyco to provision its own private
@@ -111,12 +105,13 @@ func testMain(m *testing.M) int {
 		Concurrency:    conc,
 	}
 
-	// Acquire the run-scoped namespace SAS rules. Two rules
-	// (e2e-run-<hex>-listener with Listen, e2e-run-<hex>-sender with
-	// Send) are created once here and stamped onto every PairToken
-	// Result by Provider.Provision; per-test provisioning no longer
-	// touches authorizationRules. Failures here are fatal — without
-	// the rules the SAS auth path can't function. No defers earlier
+	// Acquire the namespace SAS rule keys. The rules
+	// (e2e-listener with Listen, e2e-sender with Send) are permanent
+	// fixtures of the namespace provisioned once by `e2e-infra setup`;
+	// AcquireRunRules only reads their ListKeys output and never
+	// creates or deletes rules. Hyco provisioning never mutates
+	// authorization rules either. Failures here are fatal — without
+	// the keys the SAS auth path can't function. No defers earlier
 	// than this point need to skip on the fatal path because nothing
 	// has been provisioned yet.
 	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), runRuleAcquireTimeout)
@@ -129,27 +124,10 @@ func testMain(m *testing.M) int {
 	fmt.Fprintf(os.Stderr, "==> e2e: run rules ready (listener=%s, sender=%s)\n",
 		rr.ListenerName, rr.SenderName)
 
-	// Defer rule teardown FIRST so it runs LAST on the LIFO stack —
-	// every subsequently-deferred cleanup (e.g. drainBenchLease,
-	// below) gets to use the SAS rules while it still tears down
-	// in-flight state. The janitor reaps anything we leak (os.Exit
-	// paths skip defers).
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), runRuleTeardownTimeout)
-		defer cancel()
-		if err := rr.Teardown(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "==> e2e: teardown run rules %s/%s: %v\n",
-				rr.ListenerName, rr.SenderName, err)
-		}
-	}()
-
 	// Drain the shared bench hyco lease on every exit path, including
-	// panics that the testing framework recovers from. Registered
-	// AFTER the run-rule teardown defer so it runs BEFORE rule
-	// teardown (Go defers are LIFO) — keeps the SAS rules alive for
-	// any hyco-cleanup-time data-plane work the benchmark teardown
-	// path may grow in the future. Today tok.Teardown is ARM-only,
-	// so the order is currently not load-bearing.
+	// panics that the testing framework recovers from. The permanent
+	// SAS rules are not torn down here (they outlive the test
+	// invocation), so this is the only TestMain-level cleanup defer.
 	defer drainBenchLease()
 
 	cfg.RunRules = rr

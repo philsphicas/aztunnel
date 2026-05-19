@@ -123,8 +123,9 @@ func DefaultClientOptions() *arm.ClientOptions {
 // Provisioner: create entra hyco, create sas hyco. The returned
 // PairToken's Result is stamped with the namespace-scoped SAS rule
 // key info from p.cfg.RunRules. Teardown deletes both hycos; the
-// shared run-scoped rules live on past every PairToken and are
-// torn down by RunRules.Teardown from TestMain.
+// permanent run-scoped rules live on past every PairToken and are
+// not torn down by tests at all (they are provisioned once by
+// `e2e-infra setup` and outlive every test invocation).
 //
 // Provision blocks if the concurrency semaphore is full. The block
 // honours ctx.Done so callers (typically t.Cleanup-registered)
