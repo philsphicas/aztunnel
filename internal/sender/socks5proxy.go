@@ -8,6 +8,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/philsphicas/aztunnel/internal/idgen"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/protocol"
 	"github.com/philsphicas/aztunnel/internal/relay"
@@ -69,9 +70,12 @@ func SOCKS5Proxy(ctx context.Context, cfg SOCKS5Config) error {
 
 		go func() {
 			defer conn.Close() //nolint:errcheck // best-effort cleanup
-			if err := handleSOCKS5(ctx, conn, cfg); err != nil {
-				cfg.Logger.Warn("socks5 failed", "error", err)
-			}
+			// handleSOCKS5 logs its own per-bridge errors with the
+			// bridge_id-bound logger (or with the unbound logger for
+			// failures that happen before the SOCKS5 handshake reveals
+			// a target). The returned error is surfaced for tests and
+			// metrics, not for top-level logging.
+			_ = handleSOCKS5(ctx, conn, cfg)
 		}()
 	}
 }
@@ -83,28 +87,38 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	// Set a deadline for the SOCKS5 handshake.
 	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
-	// Perform SOCKS5 handshake to get the target.
+	// Perform SOCKS5 handshake to get the target. No bridge_id is
+	// available yet — the per-bridge ID is minted after the target
+	// is known.
 	target, err := socks5.Handshake(conn)
 	if err != nil {
 		_ = socks5.SendReply(conn, socks5.RepGeneralFailure, nil)
-		return fmt.Errorf("socks5 handshake: %w", err)
+		err = fmt.Errorf("socks5 handshake: %w", err)
+		cfg.Logger.Warn("socks5 failed", "error", err)
+		return err
 	}
 	_ = conn.SetReadDeadline(time.Time{}) // clear deadline
 
-	cfg.Logger.Info("socks5 connect", "target", target)
+	// Mint the bridge_id once the target is known so the per-bridge
+	// logger carries both attributes from this point on.
+	bridgeID := idgen.NewBridgeID()
+	logger := cfg.Logger.With("bridge_id", bridgeID)
+	logger.Info("connection requested", "target", target)
 
 	// Dial the relay.
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", cfg.Logger)
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
 	if err != nil {
 		_ = socks5.SendReply(conn, socks5.RepGeneralFailure, nil)
+		logger.Warn("socks5 failed", "error", err)
 		return err
 	}
 	defer func() { _ = ws.CloseNow() }()
 
 	// Send envelope and check response.
-	if err := sendEnvelopeAndCheck(ctx, ws, target); err != nil {
+	if err := sendEnvelopeAndCheck(ctx, ws, target, bridgeID); err != nil {
 		_ = socks5.SendReply(conn, socks5RepForError(err), nil)
 		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
+		logger.Warn("socks5 failed", "error", err)
 		return err
 	}
 
@@ -114,6 +128,9 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 
 	// Bridge data.
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
+	if bridgeErr != nil {
+		logger.Warn("socks5 failed", "error", bridgeErr)
+	}
 	return bridgeErr
 }
 

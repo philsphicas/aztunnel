@@ -228,6 +228,9 @@ func TestSendEnvelopeAndCheck(t *testing.T) {
 				if env.Version != protocol.CurrentVersion {
 					t.Errorf("server: envelope version = %d, want %d", env.Version, protocol.CurrentVersion)
 				}
+				if env.BridgeID != "TESTBRIDGEID0001" {
+					t.Errorf("server: envelope bridge_id = %q, want %q", env.BridgeID, "TESTBRIDGEID0001")
+				}
 
 				// Send response.
 				resp := protocol.ConnectResponse{
@@ -253,7 +256,7 @@ func TestSendEnvelopeAndCheck(t *testing.T) {
 			}
 			defer ws.CloseNow()
 
-			err = sendEnvelopeAndCheck(ctx, ws, tt.target)
+			err = sendEnvelopeAndCheck(ctx, ws, tt.target, "TESTBRIDGEID0001")
 
 			if tt.wantErr != "" {
 				if err == nil {
@@ -294,7 +297,7 @@ func TestSendEnvelopeAndCheck_WriteError(t *testing.T) {
 	// Give the server a moment to send its close frame.
 	time.Sleep(50 * time.Millisecond)
 
-	err = sendEnvelopeAndCheck(ctx, ws, "localhost:80")
+	err = sendEnvelopeAndCheck(ctx, ws, "localhost:80", "TESTBRIDGEID0002")
 	if err == nil {
 		t.Fatal("expected error when writing to closed websocket, got nil")
 	}
@@ -338,7 +341,7 @@ func TestSendEnvelopeAndCheck_InvalidResponse(t *testing.T) {
 	}
 	defer ws.CloseNow()
 
-	err = sendEnvelopeAndCheck(ctx, ws, "localhost:80")
+	err = sendEnvelopeAndCheck(ctx, ws, "localhost:80", "TESTBRIDGEID0003")
 	if err == nil {
 		t.Fatal("expected error for invalid JSON response, got nil")
 	}

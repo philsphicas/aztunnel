@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/philsphicas/aztunnel/internal/idgen"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/protocol"
 	"github.com/philsphicas/aztunnel/internal/relay"
@@ -74,9 +75,11 @@ func PortForward(ctx context.Context, cfg PortForwardConfig) error {
 
 		go func() {
 			defer conn.Close() //nolint:errcheck // best-effort cleanup
-			if err := forwardConnection(ctx, conn, cfg.Target, cfg); err != nil {
-				cfg.Logger.Warn("forward failed", "error", err)
-			}
+			// forwardConnection logs its own per-bridge errors with
+			// the bridge_id-bound logger; the returned error is
+			// surfaced for tests and metrics, not for top-level
+			// logging.
+			_ = forwardConnection(ctx, conn, cfg.Target, cfg)
 		}()
 	}
 }
@@ -85,20 +88,29 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	// Set TCP keepalive on the incoming connection.
 	relay.SetTCPKeepAlive(conn, cfg.TCPKeepAlive)
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", cfg.Logger)
+	bridgeID := idgen.NewBridgeID()
+	logger := cfg.Logger.With("bridge_id", bridgeID)
+	logger.Info("connection requested", "target", target)
+
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
 	if err != nil {
+		logger.Warn("forward failed", "error", err)
 		return err
 	}
 	defer func() { _ = ws.CloseNow() }()
 
 	// Send envelope and read response.
-	if err := sendEnvelopeAndCheck(ctx, ws, target); err != nil {
+	if err := sendEnvelopeAndCheck(ctx, ws, target, bridgeID); err != nil {
 		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
+		logger.Warn("forward failed", "error", err)
 		return err
 	}
 
 	// Bridge data.
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
+	if bridgeErr != nil {
+		logger.Warn("forward failed", "error", bridgeErr)
+	}
 	return bridgeErr
 }
 
@@ -109,10 +121,15 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 // the client (SOCKS5 sender → REP byte) inspect the wrapped value via
 // errors.As; callers that only care about the failure (port-forward) can
 // treat it as an opaque error.
-func sendEnvelopeAndCheck(ctx context.Context, ws *websocket.Conn, target string) error {
+//
+// bridgeID is the sender-minted correlation ID for this bridge; it is
+// propagated to the listener via ConnectEnvelope.BridgeID so logs on
+// both ends carry the same value.
+func sendEnvelopeAndCheck(ctx context.Context, ws *websocket.Conn, target, bridgeID string) error {
 	env := protocol.ConnectEnvelope{
-		Version: protocol.CurrentVersion,
-		Target:  target,
+		Version:  protocol.CurrentVersion,
+		Target:   target,
+		BridgeID: bridgeID,
 	}
 	data, _ := json.Marshal(env) // simple struct, cannot fail
 	if err := ws.Write(ctx, websocket.MessageText, data); err != nil {

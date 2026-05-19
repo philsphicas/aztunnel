@@ -130,6 +130,13 @@ type Listener struct {
 	// subprocess backends kill and reap the listener process.
 	// Idempotent; safe to call from a scenario goroutine.
 	Stop func()
+
+	// Logs returns every log line this listener has emitted so far,
+	// joined by newlines. Observability parity scenarios grep this
+	// string for cross-process correlation IDs (e.g. bridge_id).
+	// Optional: backends that do not capture logs may leave this nil
+	// and scenarios that need it call t.Skip.
+	Logs func() string
 }
 
 // Sender is a handle to a single sender in a Tunnel. Backends populate
@@ -152,6 +159,11 @@ type Sender struct {
 
 	// Stop drops this sender. Idempotent.
 	Stop func()
+
+	// Logs returns every log line this sender has emitted so far,
+	// joined by newlines. See Listener.Logs for usage and the
+	// optional-nil contract.
+	Logs func() string
 }
 
 // Tunnel is a running listener/sender/relay topology returned by

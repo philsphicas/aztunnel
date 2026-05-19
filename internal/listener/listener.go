@@ -99,6 +99,14 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 		return
 	}
 
+	// Bind the sender-minted bridge correlation ID onto the request-
+	// scoped logger so every log line on this listener for this bridge
+	// carries the same value the sender logs against. An empty value
+	// indicates a pre-P5 sender; we bind it anyway (slog emits
+	// bridge_id="") so operators see explicit evidence of mixed-version
+	// traffic rather than a silently absent attribute.
+	logger = logger.With("bridge_id", env.BridgeID)
+
 	logger.Info("connection requested", "target", env.Target)
 
 	// Check allowlist.

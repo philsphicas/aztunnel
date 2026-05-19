@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/philsphicas/aztunnel/internal/idgen"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
 )
@@ -30,18 +31,22 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 		cfg.Logger = slog.Default()
 	}
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", cfg.Logger)
+	bridgeID := idgen.NewBridgeID()
+	logger := cfg.Logger.With("bridge_id", bridgeID)
+	logger.Info("connection requested", "target", cfg.Target)
+
+	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = ws.CloseNow() }()
 
-	if err := sendEnvelopeAndCheck(ctx, ws, cfg.Target); err != nil {
+	if err := sendEnvelopeAndCheck(ctx, ws, cfg.Target, bridgeID); err != nil {
 		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
 		return err
 	}
 
-	cfg.Logger.Debug("connected", "target", cfg.Target)
+	logger.Debug("connected", "target", cfg.Target)
 
 	stdio := &stdioConn{in: cfg.Stdin, out: cfg.Stdout}
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, stdio, "sender", cfg.Target)
