@@ -4,25 +4,28 @@
 // Azure Relay. Tests are gated behind the "e2e" build tag and require:
 //
 //   - E2E_RELAY_NAME: Azure Relay namespace name
-//   - At least one auth method configured (Entra ID and/or SAS keys)
+//   - E2E_RESOURCE_GROUP: resource group containing the namespace
+//   - AZURE_SUBSCRIPTION_ID: subscription ID for ARM API calls
+//   - Valid Azure credentials (az login, managed identity, OIDC, etc.)
 //
-// Entra ID auth:
+// Run `eval "$(make e2e-infra-env)"` to export all three from the
+// resource group provisioned by `make e2e-infra-setup`; the
+// `e2e-infra env` tool resolves AZURE_SUBSCRIPTION_ID from the
+// Azure CLI default if not already exported.
 //
-//   - E2E_ENTRA_HYCO_NAME: hybrid connection name (Entra ID auth)
-//   - Valid Azure credentials (az login, managed identity, etc.)
+// Each test provisions its own pair of ephemeral hybrid connections —
+// e2e-entra-<hex> for Entra ID auth and e2e-sas-<hex> for SAS key auth —
+// via azrelay.Provider in TestMain and tears them down via t.Cleanup. No
+// SAS keys are configured by hand; the provisioner creates the SAS
+// authorization rules and reads the listener/sender keys on the fly.
 //
-// SAS key auth:
-//
-//   - E2E_SAS_HYCO_NAME: hybrid connection for SAS key tests
-//   - E2E_SAS_LISTENER_KEY_NAME + E2E_SAS_LISTENER_KEY: listener SAS credentials
-//   - E2E_SAS_SENDER_KEY_NAME + E2E_SAS_SENDER_KEY: sender SAS credentials
-//
-// Functional tests run against all available auth methods. Auth-specific tests
-// (e.g., TestSASKeyAuth, TestWrongSASClaim) only run when their credentials
-// are configured.
+// Functional tests run against all available auth methods (entra, sas)
+// unless E2E_AUTH=entra or E2E_AUTH=sas is set to pin one.
 //
 // Optional:
 //
+//   - E2E_AUTH: restrict to "entra" or "sas" (default: both)
+//   - E2E_PROVISIONER_CONCURRENCY: cap on parallel hyco provisions (default 4)
 //   - E2E_LARGE_TRANSFER=1: enable 100MB bulk transfer test
 //   - E2E_LONG_LIVED=1: enable >2min keepalive test
 //
@@ -243,8 +246,12 @@ func TestSSHProxyCommand(t *testing.T) {
 func TestSASKeyAuth(t *testing.T) {
 	t.Parallel()
 	env := requireDedicatedHyco(t)
+	// requireDedicatedHyco always returns a fully-populated SAS pair
+	// (Provider.Provision creates the listener+sender authorizationRules
+	// and reads their keys). The defensive check here flags a Provider
+	// contract regression rather than a contributor mis-configuration.
 	if env.sasHyco == "" || env.sasListenerKeyName == "" || env.sasListenerKey == "" || env.sasSenderKeyName == "" || env.sasSenderKey == "" {
-		t.Skip("SAS credentials not configured (E2E_SAS_HYCO_NAME, E2E_SAS_*_KEY_NAME, E2E_SAS_*_KEY)")
+		t.Fatalf("provisioner returned env with empty SAS fields: %+v", env)
 	}
 
 	echo := startEchoServer(t)

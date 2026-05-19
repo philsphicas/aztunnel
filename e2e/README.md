@@ -1,9 +1,11 @@
 # End-to-End Tests
 
 These tests verify aztunnel against a real Azure Relay. They are gated behind
-the `e2e` build tag. Each `go test` invocation provisions its own pair of
-ephemeral hybrid connections in the configured relay namespace, so concurrent
-pipelines (or `make e2e` runs) do not collide.
+the `e2e` build tag. Each test provisions its own pair of ephemeral hybrid
+connections in the configured relay namespace and tears them down via
+`t.Cleanup`, so tests run with `t.Parallel()` (concurrency capped by
+`E2E_PROVISIONER_CONCURRENCY`, default 4) and concurrent `go test` pipelines
+do not collide.
 
 ## Quick Start
 
@@ -18,32 +20,39 @@ make e2e
 make e2e-infra-ci
 ```
 
-`AZURE_SUBSCRIPTION_ID` falls back to the Azure CLI's default subscription
-(`~/.azure/azureProfile.json`) if unset, so `az login` alone is enough for
-most contributors. Set it explicitly if you have multiple subscriptions
-and don't want to rely on the CLI's default.
+`AZURE_SUBSCRIPTION_ID` must be set when `TestMain` constructs the relay
+`Provider`. `make e2e-infra-env` resolves it from the Azure CLI's default
+subscription (`~/.azure/azureProfile.json`) so `az login` plus
+`eval "$(make e2e-infra-env)"` is enough for most contributors. Set it
+explicitly if you have multiple subscriptions and don't want to rely on
+the CLI's default.
 
-`TestMain` creates two short-lived hybrid connections —
-`e2e-entra-<hex>` for Entra-ID auth and `e2e-sas-<hex>` for SAS-key auth —
-and tears them down on exit. The orphan janitor workflow
-(`.github/workflows/e2e-janitor.yml`) reaps anything left behind by killed
-runners.
+`TestMain` constructs a process-scoped `azrelay.Provider` that hands out
+freshly-suffixed pairs (`e2e-entra-<hex>` for Entra ID auth and
+`e2e-sas-<hex>` for SAS-key auth) to each test via `requireDedicatedHyco`.
+Tests register a `t.Cleanup` that tears their pair down at the end of the
+scenario. Benchmarks instead share a single pair leased on first use and
+drained on `TestMain` exit, so benchstat runs do not pay per-sub-bench
+provisioning. The orphan janitor workflow (`.github/workflows/e2e-janitor.yml`)
+reaps anything left behind by killed runners.
 
 ## Environment Variables
 
-| Variable                | Required | Description                                                                |
-| ----------------------- | -------- | -------------------------------------------------------------------------- |
-| `E2E_RELAY_NAME`        | Yes      | Azure Relay namespace name                                                 |
-| `E2E_RESOURCE_GROUP`    | Yes      | Resource group containing the relay namespace                              |
-| `AZURE_SUBSCRIPTION_ID` | No       | Subscription used to provision per-invocation hycos; defaults to Azure CLI |
-| `E2E_AUTH`              | No       | `entra`, `sas`, or both (default)                                          |
-| `E2E_LARGE_TRANSFER`    | No       | Set to `1` to enable 100MB bulk transfer                                   |
-| `E2E_LONG_LIVED`        | No       | Set to `1` to enable >2 min keepalive test                                 |
+| Variable                      | Required | Description                                                            |
+| ----------------------------- | -------- | ---------------------------------------------------------------------- |
+| `E2E_RELAY_NAME`              | Yes      | Azure Relay namespace name                                             |
+| `E2E_RESOURCE_GROUP`          | Yes      | Resource group containing the relay namespace                          |
+| `AZURE_SUBSCRIPTION_ID`       | Yes      | Subscription used to provision per-test hycos                          |
+| `E2E_AUTH`                    | No       | `entra`, `sas`, or both (default)                                      |
+| `E2E_PROVISIONER_CONCURRENCY` | No       | Cap on in-flight hyco provisions across `t.Parallel` tests (default 4) |
+| `E2E_LARGE_TRANSFER`          | No       | Set to `1` to enable 100MB bulk transfer                               |
+| `E2E_LONG_LIVED`              | No       | Set to `1` to enable >2 min keepalive test                             |
 
 Authentication is via `DefaultAzureCredential`: `az login` for local
 development, OIDC federated workload identity for GitHub Actions. No SAS
-listener/sender keys need to be configured by hand — `TestMain` mints them
-on the fly via `Microsoft.Relay/...ListKeys` and tears them down on exit.
+listener/sender keys need to be configured by hand — the `azrelay.Provider`
+mints them on the fly via `Microsoft.Relay/...ListKeys` for every test's
+fresh pair and tears them down on scenario cleanup.
 
 ## Test Scenarios
 
@@ -207,10 +216,11 @@ cd e2e/infra && GITHUB_TOKEN=$(gh auth token) go run ./cmd/e2e-infra ci --depend
 - **During tests**: fractions of a penny (pro-rated per listener-hour, ~$0.014/hr)
 - **Monthly**: $0 if only used for CI runs
 
-Healthy `make e2e` invocations clean up their hybrid connections in
-`TestMain`. A daily `E2E Janitor` workflow (`make e2e-infra-janitor`)
-reaps orphans left behind by killed runners or panicking tests, so the
-namespace does not accumulate billable resources over time.
+Healthy `make e2e` invocations clean up their hybrid connections via
+`t.Cleanup` registered by `requireDedicatedHyco`. A daily `E2E Janitor`
+workflow (`make e2e-infra-janitor`) reaps orphans left behind by killed
+runners or panicking tests, so the namespace does not accumulate billable
+resources over time.
 
 ### Tear Down
 
@@ -228,11 +238,13 @@ az ad app delete --id "$APP_ID"
 PR pipelines no longer use a workflow `concurrency` group, because
 collisions between concurrent invocations are eliminated at the hyco level:
 
-- Each `go test` binary invocation generates a fresh suffix and creates
-  `e2e-entra-<suffix>` + `e2e-sas-<suffix>` in `TestMain`.
+- Each test (and each shared benchmark lease) generates a fresh suffix and
+  creates `e2e-entra-<suffix>` + `e2e-sas-<suffix>` via `azrelay.Provider`
+  in `TestMain`. `t.Parallel()` tests run with their hyco lifetime scoped
+  to a single `t.Cleanup`.
 - Static hyco names from prior versions (`e2e-entra`, `e2e-sas`) are no
   longer required and are intentionally not provisioned by the new setup.
 - Hyco names are matched against `^e2e-(entra|sas)-[0-9a-f]{12}$` for the
   janitor, so any unrelated hycos in the namespace are not touched.
 - The relay namespace itself is shared across pipelines; only hybrid
-  connections (and their SAS auth rules) are per-invocation.
+  connections (and their SAS auth rules) are per-test.

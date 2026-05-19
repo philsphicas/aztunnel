@@ -13,12 +13,20 @@ import (
 // SAS). The same scenarios run against the in-process MockBackend in
 // mockrelay/testharness/parity — any divergence between this test and that one is
 // a behavioural gap to fix in the mock.
+//
+// TestParity_Azure does NOT call t.Parallel() because AssertNoLeaks
+// (registered at the top of every scenario) samples process-wide
+// goroutine + FD counts and would falsely fail if scenarios ran in
+// parallel. Each scenario still gets isolation via per-Setup hyco
+// provisioning inside azureBackend.Setup — provisioning runs serially
+// at the parity-suite level, which is fine because the Provider's
+// concurrency cap is not the bottleneck here.
 func TestParity_Azure(t *testing.T) {
-	env := requireRelayEnv(t)
-	for _, auth := range availableAuths(t, env) {
-		auth := auth
-		t.Run(auth.name, func(t *testing.T) {
-			b := &azureBackend{env: env, auth: auth}
+	requireProvider(t)
+	for _, name := range availableAuthNames(t) {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			b := &azureBackend{authName: name, acquireEnv: requireDedicatedHyco}
 			relayparity.RunCoreSuite(t, b)
 			relayparity.RunTopologySuite(t, b)
 			relayparity.RunReliabilitySuite(t, b)

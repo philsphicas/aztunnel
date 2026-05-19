@@ -64,6 +64,12 @@ func testMain(m *testing.M) int {
 		fatal("pre-build aztunnel: %v", err)
 	}
 
+	// Drain the shared bench hyco lease on every exit path, including
+	// panics that the testing framework recovers from. The defer is
+	// a no-op when no benchmark called leaseSharedHyco (i.e. for the
+	// common `go test` invocation that runs only tests).
+	defer drainBenchLease()
+
 	if os.Getenv("E2E_RELAY_NAME") == "" {
 		fmt.Fprintln(os.Stderr, "==> e2e: E2E_RELAY_NAME is unset — TestMain will not construct a Provider")
 		fmt.Fprintln(os.Stderr, "==> e2e: every test will be SKIPPED. Run `eval \"$(make e2e-infra-env)\"` first, or set E2E_RELAY_NAME explicitly.")

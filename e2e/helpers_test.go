@@ -40,34 +40,6 @@ type authConfig struct {
 	senderSAS   *sasCredentials // nil → Entra ID auth
 }
 
-// requireRelayEnv is a thin compatibility forwarder over
-// requireDedicatedHyco. Every caller of this function now receives a
-// freshly-provisioned, dedicated hyco pair; the legacy shared
-// E2E_*_HYCO_NAME / E2E_SAS_*_KEY env vars are no longer consulted.
-//
-// Kept (rather than mechanically renaming all callers) for two
-// reasons during the per-test isolation migration (#49):
-//
-//  1. parity_test.go and parity_bench_test.go (slice-2 territory)
-//     intentionally do NOT call t.Parallel() and own their own
-//     migration path; they continue to call requireRelayEnv so the
-//     parallel-test rules in requireDedicatedHyco's godoc do not
-//     apply to them transitively. They still get a dedicated pair,
-//     just on the serial path.
-//
-//  2. Avoids a "silent t.Skip" failure mode during the migration
-//     window: if TestMain stopped pre-provisioning the legacy shared
-//     pair AND an unmigrated test still read E2E_ENTRA_HYCO_NAME,
-//     that test would skip without provisioning anything, leaving
-//     CI green but coverage gone.
-//
-// Phase 6 will delete this once parity tests have their own
-// per-scenario Backend wiring and there are no callers left.
-func requireRelayEnv(t testing.TB) *relayEnv {
-	t.Helper()
-	return requireDedicatedHyco(t)
-}
-
 // hycoProvisionTimeout bounds a single Provider.Provision call from
 // requireDedicatedHyco. The provisioner already retries 429s and
 // transient 5xx through azcore (MaxRetries=6, MaxRetryDelay=60s) and
@@ -102,7 +74,7 @@ func requireProvider(t testing.TB) *azrelay.Provider {
 //
 // # Ordering requirement
 //
-// Callers MUST invoke t.Parallel() BEFORE calling this function:
+// Callers SHOULD invoke t.Parallel() BEFORE calling this function:
 //
 //	func TestSomething(t *testing.T) {
 //	    t.Parallel()                            // FIRST
@@ -119,6 +91,13 @@ func requireProvider(t testing.TB) *azrelay.Provider {
 // win collapses. Reviewing this ordering is a code-review checklist
 // item; the function cannot enforce it because the testing package
 // exposes no "am I parallel yet?" signal.
+//
+// Exception: TestParity_Azure deliberately does NOT call t.Parallel()
+// because relayparity.AssertNoLeaks samples process-wide goroutine
+// and FD counts and would false-positive under parallel scenarios.
+// Parity therefore provisions serially via azureBackend.acquireEnv,
+// which is fine — the wall-clock win is bounded by goroutine-leak
+// detection there, not by hyco provisioning.
 //
 // Skips the test when E2E_RELAY_NAME is unset.
 //
@@ -154,6 +133,15 @@ func requireDedicatedHyco(t testing.TB) *relayEnv {
 	})
 
 	r := tok.Result()
+	return resultToEnv(r)
+}
+
+// resultToEnv converts an azrelay.Result (the per-pair metadata
+// returned by Provider.Provision) into the legacy *relayEnv shape
+// the existing helpers (startListener, startPortForwardSender, ...)
+// take. Shared by requireDedicatedHyco and leaseSharedHyco so the
+// field mapping cannot drift between the two acquisition paths.
+func resultToEnv(r *azrelay.Result) *relayEnv {
 	return &relayEnv{
 		relayName:          r.RelayName,
 		hyco:               r.EntraHycoName,
@@ -162,6 +150,84 @@ func requireDedicatedHyco(t testing.TB) *relayEnv {
 		sasListenerKey:     r.ListenerKey,
 		sasSenderKeyName:   r.SenderKeyName,
 		sasSenderKey:       r.SenderKey,
+	}
+}
+
+// benchLease holds the single process-wide hyco pair leased on the
+// first leaseSharedHyco call. drainBenchLease releases it after
+// m.Run returns. Concurrent leaseSharedHyco callers are serialised
+// by the mutex; in practice b.Run sub-benches inside a single
+// BenchmarkParity_Azure run sequentially so the lock is uncontended
+// past the first call.
+var (
+	benchLeaseMu  sync.Mutex
+	benchLeaseEnv *relayEnv
+	benchLeaseTok *azrelay.PairToken
+	benchLeaseErr error
+)
+
+// leaseSharedHyco returns a process-shared (entra, sas) hyco pair
+// suitable for sub-benches that should NOT pay per-Setup provisioning
+// cost. The first call provisions the pair via the same Provider used
+// by requireDedicatedHyco; subsequent calls return the cached env.
+// drainBenchLease (called from testMain after m.Run) tears it down.
+//
+// Errors from the first Provision are sticky: every subsequent call
+// in the same process re-fatals with the cached error so retry loops
+// inside the bench framework do not silently mask a control-plane
+// failure that already burned wall-clock budget.
+//
+// Not registered with t.Cleanup — the lease is intentionally process-
+// scoped, not test-scoped, so multiple b.Run sub-benches can share
+// it. Safe to call from any benchmark goroutine.
+func leaseSharedHyco(tb testing.TB) *relayEnv {
+	tb.Helper()
+	p := requireProvider(tb)
+
+	benchLeaseMu.Lock()
+	defer benchLeaseMu.Unlock()
+
+	if benchLeaseEnv != nil {
+		return benchLeaseEnv
+	}
+	if benchLeaseErr != nil {
+		tb.Fatalf("lease shared bench hyco pair (cached error): %v", benchLeaseErr)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), hycoProvisionTimeout)
+	defer cancel()
+	tok, err := p.Provision(ctx)
+	if err != nil {
+		benchLeaseErr = err
+		tb.Fatalf("provision shared bench hyco pair: %v", err)
+	}
+	entra, sas := tok.HycoNames()
+	tb.Logf("leased shared bench hyco pair: %s, %s", entra, sas)
+	benchLeaseTok = tok
+	benchLeaseEnv = resultToEnv(tok.Result())
+	return benchLeaseEnv
+}
+
+// drainBenchLease tears down the shared bench hyco pair, if any.
+// Called from testMain via defer after m.Run() so the lease is
+// released on every exit path including panics that the testing
+// framework recovers from. No-op when no benchmark called
+// leaseSharedHyco. Failures are logged to stderr — the janitor will
+// reap anything we leak, and the process is already exiting so
+// failing it on cleanup would provide no extra signal.
+func drainBenchLease() {
+	benchLeaseMu.Lock()
+	defer benchLeaseMu.Unlock()
+	if benchLeaseTok == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hycoTeardownTimeout)
+	defer cancel()
+	tok := benchLeaseTok
+	benchLeaseTok = nil
+	entra, sas := tok.HycoNames()
+	if err := tok.Teardown(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco pair %s/%s: %v\n", entra, sas, err)
 	}
 }
 
@@ -193,9 +259,68 @@ func availableAuths(t testing.TB, env *relayEnv) []authConfig {
 		})
 	}
 	if len(configs) == 0 {
-		t.Skip("no auth configured (need E2E_ENTRA_HYCO_NAME or SAS credentials)")
+		t.Skip("no auth configured (set E2E_AUTH=entra|sas or leave unset for both)")
 	}
 	return configs
+}
+
+// availableAuthNames returns the auth method names to exercise based
+// on the E2E_AUTH filter, without binding to a specific env. Used by
+// callers that pick an authConfig only AFTER provisioning a fresh
+// hyco pair (e.g. TestParity_Azure / BenchmarkParity_Azure, which
+// build authConfig inside Backend.Setup via authFromEnv).
+//
+// Returns ["entra", "sas"] when E2E_AUTH is empty, ["entra"] when
+// E2E_AUTH=entra, ["sas"] when E2E_AUTH=sas. Any other value fails
+// the caller.
+//
+// The shared Provider always provisions both an Entra hyco and a SAS
+// hyco per call, so there is no "auth method is unavailable" branch
+// here — every name returned is guaranteed buildable by authFromEnv
+// once a fresh env is in hand.
+func availableAuthNames(t testing.TB) []string {
+	t.Helper()
+	filter := os.Getenv("E2E_AUTH")
+	switch filter {
+	case "":
+		return []string{"entra", "sas"}
+	case "entra", "sas":
+		return []string{filter}
+	default:
+		t.Fatalf("unsupported E2E_AUTH value %q; expected \"entra\", \"sas\", or \"\" (both)", filter)
+		return nil
+	}
+}
+
+// authFromEnv builds the authConfig for the named auth method from a
+// freshly-provisioned env. Used by azureBackend.Setup to derive the
+// concrete auth (hyco + optional SAS creds) AFTER each Setup call
+// provisions its own hyco pair. The env is assumed to have been
+// produced by Provider.Provision (i.e. both entra and SAS slots are
+// populated); a missing field will fail the test rather than skip.
+func authFromEnv(t testing.TB, env *relayEnv, name string) authConfig {
+	t.Helper()
+	switch name {
+	case "entra":
+		if env.hyco == "" {
+			t.Fatalf("authFromEnv: env.hyco is empty for entra auth")
+		}
+		return authConfig{name: "entra", hyco: env.hyco}
+	case "sas":
+		if env.sasHyco == "" || env.sasListenerKeyName == "" || env.sasListenerKey == "" ||
+			env.sasSenderKeyName == "" || env.sasSenderKey == "" {
+			t.Fatalf("authFromEnv: SAS fields missing on env for sas auth")
+		}
+		return authConfig{
+			name:        "sas",
+			hyco:        env.sasHyco,
+			listenerSAS: &sasCredentials{keyName: env.sasListenerKeyName, key: env.sasListenerKey},
+			senderSAS:   &sasCredentials{keyName: env.sasSenderKeyName, key: env.sasSenderKey},
+		}
+	default:
+		t.Fatalf("authFromEnv: unknown auth name %q", name)
+		return authConfig{}
+	}
 }
 
 // startListener starts an aztunnel relay-listener with the given auth config.
