@@ -73,4 +73,14 @@ const (
 	// listener's configured connect timeout (no SYN-ACK from the
 	// target, typical of black-holed addresses).
 	CodeTimeout = "timeout"
+
+	// CodeDNSNotFound indicates the listener could not resolve the target
+	// hostname (typically NXDOMAIN or NODATA). Distinct from CodeHostUnreachable
+	// because the failure is at the name-resolution layer, not the network.
+	CodeDNSNotFound = "dns_not_found"
+
+	// CodeDNSTimeout indicates DNS resolution exceeded the resolver's deadline.
+	// Distinct from CodeTimeout because the failure happened before any SYN was
+	// sent; the underlying network may be fine.
+	CodeDNSTimeout = "dns_timeout"
 )

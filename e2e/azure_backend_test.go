@@ -92,11 +92,12 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 		waitForLog(t, lst, "control channel connected", 30*time.Second)
 		metricsAddr := lst.MetricsAddr(t, 15*time.Second)
 		return &relayparity.Listener{
-			Addr:      metricsAddr,
-			Completed: scrapeCounter(metricsAddr, "aztunnel_connections_total"),
-			Active:    scrapeGauge(metricsAddr, "aztunnel_active_connections"),
-			Stop:      func() { lst.Stop(t) },
-			Logs:      func() string { return lst.logs.String() },
+			Addr:             metricsAddr,
+			Completed:        scrapeCounter(metricsAddr, "aztunnel_connections_total"),
+			Active:           scrapeGauge(metricsAddr, "aztunnel_active_connections"),
+			ConnectionErrors: scrapeConnectionErrors(metricsAddr),
+			Stop:             func() { lst.Stop(t) },
+			Logs:             func() string { return lst.logs.String() },
 		}
 	}
 
@@ -168,5 +169,18 @@ func scrapeGauge(addr, name string) func() int64 {
 	return func() int64 {
 		text := scrapeMetricsBest(addr)
 		return int64(sumMetric(text, name))
+	}
+}
+
+// scrapeConnectionErrors returns a closure that scrapes /metrics on
+// addr and returns the sum of aztunnel_connection_errors_total samples
+// whose `reason` label equals the requested reason. Used by negative-
+// path parity scenarios that assert the listener classified a dial
+// failure into a specific reason bucket.
+func scrapeConnectionErrors(addr string) func(reason string) int64 {
+	return func(reason string) int64 {
+		text := scrapeMetricsBest(addr)
+		return int64(sumMetricByLabel(text,
+			"aztunnel_connection_errors_total", "reason", reason))
 	}
 }

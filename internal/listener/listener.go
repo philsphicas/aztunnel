@@ -171,16 +171,30 @@ func sendResponseWithCode(ctx context.Context, ws *websocket.Conn, ok bool, errM
 // constants. Empty string when no classification applies — the sender
 // treats that the same as "generic failure".
 //
-// The order matters: timeouts (both context.DeadlineExceeded and the
-// net.Error Timeout() form for OS-level connect timeouts) are checked
-// first because the underlying syscall errno can vary by platform on
-// timeouts; classifying by surface error type is more portable.
+// The order matters:
+//
+//   - context.DeadlineExceeded wins so an operator-cancelled dial keeps
+//     CodeTimeout regardless of which layer the error originated in.
+//   - *net.DNSError is checked before the generic netErr.Timeout()
+//     branch because *net.DNSError satisfies net.Error and its
+//     Timeout() returns IsTimeout; without this ordering a DNS timeout
+//     would be misclassified as the generic CodeTimeout.
+//   - Other timeouts (OS-level connect timeouts) are classified by
+//     surface error type rather than by errno, because the underlying
+//     syscall errno can vary by platform on timeouts.
 func classifyDialError(err error) string {
 	if err == nil {
 		return ""
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return protocol.CodeTimeout
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		if dnsErr.IsTimeout {
+			return protocol.CodeDNSTimeout
+		}
+		return protocol.CodeDNSNotFound
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {

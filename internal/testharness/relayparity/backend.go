@@ -102,8 +102,8 @@ type SetupOptions struct {
 // Listener is a handle to a single listener in a Tunnel. Backends
 // populate Tunnel.Listeners with one entry per running listener.
 //
-// All accessor closures (Completed, Active) are safe to call
-// concurrently and return monotonically-updating values without
+// All accessor closures (Completed, Active, ConnectionErrors) are safe
+// to call concurrently and return monotonically-updating values without
 // blocking on the listener.
 type Listener struct {
 	// Addr is the listener's metrics-scrape address for subprocess
@@ -124,6 +124,17 @@ type Listener struct {
 	// this listener (aztunnel_active_connections summed across all
 	// label combinations).
 	Active func() int64
+
+	// ConnectionErrors returns the value of
+	// aztunnel_connection_errors_total filtered to samples whose
+	// reason label equals the given reason, summed across any other
+	// label combinations (e.g. role) on this listener's metrics
+	// surface. Used by negative-path scenarios to assert the listener
+	// classified a dial failure into the expected reason bucket.
+	//
+	// Returns 0 when the metric has no samples for that reason yet
+	// (counters are not initialized until the first observation).
+	ConnectionErrors func(reason string) int64
 
 	// Stop drops this listener: in-process backends cancel the
 	// listener's context and wait for the goroutine to exit;

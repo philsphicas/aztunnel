@@ -31,6 +31,7 @@ import (
 	"github.com/philsphicas/aztunnel/internal/sender"
 	"github.com/philsphicas/aztunnel/internal/testharness/relayparity"
 	"github.com/philsphicas/aztunnel/mockrelay/server"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // MockBackend implements relayparity.Backend by standing up a mock
@@ -138,11 +139,12 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 		}
 
 		return &relayparity.Listener{
-			Addr:      "",
-			Completed: counterReader(m, "aztunnel_connections_total"),
-			Active:    gaugeReader(m, "aztunnel_active_connections"),
-			Stop:      stop,
-			Logs:      logs.String,
+			Addr:             "",
+			Completed:        counterReader(m, "aztunnel_connections_total"),
+			Active:           gaugeReader(m, "aztunnel_active_connections"),
+			ConnectionErrors: connectionErrorReader(m),
+			Stop:             stop,
+			Logs:             logs.String,
 		}
 	}
 
@@ -350,6 +352,48 @@ func gaugeReader(m *metrics.Metrics, name string) func() int64 {
 		}
 		return int64(total)
 	}
+}
+
+// connectionErrorReader returns a closure that sums every sample of
+// aztunnel_connection_errors_total whose reason label equals the
+// requested reason, on m's registry. Each per-listener metrics surface
+// only sees its own connection errors, so summing across the other
+// labels (role) is safe.
+//
+// Returns 0 when the counter has no samples for that reason — Prometheus
+// counters are not initialized until the first observation.
+func connectionErrorReader(m *metrics.Metrics) func(reason string) int64 {
+	return func(reason string) int64 {
+		families, err := m.Registry.Gather()
+		if err != nil {
+			return 0
+		}
+		var total float64
+		for _, f := range families {
+			if f.GetName() != "aztunnel_connection_errors_total" {
+				continue
+			}
+			for _, sample := range f.GetMetric() {
+				if !labelMatches(sample.GetLabel(), "reason", reason) {
+					continue
+				}
+				if c := sample.GetCounter(); c != nil {
+					total += c.GetValue()
+				}
+			}
+		}
+		return int64(total)
+	}
+}
+
+// labelMatches reports whether any of pairs has the given name and value.
+func labelMatches(pairs []*dto.LabelPair, name, value string) bool {
+	for _, lp := range pairs {
+		if lp.GetName() == name && lp.GetValue() == value {
+			return true
+		}
+	}
+	return false
 }
 
 // gaugeValue returns the single-sample value of a gauge by name. Used
