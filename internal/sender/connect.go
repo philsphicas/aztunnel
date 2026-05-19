@@ -41,12 +41,13 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 	}
 	defer func() { _ = ws.CloseNow() }()
 
-	if err := sendEnvelopeAndCheck(ctx, ws, cfg.Target, bridgeID); err != nil {
+	listenerID, err := sendEnvelopeAndCheck(ctx, ws, cfg.Target, bridgeID)
+	if err != nil {
+		logRejection(logger, cfg.Target, listenerID, err)
 		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
 		return err
 	}
-
-	logger.Debug("connected", "target", cfg.Target)
+	logAccept(logger, cfg.Target, listenerID)
 
 	stdio := &stdioConn{in: cfg.Stdin, out: cfg.Stdout}
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, stdio, "sender", cfg.Target)

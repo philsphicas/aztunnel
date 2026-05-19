@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -177,23 +178,46 @@ func TestStubAddr(t *testing.T) {
 
 func TestSendEnvelopeAndCheck(t *testing.T) {
 	tests := []struct {
-		name      string
-		target    string
-		respOK    bool
-		respError string
-		wantErr   string
+		name            string
+		target          string
+		respOK          bool
+		respError       string
+		respListenerID  string
+		wantErr         string
+		wantListenerID  string
+		wantRejectionID string // expected ListenerID inside connectRejected when rejected
 	}{
 		{
-			name:   "success",
-			target: "localhost:8080",
-			respOK: true,
+			name:           "success",
+			target:         "localhost:8080",
+			respOK:         true,
+			respListenerID: "abc123def4567890",
+			wantListenerID: "abc123def4567890",
 		},
 		{
-			name:      "rejected",
-			target:    "badhost:9999",
-			respOK:    false,
-			respError: "connection refused",
-			wantErr:   "connection rejected: connection refused",
+			name:           "success-empty-listener-id-backward-compat",
+			target:         "localhost:8080",
+			respOK:         true,
+			respListenerID: "",
+			wantListenerID: "",
+		},
+		{
+			name:            "rejected",
+			target:          "badhost:9999",
+			respOK:          false,
+			respError:       "connection refused",
+			respListenerID:  "0123456789abcdef",
+			wantErr:         "connection rejected: connection refused",
+			wantListenerID:  "0123456789abcdef",
+			wantRejectionID: "0123456789abcdef",
+		},
+		{
+			name:           "rejected-empty-listener-id-backward-compat",
+			target:         "badhost:9999",
+			respOK:         false,
+			respError:      "connection refused",
+			respListenerID: "",
+			wantErr:        "connection rejected: connection refused",
 		},
 	}
 
@@ -234,9 +258,10 @@ func TestSendEnvelopeAndCheck(t *testing.T) {
 
 				// Send response.
 				resp := protocol.ConnectResponse{
-					Version: protocol.CurrentVersion,
-					OK:      tt.respOK,
-					Error:   tt.respError,
+					Version:    protocol.CurrentVersion,
+					OK:         tt.respOK,
+					Error:      tt.respError,
+					ListenerID: tt.respListenerID,
 				}
 				respData, _ := json.Marshal(resp)
 				if err := ws.Write(r.Context(), websocket.MessageText, respData); err != nil {
@@ -256,7 +281,11 @@ func TestSendEnvelopeAndCheck(t *testing.T) {
 			}
 			defer ws.CloseNow()
 
-			err = sendEnvelopeAndCheck(ctx, ws, tt.target, "TESTBRIDGEID0001")
+			listenerID, err := sendEnvelopeAndCheck(ctx, ws, tt.target, "TESTBRIDGEID0001")
+
+			if listenerID != tt.wantListenerID {
+				t.Errorf("listenerID = %q, want %q", listenerID, tt.wantListenerID)
+			}
 
 			if tt.wantErr != "" {
 				if err == nil {
@@ -264,6 +293,20 @@ func TestSendEnvelopeAndCheck(t *testing.T) {
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Errorf("error %q does not contain %q", err.Error(), tt.wantErr)
+				}
+				// A listener-side rejection MUST surface as a *connectRejected
+				// so callers (logRejection, socks5RepForError) can branch on it.
+				// The contract is unconditional: a wantErr case that failed
+				// errors.As would silently bypass the ListenerID check below
+				// and let a regression land where rejections degrade to opaque
+				// errors. Assert the type-assertion succeeds first, then check
+				// the wire-sourced ListenerID matches expectations.
+				var ce *connectRejected
+				if !errors.As(err, &ce) {
+					t.Fatalf("expected *connectRejected, got %T: %v", err, err)
+				}
+				if ce.ListenerID != tt.wantRejectionID {
+					t.Errorf("connectRejected.ListenerID = %q, want %q", ce.ListenerID, tt.wantRejectionID)
 				}
 			} else if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -297,9 +340,12 @@ func TestSendEnvelopeAndCheck_WriteError(t *testing.T) {
 	// Give the server a moment to send its close frame.
 	time.Sleep(50 * time.Millisecond)
 
-	err = sendEnvelopeAndCheck(ctx, ws, "localhost:80", "TESTBRIDGEID0002")
+	listenerID, err := sendEnvelopeAndCheck(ctx, ws, "localhost:80", "TESTBRIDGEID0002")
 	if err == nil {
 		t.Fatal("expected error when writing to closed websocket, got nil")
+	}
+	if listenerID != "" {
+		t.Errorf("listenerID = %q, want empty string when no response was read", listenerID)
 	}
 	// The error should be about sending the envelope or reading the response.
 	if !strings.Contains(err.Error(), "send envelope") && !strings.Contains(err.Error(), "read response") {
@@ -341,11 +387,136 @@ func TestSendEnvelopeAndCheck_InvalidResponse(t *testing.T) {
 	}
 	defer ws.CloseNow()
 
-	err = sendEnvelopeAndCheck(ctx, ws, "localhost:80", "TESTBRIDGEID0003")
+	listenerID, err := sendEnvelopeAndCheck(ctx, ws, "localhost:80", "TESTBRIDGEID0003")
 	if err == nil {
 		t.Fatal("expected error for invalid JSON response, got nil")
+	}
+	if listenerID != "" {
+		t.Errorf("listenerID = %q, want empty string when response failed to parse", listenerID)
 	}
 	if !strings.Contains(err.Error(), "parse response") {
 		t.Errorf("error %q does not contain %q", err.Error(), "parse response")
 	}
+}
+
+// --- logRejection / logAccept tests ---
+
+// TestLogRejection asserts the rejection log shape branches correctly
+// on error type and omits empty attributes. Operator-visible
+// behaviour: a real listener rejection is logged as "listener refused
+// connection" with the listener_id and classification code from the
+// wire; a transport/parse failure is logged as "envelope exchange
+// failed" without a listener_id (since none was ever received).
+// Empty listener_id and empty code attributes are not emitted.
+func TestLogRejection(t *testing.T) {
+	tests := []struct {
+		name          string
+		listenerID    string
+		err           error
+		wantMsg       string
+		wantInLine    []string
+		wantNotInLine []string
+	}{
+		{
+			name:       "connectRejected-with-code",
+			listenerID: "deadbeefcafef00d",
+			err:        &connectRejected{Message: "refused", Code: "connection_refused", ListenerID: "deadbeefcafef00d"},
+			wantMsg:    "listener refused connection",
+			wantInLine: []string{
+				"target=target.example:22",
+				"listener_id=deadbeefcafef00d",
+				"code=connection_refused",
+			},
+		},
+		{
+			name:       "connectRejected-without-code",
+			listenerID: "deadbeefcafef00d",
+			err:        &connectRejected{Message: "denied", ListenerID: "deadbeefcafef00d"},
+			wantMsg:    "listener refused connection",
+			wantInLine: []string{
+				"target=target.example:22",
+				"listener_id=deadbeefcafef00d",
+			},
+			wantNotInLine: []string{"code="},
+		},
+		{
+			name:       "connectRejected-no-listener-id",
+			listenerID: "",
+			err:        &connectRejected{Message: "denied"},
+			wantMsg:    "listener refused connection",
+			wantInLine: []string{
+				"target=target.example:22",
+			},
+			wantNotInLine: []string{"listener_id=", "code="},
+		},
+		{
+			name:       "transport-failure-no-listener-id",
+			listenerID: "",
+			err:        errors.New("read response: timeout"),
+			wantMsg:    "envelope exchange failed",
+			wantInLine: []string{
+				"target=target.example:22",
+				`error="read response: timeout"`,
+			},
+			wantNotInLine: []string{"listener_id="},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+			logRejection(logger, "target.example:22", tt.listenerID, tt.err)
+
+			line := buf.String()
+			if !strings.Contains(line, tt.wantMsg) {
+				t.Errorf("log line missing message %q\n  got: %s", tt.wantMsg, line)
+			}
+			for _, want := range tt.wantInLine {
+				if !strings.Contains(line, want) {
+					t.Errorf("log line missing %q\n  got: %s", want, line)
+				}
+			}
+			for _, unwanted := range tt.wantNotInLine {
+				if strings.Contains(line, unwanted) {
+					t.Errorf("log line should not contain %q\n  got: %s", unwanted, line)
+				}
+			}
+			if !strings.Contains(line, "level=WARN") {
+				t.Errorf("log line not at WARN level\n  got: %s", line)
+			}
+		})
+	}
+}
+
+// TestLogAccept asserts the accept log shape: listener_id is included
+// when non-empty and omitted otherwise. Mixed-version operators
+// reading sender logs should not see a misleading empty listener_id
+// attribute when the listener pre-dates the field.
+func TestLogAccept(t *testing.T) {
+	t.Run("with-listener-id", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		logAccept(logger, "target.example:22", "deadbeefcafef00d")
+		line := buf.String()
+		if !strings.Contains(line, "listener accepted connection") {
+			t.Errorf("missing message: %s", line)
+		}
+		if !strings.Contains(line, "listener_id=deadbeefcafef00d") {
+			t.Errorf("missing listener_id: %s", line)
+		}
+	})
+	t.Run("empty-listener-id-omitted", func(t *testing.T) {
+		var buf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		logAccept(logger, "target.example:22", "")
+		line := buf.String()
+		if !strings.Contains(line, "listener accepted connection") {
+			t.Errorf("missing message: %s", line)
+		}
+		if strings.Contains(line, "listener_id=") {
+			t.Errorf("listener_id should be omitted when empty:\n  got: %s", line)
+		}
+	})
 }
