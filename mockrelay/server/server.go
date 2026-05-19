@@ -92,10 +92,18 @@ const (
 
 // Server is a relay server. Use NewServer to construct one and pass
 // Handler() to an http.Server (or http.ListenAndServe) to serve.
+//
+// Server is intended to be allocated once and accessed through a
+// *Server; do not copy the value (the embedded faults struct holds
+// atomics that go vet would flag on copy).
 type Server struct {
 	cfg Config
 	hub *hub
 	log *slog.Logger
+	// faults holds fault-injection state set via NewServerForTesting.
+	// Zero value means no faults active; the production NewServer
+	// constructor never touches it.
+	faults faults
 }
 
 // NewServer constructs a Server with the given config. It validates the

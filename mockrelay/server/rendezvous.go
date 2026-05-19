@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -214,6 +215,19 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity st
 // goroutine never took ownership (which can happen if the
 // RendezvousTimeout fires concurrently with the claim).
 func (s *Server) handleAccept(w http.ResponseWriter, r *http.Request, entity, id string) {
+	// Fault injection: optionally sleep before completing the upgrade.
+	// Applied to every accept for the lifetime of the Server. Honors
+	// the request context so server shutdown is not blocked on a
+	// pending delay.
+	if d := time.Duration(s.faults.acceptDelay.Load()); d > 0 {
+		t := time.NewTimer(d)
+		select {
+		case <-t.C:
+		case <-r.Context().Done():
+			t.Stop()
+			return
+		}
+	}
 	pending := s.hub.takePending(entity, id)
 	if pending == nil {
 		http.Error(w, "unknown rendezvous id", http.StatusNotFound)
@@ -226,6 +240,17 @@ func (s *Server) handleAccept(w http.ResponseWriter, r *http.Request, entity, id
 	if err != nil {
 		s.log.Warn("listener-rendezvous upgrade failed", "entity", entity, "id", id, "error", err)
 		pending.abort()
+		return
+	}
+	// Fault injection: emit a configurable close code on the next
+	// accept. Single-shot; consumed via Swap(0). We abort the pending
+	// entry BEFORE the close handshake so any concurrent sender
+	// goroutine waking on pending.ready exits immediately rather than
+	// waiting for our Close to drain.
+	if code := s.faults.closeCodeOnAccept.Swap(0); code != 0 {
+		s.log.Debug("fault: closing accept-side WS with code", "entity", entity, "id", id, "code", code)
+		pending.abort()
+		_ = listenerWS.Close(websocket.StatusCode(code), "fault: close on accept")
 		return
 	}
 	listenerWS.SetReadLimit(bridgeReadLimit)
