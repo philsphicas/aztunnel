@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/philsphicas/aztunnel/internal/idgen"
 )
 
 const (
@@ -87,6 +89,21 @@ func ListenAndServe(ctx context.Context, cfg ControlConfig) error {
 }
 
 func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err error) {
+	// Bind a fresh control_session_id onto the per-session logger
+	// before any work that could log: token fetch, dial, and the
+	// per-loop helpers (renewLoop, pingLoop) all log against this
+	// logger so operators can mechanically separate the lines from
+	// one control-loop run from the lines of the next.
+	//
+	// The outer reconnect loop in ListenAndServe keeps using
+	// cfg.Logger directly, so its "control channel disconnected,
+	// reconnecting" line stays out of any session — that line marks
+	// the boundary between sessions and is intentionally untagged.
+	sessionID := idgen.NewControlSessionID()
+	logger := cfg.Logger.With("control_session_id", sessionID)
+	logger.Info("control loop started")
+	defer logger.Info("control loop ended")
+
 	resURI := ResourceURI(cfg.Endpoint, cfg.EntityPath)
 	token, err := cfg.TokenProvider.GetToken(ctx, resURI)
 	if err != nil {
@@ -105,7 +122,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 	}
 	defer func() { _ = ws.CloseNow() }()
 
-	cfg.Logger.Info("control channel connected", "entityPath", cfg.EntityPath)
+	logger.Info("control channel connected", "entityPath", cfg.EntityPath)
 	if cfg.OnConnect != nil {
 		cfg.OnConnect()
 	}
@@ -123,14 +140,14 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		renewLoop(loopCtx, ws, resURI, cfg.TokenProvider, cfg.Logger, loopCancel)
+		renewLoop(loopCtx, ws, resURI, cfg.TokenProvider, logger, loopCancel)
 	}()
 
 	// Ping heartbeat goroutine.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pingLoop(loopCtx, ws, cfg.Logger, loopCancel)
+		pingLoop(loopCtx, ws, logger, loopCancel)
 	}()
 
 	// Read accept messages from the control channel.
@@ -148,7 +165,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 			} `json:"accept"`
 		}
 		if err := json.Unmarshal(data, &msg); err != nil {
-			cfg.Logger.Warn("invalid control message", "error", err)
+			logger.Warn("invalid control message", "error", err)
 			continue
 		}
 		if msg.Accept == nil {
@@ -156,7 +173,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 		}
 
 		if !sem.tryAcquire(loopCtx) {
-			cfg.Logger.Warn("max connections reached, dropping accept")
+			logger.Warn("max connections reached, dropping accept")
 			continue
 		}
 
@@ -165,7 +182,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 			defer wg.Done()
 			defer sem.release()
 			if err := handleAccept(loopCtx, addr, cfg); err != nil {
-				cfg.Logger.Warn("accept failed", "error", err)
+				logger.Warn("accept failed", "error", err)
 			}
 		}(msg.Accept.Address)
 	}

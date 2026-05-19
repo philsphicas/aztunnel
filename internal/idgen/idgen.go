@@ -28,6 +28,26 @@ const bridgeIDBytes = 10
 // pollute the public API for a failure mode callers cannot recover
 // from.
 func NewBridgeID() string {
+	return newID()
+}
+
+// NewControlSessionID returns a fresh, opaque correlation ID for a
+// single run of the relay control loop. Callers bind the result onto
+// their slog logger with `logger.With("control_session_id", id)` so
+// every log line emitted during the session carries the tag — when
+// the control channel dies and a fresh loop starts, the next call
+// mints a new id, letting operators mechanically split before-and-
+// after log streams. Panics on OS RNG failure (see NewBridgeID).
+func NewControlSessionID() string {
+	return newID()
+}
+
+// newID mints one 16-character base32-NoPadding identifier from
+// bridgeIDBytes bytes of crypto/rand. All public id constructors
+// share this impl because every observability id in aztunnel uses
+// the same shape — different exported names exist only so call
+// sites read at the right level of intent.
+func newID() string {
 	var b [bridgeIDBytes]byte
 	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
 		panic(fmt.Errorf("idgen: read crypto/rand: %w", err))

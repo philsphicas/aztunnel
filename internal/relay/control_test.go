@@ -918,3 +918,204 @@ func TestListenAndServe(t *testing.T) {
 		}
 	})
 }
+
+// ---------- TestControlSessionID ----------
+
+// captureLogger returns a slog logger that writes JSON records to the
+// returned recorder. Records are returned in the order they were
+// emitted; the recorder is safe for concurrent writers.
+type logRecorder struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (r *logRecorder) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	r.buf = append(r.buf, p...)
+	r.mu.Unlock()
+	return len(p), nil
+}
+
+func (r *logRecorder) records(t *testing.T) []map[string]any {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	lines := strings.Split(strings.TrimRight(string(r.buf), "\n"), "\n")
+	out := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("non-JSON log line: %q: %v", line, err)
+		}
+		out = append(out, rec)
+	}
+	return out
+}
+
+func captureLogger() (*slog.Logger, *logRecorder) {
+	rec := &logRecorder{}
+	return slog.New(slog.NewJSONHandler(rec, &slog.HandlerOptions{Level: slog.LevelDebug})), rec
+}
+
+// drivenControlLoop spins up a TLS test relay that accepts one
+// rendezvous request then closes the control WebSocket, and runs
+// runControlLoop with the supplied logger. The caller wires a
+// logRecorder behind the logger to capture every log line emitted
+// from the per-session function.
+func drivenControlLoop(t *testing.T, logger *slog.Logger) {
+	t.Helper()
+
+	rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	rendezvousAddr := "wss://" + testEndpoint(rendezvousSrv)
+
+	handlerDone := make(chan struct{}, 1)
+	controlSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		msg := map[string]interface{}{
+			"accept": map[string]interface{}{
+				"address": rendezvousAddr,
+				"id":      "session-id-test",
+			},
+		}
+		data, _ := json.Marshal(msg)
+		if err := ws.Write(r.Context(), websocket.MessageText, data); err != nil {
+			return
+		}
+		// Wait until the listener's handler has been invoked, then
+		// close so runControlLoop returns. Bounded so a stuck
+		// handler can't hang the test indefinitely.
+		select {
+		case <-handlerDone:
+		case <-time.After(3 * time.Second):
+		}
+		ws.Close(websocket.StatusNormalClosure, "done")
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cfg := ControlConfig{
+		Endpoint:      testEndpoint(controlSrv),
+		EntityPath:    "test-entity",
+		TokenProvider: &mockTokenProvider{token: "test-token"},
+		Handler: func(ctx context.Context, ws *websocket.Conn) {
+			select {
+			case handlerDone <- struct{}{}:
+			default:
+			}
+		},
+		DialTimeout: 2 * time.Second,
+		Logger:      logger,
+	}
+
+	_, err := runControlLoop(ctx, cfg)
+	if err == nil {
+		t.Fatal("expected error from runControlLoop when server closes")
+	}
+}
+
+// TestControlSessionID_StableWithinLoop drives one runControlLoop
+// invocation end-to-end (connect → one accept → server-initiated
+// close), captures every log line, and asserts that:
+//
+//   - every record carries a non-empty control_session_id;
+//   - every record carries the SAME control_session_id;
+//   - the canonical lifecycle lines ("control loop started",
+//     "control channel connected", "control loop ended") are all
+//     present and tagged.
+//
+// This is the per-session invariant operators rely on to mechanically
+// separate one control-loop run from the next.
+func TestControlSessionID_StableWithinLoop(t *testing.T) {
+	useInsecureTransport(t)
+
+	logger, rec := captureLogger()
+	drivenControlLoop(t, logger)
+
+	records := rec.records(t)
+	if len(records) < 3 {
+		t.Fatalf("expected at least 3 log records (started + connected + ended), got %d: %s", len(records), string(rec.buf))
+	}
+
+	var sessionID string
+	for i, r := range records {
+		id, _ := r["control_session_id"].(string)
+		if id == "" {
+			t.Errorf("record %d missing control_session_id: %v", i, r)
+			continue
+		}
+		if sessionID == "" {
+			sessionID = id
+		} else if id != sessionID {
+			t.Errorf("record %d has control_session_id=%q, want %q", i, id, sessionID)
+		}
+	}
+
+	wantMsgs := []string{"control loop started", "control channel connected", "control loop ended"}
+	for _, want := range wantMsgs {
+		found := false
+		for _, r := range records {
+			if msg, _ := r["msg"].(string); msg == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing lifecycle log line %q in captured output:\n%s", want, string(rec.buf))
+		}
+	}
+}
+
+// TestControlSessionID_ChangesAcrossRestarts drives runControlLoop
+// twice in sequence — each invocation captures into its own buffer —
+// and asserts the two minted control_session_id values differ. This
+// is the cross-restart invariant: every reconnect gets a fresh id so
+// operators can tell "before the disconnect" from "after the
+// disconnect" log streams.
+func TestControlSessionID_ChangesAcrossRestarts(t *testing.T) {
+	useInsecureTransport(t)
+
+	logger1, rec1 := captureLogger()
+	drivenControlLoop(t, logger1)
+	id1 := extractSessionID(t, rec1)
+
+	logger2, rec2 := captureLogger()
+	drivenControlLoop(t, logger2)
+	id2 := extractSessionID(t, rec2)
+
+	if id1 == "" || id2 == "" {
+		t.Fatalf("missing ids: id1=%q id2=%q", id1, id2)
+	}
+	if id1 == id2 {
+		t.Fatalf("expected distinct control_session_id across runs, got %q twice", id1)
+	}
+}
+
+func extractSessionID(t *testing.T, rec *logRecorder) string {
+	t.Helper()
+	for _, r := range rec.records(t) {
+		if id, _ := r["control_session_id"].(string); id != "" {
+			return id
+		}
+	}
+	t.Fatalf("no control_session_id in captured records: %s", string(rec.buf))
+	return ""
+}
