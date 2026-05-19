@@ -58,6 +58,11 @@ type Provider struct {
 // I/O — the ARM client is constructed eagerly but no requests are
 // issued until the first Provision call.
 //
+// cfg.RunRules must be non-nil — call AcquireRunRules first to
+// populate it (TestMain pattern). Per-pair Provision does not create
+// SAS rules; it stamps RunRules.{Listener,Sender}{Name,Key} onto every
+// PairToken Result.
+//
 // If cfg.Cred is nil, NewProvider constructs a DefaultAzureCredential.
 // If cfg.ClientOptions is nil, NewProvider applies a per-test-tuned
 // retry policy (DefaultARMMaxRetries / DefaultARMMaxRetryDelay) so
@@ -66,6 +71,9 @@ type Provider struct {
 func NewProvider(cfg Config) (*Provider, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
+	}
+	if cfg.RunRules == nil {
+		return nil, errors.New("azrelay.Config.RunRules is required (call AcquireRunRules first)")
 	}
 	cred := cfg.Cred
 	if cred == nil {
@@ -111,11 +119,12 @@ func DefaultClientOptions() *arm.ClientOptions {
 	}
 }
 
-// Provision creates a fresh (entra, sas) hybrid-connection pair using
-// the same sequence as Provisioner.Provision: create entra hyco,
-// create sas hyco, attach Listen + Send authorization rules to the
-// sas hyco, read both SAS keys, and let the data plane settle. The
-// returned PairToken's Teardown method releases both hycos.
+// Provision creates a fresh (entra, sas) hybrid-connection pair via
+// Provisioner: create entra hyco, create sas hyco. The returned
+// PairToken's Result is stamped with the namespace-scoped SAS rule
+// key info from p.cfg.RunRules. Teardown deletes both hycos; the
+// shared run-scoped rules live on past every PairToken and are
+// torn down by RunRules.Teardown from TestMain.
 //
 // Provision blocks if the concurrency semaphore is full. The block
 // honours ctx.Done so callers (typically t.Cleanup-registered)
@@ -148,6 +157,9 @@ func (p *Provider) Provision(ctx context.Context) (*PairToken, error) {
 		suffix:   suffix,
 		deleteFn: func(ctx context.Context, name string) error {
 			_, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, name, nil)
+			if err != nil && isNotFound(err) {
+				return nil
+			}
 			return err
 		},
 	}, nil
@@ -214,8 +226,10 @@ func (t *PairToken) HycoNames() (entra, sas string) {
 // wave of test cleanups cannot stampede the relay control plane and
 // exhaust the namespace 429 envelope. If the slot acquire fails
 // (e.g. the deadline expires while the sem is saturated) Teardown
-// proceeds without the slot rather than orphan the hyco — the
-// janitor will reap anything we leak.
+// still attempts the deletes without the slot rather than skip them
+// outright; in that case the deadline is already past, so the
+// deletes will most likely also fail and the hycos will leak. The
+// janitor reaps anything left behind.
 //
 // Individual delete failures are joined and returned. The janitor
 // will also reap anything we can't clean up here.

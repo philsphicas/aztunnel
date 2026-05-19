@@ -42,10 +42,12 @@ type authConfig struct {
 
 // hycoProvisionTimeout bounds a single Provider.Provision call from
 // requireDedicatedHyco. The provisioner already retries 429s and
-// transient 5xx through azcore (MaxRetries=6, MaxRetryDelay=60s) and
-// 40901 conflicts through retryOnAuthRuleConflict; this ceiling
-// stops a genuinely stuck control plane from hanging the test until
-// the suite-wide go-test -timeout fires.
+// transient 5xx through azcore (MaxRetries=6, MaxRetryDelay=60s); per-
+// pair provisioning no longer mutates authorization rules, so the
+// 40901 retry loop in retryOnAuthRuleConflict is only paid once per
+// `go test` invocation (by AcquireRunRules), not per Provision. This
+// ceiling stops a genuinely stuck control plane from hanging the test
+// until the suite-wide go-test -timeout fires.
 const hycoProvisionTimeout = 3 * time.Minute
 
 // hycoTeardownTimeout bounds the t.Cleanup-registered Teardown call.
@@ -228,6 +230,26 @@ func drainBenchLease() {
 	entra, sas := tok.HycoNames()
 	if err := tok.Teardown(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco pair %s/%s: %v\n", entra, sas, err)
+	}
+}
+
+// requireAuth skips the calling test if E2E_AUTH is set to a value that
+// excludes the given auth method ("entra" or "sas"). This is used by
+// tests that are intrinsically tied to a single auth method (e.g. the
+// SAS-specific TestSASKeyAuth, TestBadSASKey, TestBadSASKeySender,
+// TestWrongSASClaim) so a contributor running with E2E_AUTH=entra
+// genuinely skips the SAS suite instead of running SAS-only assertions
+// against unfiltered fixtures.
+func requireAuth(t testing.TB, name string) {
+	t.Helper()
+	filter := os.Getenv("E2E_AUTH")
+	switch filter {
+	case "", name:
+		return
+	case "entra", "sas":
+		t.Skipf("E2E_AUTH=%q excludes %q", filter, name)
+	default:
+		t.Fatalf("unsupported E2E_AUTH value %q; expected \"entra\", \"sas\", or \"\" (both)", filter)
 	}
 }
 

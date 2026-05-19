@@ -34,13 +34,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/relay/armrelay"
 )
 
-// Names of the SAS authorization rules created on the SAS hyco. The names
-// are scoped to a single hyco so global uniqueness is not a concern.
-const (
-	ListenerRuleName = "listener"
-	SenderRuleName   = "sender"
-)
-
 // HycoNamePattern matches per-invocation hybrid connection names created by
 // this package. The janitor uses this exact pattern (anchored) to identify
 // orphaned hycos that should be cleaned up.
@@ -52,21 +45,21 @@ var HycoNamePattern = regexp.MustCompile(`^e2e-(entra|sas)-[0-9a-f]{12}$`)
 // for any realistic CI volume.
 const suffixLen = 12
 
-// readinessMaxWait bounds how long Provision will retry reading the SAS
-// keys after creating the auth rules. ARM propagation is normally well
-// under a second; we allow more to absorb the occasional regional blip
-// without forcing tests to handle the transient 404 themselves.
+// readinessMaxWait bounds how long readKey will retry ListKeys after a
+// rule create. ARM propagation is normally well under a second; we allow
+// more to absorb the occasional regional blip without forcing tests to
+// handle the transient 404 themselves.
 const readinessMaxWait = 30 * time.Second
 
-// Bounds on the createRule / bestEffortDelete retry loop that absorbs the
-// transient 40901 MessagingGatewayTooManyRequests conflict produced when
-// Azure Relay's control plane serialises authorizationRule mutations per
-// hybrid connection: the ARM SDK returns 2xx for one mutation before the
-// backend has committed it, so a back-to-back mutation on the same hyco
-// (e.g. listener-rule then sender-rule, or delete-during-pending-create)
-// can race the per-hyco serialization gate and get rejected with 40901.
-// This is the same constraint that requires `@batchSize(1)` in Bicep on
-// Microsoft.Relay/namespaces/hybridConnections/authorizationRules.
+// Bounds on the createRule / bestEffortDelete retry loop that absorbs
+// the transient 40901 MessagingGatewayTooManyRequests conflict produced
+// when Azure Relay's control plane serialises authorizationRule
+// mutations per scope: the ARM SDK returns 2xx for one mutation before
+// the backend has committed it, so a back-to-back mutation on the same
+// scope (e.g. listener-rule then sender-rule create at namespace scope,
+// or delete-during-pending-create) can race the per-scope serialization
+// gate and get rejected with 40901. This is the same constraint that
+// requires `@batchSize(1)` in Bicep on Microsoft.Relay/.../authorizationRules.
 //
 // Six attempts with equal-jittered exponential backoff (500ms → 8s, cap)
 // is comfortably more than empirically observed convergence (sub-second)
@@ -74,22 +67,12 @@ const readinessMaxWait = 30 * time.Second
 // rather than hanging. Note: the underlying azcore HTTP pipeline already
 // retries 429s a small number of times honouring Retry-After before
 // surfacing the error here, so the real cumulative wall time of a fully
-// exhausted createRule call is larger than ~15.5s of sleep alone — the
-// 30s ceiling in bestEffortDelete still dominates that path.
+// exhausted createRule call is larger than ~15.5s of sleep alone.
 const (
 	authRuleMaxAttempts  = 6
 	authRuleInitialDelay = 500 * time.Millisecond
 	authRuleMaxDelay     = 8 * time.Second
 )
-
-// dataPlaneSettleAfterKeys gives Relay's data plane a brief grace period
-// to propagate a newly-created SAS auth rule after the control plane
-// (ListKeys) has acknowledged it. Without this, the very first sender
-// or listener handshake using a fresh key can observe a 401 before the
-// rule has converged across the data-plane nodes. Empirically a sub-
-// second wait suffices; 2 seconds adds a comfortable margin without
-// noticeably slowing the suite.
-const dataPlaneSettleAfterKeys = 2 * time.Second
 
 // Config describes which Azure subscription / resource group / namespace
 // the provisioner should create hycos in. All fields are required.
@@ -112,6 +95,12 @@ type Config struct {
 	// calls. Zero applies DefaultProvisionerConcurrency. Ignored by
 	// the single-use Provisioner type (it serialises by construction).
 	Concurrency int
+
+	// RunRules supplies the run-scoped namespace SAS rules whose keys
+	// every PairToken Result stamps onto its ListenerKey/SenderKey
+	// fields. Required for NewProvider and Provisioner; AcquireRunRules
+	// populates it.
+	RunRules *RunRules
 }
 
 // Result holds the data needed by tests to connect to the freshly-created
@@ -185,14 +174,21 @@ func New(cfg Config) (*Provisioner, error) {
 	return &Provisioner{cfg: cfg, hycos: hycos, suffix: suffix}, nil
 }
 
-// Provision creates the Entra and SAS hybrid connections, creates listener
-// and sender authorization rules on the SAS hyco, fetches the SAS keys, and
-// returns the resulting connection metadata. If any step fails after a
-// hyco has been created, Provision attempts a best-effort teardown before
-// returning the error so the caller does not need to handle partial state.
+// Provision creates the Entra and SAS hybrid connections and stamps the
+// run-scoped SAS rule key info from cfg.RunRules onto the returned
+// Result. If any step fails after a hyco has been created, Provision
+// attempts a best-effort teardown before returning the error so the
+// caller does not need to handle partial state.
+//
+// Authorization rules are NOT created here — they live at namespace
+// scope and are provisioned once per `go test` invocation via
+// AcquireRunRules. cfg.RunRules must be non-nil.
 func (p *Provisioner) Provision(ctx context.Context) (*Result, error) {
 	if p.result != nil {
 		return nil, errors.New("provisioner already used")
+	}
+	if p.cfg.RunRules == nil {
+		return nil, errors.New("azrelay.Config.RunRules is required (call AcquireRunRules first)")
 	}
 
 	entraName := "e2e-entra-" + p.suffix
@@ -211,47 +207,15 @@ func (p *Provisioner) Provision(ctx context.Context) (*Result, error) {
 		return nil, fmt.Errorf("create %s: %w", sasName, err)
 	}
 
-	if err := p.createRule(ctx, sasName, ListenerRuleName, armrelay.AccessRightsListen); err != nil {
-		p.bestEffortDelete(ctx, entraName)
-		p.bestEffortDelete(ctx, sasName)
-		return nil, fmt.Errorf("create %s/%s rule: %w", sasName, ListenerRuleName, err)
-	}
-	if err := p.createRule(ctx, sasName, SenderRuleName, armrelay.AccessRightsSend); err != nil {
-		p.bestEffortDelete(ctx, entraName)
-		p.bestEffortDelete(ctx, sasName)
-		return nil, fmt.Errorf("create %s/%s rule: %w", sasName, SenderRuleName, err)
-	}
-
-	listenerKey, err := p.readKey(ctx, sasName, ListenerRuleName)
-	if err != nil {
-		p.bestEffortDelete(ctx, entraName)
-		p.bestEffortDelete(ctx, sasName)
-		return nil, fmt.Errorf("read %s/%s key: %w", sasName, ListenerRuleName, err)
-	}
-	senderKey, err := p.readKey(ctx, sasName, SenderRuleName)
-	if err != nil {
-		p.bestEffortDelete(ctx, entraName)
-		p.bestEffortDelete(ctx, sasName)
-		return nil, fmt.Errorf("read %s/%s key: %w", sasName, SenderRuleName, err)
-	}
-
-	// Brief data-plane settle window — see dataPlaneSettleAfterKeys.
-	select {
-	case <-ctx.Done():
-		p.bestEffortDelete(ctx, entraName)
-		p.bestEffortDelete(ctx, sasName)
-		return nil, ctx.Err()
-	case <-time.After(dataPlaneSettleAfterKeys):
-	}
-
+	rr := p.cfg.RunRules
 	p.result = &Result{
 		RelayName:       p.cfg.Namespace,
 		EntraHycoName:   entraName,
 		SASHycoName:     sasName,
-		ListenerKeyName: ListenerRuleName,
-		ListenerKey:     listenerKey,
-		SenderKeyName:   SenderRuleName,
-		SenderKey:       senderKey,
+		ListenerKeyName: rr.ListenerName,
+		ListenerKey:     rr.ListenerKey,
+		SenderKeyName:   rr.SenderName,
+		SenderKey:       rr.SenderKey,
 	}
 	return p.result, nil
 }
@@ -267,10 +231,8 @@ func (p *Provisioner) Provision(ctx context.Context) (*Result, error) {
 // a defensive 60s ceiling so a stuck control plane cannot hang the
 // run indefinitely.
 //
-// Note: Azure Relay's HCO Delete cascades to the SAS authorization rules
-// created on the SAS hyco — we deliberately do not delete rules
-// individually. If this is ever changed to selective rule cleanup (or
-// delete-rules-then-delete-hyco), the cascade dependency goes away.
+// Note: authorization rules are not deleted here — they live at
+// namespace scope and have a separate lifecycle owned by RunRules.
 func (p *Provisioner) Teardown(ctx context.Context) error {
 	if p.result == nil {
 		return nil
@@ -279,10 +241,10 @@ func (p *Provisioner) Teardown(ctx context.Context) error {
 	defer cancel()
 
 	var errs []error
-	if _, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, p.result.EntraHycoName, nil); err != nil {
+	if _, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, p.result.EntraHycoName, nil); err != nil && !isNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete %s: %w", p.result.EntraHycoName, err))
 	}
-	if _, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, p.result.SASHycoName, nil); err != nil {
+	if _, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, p.result.SASHycoName, nil); err != nil && !isNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete %s: %w", p.result.SASHycoName, err))
 	}
 	if len(errs) > 0 {
@@ -307,57 +269,12 @@ func (p *Provisioner) createHyco(ctx context.Context, name string) error {
 	return err
 }
 
-func (p *Provisioner) createRule(ctx context.Context, hyco, ruleName string, right armrelay.AccessRights) error {
-	return retryOnAuthRuleConflict(ctx, defaultAuthRuleRetry(), func() error {
-		_, err := p.hycos.CreateOrUpdateAuthorizationRule(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, hyco, ruleName, armrelay.AuthorizationRule{
-			Properties: &armrelay.AuthorizationRuleProperties{
-				Rights: []*armrelay.AccessRights{&right},
-			},
-		}, nil)
-		return err
-	})
-}
-
-// readKey fetches the primary key for the given auth rule, retrying on
-// transient 404s that occasionally follow rule creation. The retry budget
-// is bounded by readinessMaxWait.
-func (p *Provisioner) readKey(ctx context.Context, hyco, ruleName string) (string, error) {
-	deadline := time.Now().Add(readinessMaxWait)
-	var lastErr error
-	for {
-		resp, err := p.hycos.ListKeys(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, hyco, ruleName, nil)
-		if err == nil {
-			if resp.PrimaryKey == nil {
-				return "", errors.New("ListKeys returned nil PrimaryKey")
-			}
-			return *resp.PrimaryKey, nil
-		}
-		lastErr = err
-		if !isTransient(err) {
-			return "", err
-		}
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("ListKeys timed out after %s: %w", readinessMaxWait, lastErr)
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-}
-
 func (p *Provisioner) bestEffortDelete(ctx context.Context, name string) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	// Failure-path cleanup can race a not-yet-committed rule create on the
-	// same hyco; absorb the 40901 conflict the same way createRule does so
-	// we maximise cleanup success and reduce janitor load. Other errors
-	// (404, 403, ...) are swallowed by best-effort semantics.
-	_ = retryOnAuthRuleConflict(ctx, defaultAuthRuleRetry(), func() error {
-		_, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, name, nil)
-		return err
-	})
+	// Failure-path cleanup; other errors (404, 403, ...) are swallowed
+	// by best-effort semantics.
+	_, _ = p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, name, nil)
 }
 
 // newSuffix returns a fresh suffixLen-character lowercase hex string.
@@ -385,6 +302,20 @@ func defaultAuthRuleRetry() authRuleRetry {
 		initialDelay: authRuleInitialDelay,
 		maxDelay:     authRuleMaxDelay,
 	}
+}
+
+// RetryOnAuthRuleConflict invokes fn, retrying with the package's
+// default backoff schedule while fn returns a transient Azure Relay
+// 40901 conflict on an authorizationRule mutation. Any other error —
+// including generic 429s — is returned to the caller immediately.
+// The function honours ctx cancellation between retries.
+//
+// Exposed for use by callers outside this package that mutate the same
+// Microsoft.Relay authorizationRules scope (e.g. the janitor's
+// sweep-and-delete loop), so they share the same retry envelope as
+// AcquireRunRules / RunRules.Teardown.
+func RetryOnAuthRuleConflict(ctx context.Context, fn func() error) error {
+	return retryOnAuthRuleConflict(ctx, defaultAuthRuleRetry(), fn)
 }
 
 // retryOnAuthRuleConflict invokes fn, retrying with jittered exponential
@@ -424,11 +355,13 @@ func retryOnAuthRuleConflict(ctx context.Context, cfg authRuleRetry, fn func() e
 
 // isAuthRuleConflict reports whether err is the transient Azure Relay
 // 40901 MessagingGatewayTooManyRequests conflict produced when sequential
-// authorizationRule mutations race the per-hybrid-connection serialization
-// gate. Only this specific class is retried; generic 429s, other ARM
-// errors, and other SubCodes under the same ErrorCode (e.g. namespace-
-// level throttling that wouldn't benefit from short-window backoff
-// against a single hyco's commit window) are returned as-is.
+// authorizationRule mutations race the per-scope serialization gate
+// (where "scope" is either a hybrid connection or — for run-scoped
+// rules — the namespace itself). Only this specific class is retried;
+// generic 429s, other ARM errors, and other SubCodes under the same
+// ErrorCode (e.g. namespace-level throttling that wouldn't benefit
+// from short-window backoff against a single rule's commit window)
+// are returned as-is.
 //
 // The SubCode marker is matched against ResponseError.Error() — azcore
 // embeds the raw response body in that string, and the body is the

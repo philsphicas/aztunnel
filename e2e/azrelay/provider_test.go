@@ -21,9 +21,10 @@ func TestNewProvider_RejectsBadConfig(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		{"missing subscription", Config{ResourceGroup: "rg", Namespace: "ns"}, "SubscriptionID"},
-		{"missing resource group", Config{SubscriptionID: "sub", Namespace: "ns"}, "ResourceGroup"},
-		{"missing namespace", Config{SubscriptionID: "sub", ResourceGroup: "rg"}, "Namespace"},
+		{"missing subscription", Config{ResourceGroup: "rg", Namespace: "ns", RunRules: stubRunRules()}, "SubscriptionID"},
+		{"missing resource group", Config{SubscriptionID: "sub", Namespace: "ns", RunRules: stubRunRules()}, "ResourceGroup"},
+		{"missing namespace", Config{SubscriptionID: "sub", ResourceGroup: "rg", RunRules: stubRunRules()}, "Namespace"},
+		{"missing run rules", Config{SubscriptionID: "sub", ResourceGroup: "rg", Namespace: "ns"}, "RunRules"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,6 +45,7 @@ func TestNewProvider_DefaultsConcurrencyAndClientOptions(t *testing.T) {
 		ResourceGroup:  "rg",
 		Namespace:      "ns",
 		Cred:           stubCred{},
+		RunRules:       stubRunRules(),
 	})
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
@@ -60,6 +62,7 @@ func TestNewProvider_HonoursExplicitConcurrency(t *testing.T) {
 		Namespace:      "ns",
 		Cred:           stubCred{},
 		Concurrency:    2,
+		RunRules:       stubRunRules(),
 	})
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)
@@ -123,9 +126,9 @@ func TestProvider_AcquireRespectsConcurrencyLimit(t *testing.T) {
 // never exceeds the cap. Surfaces a bug where the semaphore is sized
 // or used incorrectly more reliably than a single-goroutine test.
 func TestProvider_AcquireSerialisesBeyondCap(t *testing.T) {
-	const cap = 2
+	const semSize = 2
 	const goroutines = 8
-	p := &Provider{sem: make(chan struct{}, cap)}
+	p := &Provider{sem: make(chan struct{}, semSize)}
 
 	var inflight atomic.Int64
 	var peak atomic.Int64
@@ -153,8 +156,8 @@ func TestProvider_AcquireSerialisesBeyondCap(t *testing.T) {
 	}
 	wg.Wait()
 
-	if got := peak.Load(); got > int64(cap) {
-		t.Fatalf("peak in-flight = %d, want <= %d (semaphore breach)", got, cap)
+	if got := peak.Load(); got > int64(semSize) {
+		t.Fatalf("peak in-flight = %d, want <= %d (semaphore breach)", got, semSize)
 	}
 }
 

@@ -10,7 +10,9 @@
 //	clean      — Delete the resource group (and everything in it)
 //	grant      — Grant Azure Relay Owner to a principal
 //	env        — Print the env vars required to run e2e tests locally
-//	janitor    — Delete orphan e2e-{entra,sas}-<hex> hycos older than --max-age
+//	janitor    — Delete orphan e2e-{entra,sas}-<hex> hycos AND
+//	             e2e-run-<hex>-{listener,sender} namespace SAS rules
+//	             older than --max-age
 package main
 
 import (
@@ -39,7 +41,7 @@ var CLI struct {
 	Clean   CleanCmd   `cmd:"" help:"Delete the resource group."`
 	Grant   GrantCmd   `cmd:"" help:"Grant Azure Relay Owner to a principal."`
 	Env     EnvCmd     `cmd:"" help:"Print E2E_* env vars for local test runs."`
-	Janitor JanitorCmd `cmd:"" help:"Delete orphan e2e-{entra,sas}-<hex> hybrid connections."`
+	Janitor JanitorCmd `cmd:"" help:"Delete orphan e2e-{entra,sas}-<hex> hycos AND e2e-run-<hex>-{listener,sender} namespace SAS rules."`
 }
 
 // SetupCmd creates the resource group + relay namespace and grants the
@@ -198,9 +200,10 @@ func (c *EnvCmd) Run(ctx context.Context) error {
 	return nil
 }
 
-// JanitorCmd deletes orphan per-invocation hycos older than --max-age.
+// JanitorCmd deletes orphan per-invocation hycos and per-run namespace
+// SAS rules older than --max-age.
 type JanitorCmd struct {
-	MaxAge time.Duration `name:"max-age" default:"4h" help:"Delete e2e-{entra,sas}-<hex> hycos older than this."`
+	MaxAge time.Duration `name:"max-age" default:"4h" help:"Delete e2e-{entra,sas}-<hex> hycos AND e2e-run-<hex>-{listener,sender} rules older than this."`
 	DryRun bool          `name:"dry-run" help:"Print what would be deleted without deleting."`
 }
 

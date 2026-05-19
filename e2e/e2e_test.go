@@ -15,9 +15,13 @@
 //
 // Each test provisions its own pair of ephemeral hybrid connections —
 // e2e-entra-<hex> for Entra ID auth and e2e-sas-<hex> for SAS key auth —
-// via azrelay.Provider in TestMain and tears them down via t.Cleanup. No
-// SAS keys are configured by hand; the provisioner creates the SAS
-// authorization rules and reads the listener/sender keys on the fly.
+// via azrelay.Provider in TestMain and tears them down via t.Cleanup.
+// SAS keys are not configured by hand: TestMain acquires two namespace-
+// scoped authorization rules once per `go test` invocation (Listen-only
+// and Send-only, named e2e-run-<hex>-{listener,sender}) via
+// azrelay.AcquireRunRules, and Provider.Provision stamps the resulting
+// keys onto every per-test SAS hyco. The run rules are torn down on
+// TestMain exit; the orphan janitor reaps anything left behind.
 //
 // Functional tests run against all available auth methods (entra, sas)
 // unless E2E_AUTH=entra or E2E_AUTH=sas is set to pin one.
@@ -245,13 +249,35 @@ func TestSSHProxyCommand(t *testing.T) {
 // TestSASKeyAuth verifies port-forward works with separate listener/sender SAS keys.
 func TestSASKeyAuth(t *testing.T) {
 	t.Parallel()
+	requireAuth(t, "sas")
 	env := requireDedicatedHyco(t)
-	// requireDedicatedHyco always returns a fully-populated SAS pair
-	// (Provider.Provision creates the listener+sender authorizationRules
-	// and reads their keys). The defensive check here flags a Provider
-	// contract regression rather than a contributor mis-configuration.
+	// requireDedicatedHyco always returns a fully-populated SAS pair:
+	// the per-test SAS hyco is created by Provider.Provision, and the
+	// listener/sender keys are stamped from the run-scoped namespace
+	// rules acquired once by AcquireRunRules in TestMain. The defensive
+	// check here flags a Provider contract regression rather than a
+	// contributor mis-configuration.
 	if env.sasHyco == "" || env.sasListenerKeyName == "" || env.sasListenerKey == "" || env.sasSenderKeyName == "" || env.sasSenderKey == "" {
-		t.Fatalf("provisioner returned env with empty SAS fields: %+v", env)
+		var missing []string
+		if env.sasHyco == "" {
+			missing = append(missing, "sasHyco")
+		}
+		if env.sasListenerKeyName == "" {
+			missing = append(missing, "sasListenerKeyName")
+		}
+		if env.sasListenerKey == "" {
+			missing = append(missing, "sasListenerKey")
+		}
+		if env.sasSenderKeyName == "" {
+			missing = append(missing, "sasSenderKeyName")
+		}
+		if env.sasSenderKey == "" {
+			missing = append(missing, "sasSenderKey")
+		}
+		// Report only the names of the empty fields, never the populated key
+		// values themselves — this branch shouldn't trigger in CI, but %+v
+		// of relayEnv would leak live SAS keys if it ever did.
+		t.Fatalf("provisioner returned env with empty SAS fields: %v", missing)
 	}
 
 	echo := startEchoServer(t)
@@ -1217,6 +1243,7 @@ func TestBadHycoName(t *testing.T) {
 // TestBadSASKey verifies a clean error and no key leakage for an invalid SAS key.
 func TestBadSASKey(t *testing.T) {
 	t.Parallel()
+	requireAuth(t, "sas")
 	env := requireDedicatedHyco(t)
 	if env.sasHyco == "" || env.sasListenerKeyName == "" {
 		t.Skip("SAS hyco / listener key name not configured")
@@ -1301,6 +1328,7 @@ func TestMissingRequiredArgs(t *testing.T) {
 // checking for the absence of a leak.
 func TestBadSASKeySender(t *testing.T) {
 	t.Parallel()
+	requireAuth(t, "sas")
 	env := requireDedicatedHyco(t)
 	if env.sasHyco == "" || env.sasSenderKeyName == "" {
 		t.Skip("SAS hyco / sender key name not configured")
@@ -1333,6 +1361,7 @@ func TestBadSASKeySender(t *testing.T) {
 // TestWrongSASClaim verifies that using a listener key for sending (and vice versa) fails.
 func TestWrongSASClaim(t *testing.T) {
 	t.Parallel()
+	requireAuth(t, "sas")
 	env := requireDedicatedHyco(t)
 	if env.sasHyco == "" ||
 		env.sasListenerKeyName == "" || env.sasListenerKey == "" ||
