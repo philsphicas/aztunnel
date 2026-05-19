@@ -71,7 +71,7 @@ func TestResolveAuth_NamespaceFromEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, tp, err := resolveAuth(AuthFlags{})
+	endpoint, _, tp, providerName, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -81,6 +81,9 @@ func TestResolveAuth_NamespaceFromEnv(t *testing.T) {
 	if tp == nil {
 		t.Fatal("token provider is nil")
 	}
+	if providerName != relay.ProviderSAS {
+		t.Errorf("providerName = %q, want %q", providerName, relay.ProviderSAS)
+	}
 }
 
 func TestResolveAuth_SASCredentials(t *testing.T) {
@@ -88,7 +91,7 @@ func TestResolveAuth_SASCredentials(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "RootManageSharedAccessKey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, tp, err := resolveAuth(AuthFlags{})
+	endpoint, _, tp, providerName, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -106,6 +109,9 @@ func TestResolveAuth_SASCredentials(t *testing.T) {
 	if sas.Key != "dGVzdGtleQ==" {
 		t.Errorf("Key = %q, want %q", sas.Key, "dGVzdGtleQ==")
 	}
+	if providerName != relay.ProviderSAS {
+		t.Errorf("providerName = %q, want %q", providerName, relay.ProviderSAS)
+	}
 }
 
 func TestResolveAuth_MissingNamespace(t *testing.T) {
@@ -113,7 +119,7 @@ func TestResolveAuth_MissingNamespace(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	_, _, _, err := resolveAuth(AuthFlags{})
+	_, _, _, _, err := resolveAuth(AuthFlags{})
 	if err == nil {
 		t.Fatal("expected error when namespace is missing, got nil")
 	}
@@ -127,7 +133,7 @@ func TestResolveAuth_NamespaceFlagPriority(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "from-flag"})
+	endpoint, _, _, _, err := resolveAuth(AuthFlags{Relay: "from-flag"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -141,7 +147,7 @@ func TestResolveAuth_FQDNInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{})
+	endpoint, _, _, _, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -154,7 +160,7 @@ func TestResolveAuth_URIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "sb://my-relay.servicebus.windows.net"})
+	endpoint, _, _, _, err := resolveAuth(AuthFlags{Relay: "sb://my-relay.servicebus.windows.net"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -168,7 +174,7 @@ func TestResolveAuth_CustomSuffixFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.chinacloudapi.cn"})
+	endpoint, _, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.chinacloudapi.cn"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -183,7 +189,7 @@ func TestResolveAuth_SuffixEnvVar(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{})
+	endpoint, _, _, _, err := resolveAuth(AuthFlags{})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -196,7 +202,7 @@ func TestResolveAuth_SuffixIgnoredForFQDN(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{Relay: "my-relay.servicebus.chinacloudapi.cn", RelaySuffix: ".should-be-ignored"})
+	endpoint, _, _, _, err := resolveAuth(AuthFlags{Relay: "my-relay.servicebus.chinacloudapi.cn", RelaySuffix: ".should-be-ignored"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -211,7 +217,7 @@ func TestResolveAuth_SuffixFlagPrecedenceOverEnv(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	endpoint, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.usgovcloudapi.net"})
+	endpoint, _, _, _, err := resolveAuth(AuthFlags{RelaySuffix: ".servicebus.usgovcloudapi.net"})
 	if err != nil {
 		t.Fatalf("resolveAuth: %v", err)
 	}
@@ -224,7 +230,7 @@ func TestResolveAuth_InvalidURIInput(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "dGVzdGtleQ==")
 
-	_, _, _, err := resolveAuth(AuthFlags{Relay: "sb://"})
+	_, _, _, _, err := resolveAuth(AuthFlags{Relay: "sb://"})
 	if err == nil {
 		t.Fatal("expected error for invalid URI input, got nil")
 	}
@@ -238,12 +244,15 @@ func TestResolveAuth_OnlyKeyNameNoKey(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "mykey")
 	t.Setenv("AZTUNNEL_KEY", "")
 
-	_, _, tp, err := resolveAuth(AuthFlags{})
+	_, _, tp, providerName, err := resolveAuth(AuthFlags{})
 	// Either it succeeds with Entra or fails because no Azure creds available.
 	// Either way, tp should NOT be a SASTokenProvider.
 	if err == nil {
 		if _, ok := tp.(*relay.SASTokenProvider); ok {
 			t.Error("expected non-SAS provider when only KEY_NAME is set (no KEY)")
+		}
+		if providerName != relay.ProviderEntra {
+			t.Errorf("providerName = %q, want %q", providerName, relay.ProviderEntra)
 		}
 	}
 	// If err != nil, that's expected in CI where no Azure creds are available.
@@ -254,7 +263,7 @@ func TestResolveAuth_InsecureTLSFlag(t *testing.T) {
 	t.Setenv("AZTUNNEL_KEY_NAME", "k")
 	t.Setenv("AZTUNNEL_KEY", "v")
 
-	_, opts, _, err := resolveAuth(AuthFlags{
+	_, opts, _, _, err := resolveAuth(AuthFlags{
 		Relay:            "wss://localhost:8443",
 		RelayInsecureTLS: true,
 	})
@@ -283,7 +292,7 @@ func TestResolveAuth_RejectsPlainSchemes(t *testing.T) {
 		{"ftp scheme", "ftp://relay.example.com:8443"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := resolveAuth(AuthFlags{Relay: tc.relay})
+			_, _, _, _, err := resolveAuth(AuthFlags{Relay: tc.relay})
 			if err == nil {
 				t.Fatalf("expected error for relay %q, got nil", tc.relay)
 			}

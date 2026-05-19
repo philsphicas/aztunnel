@@ -23,7 +23,7 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	endpoint, opts, tp, err := resolveAuth(s.AuthFlags)
+	endpoint, opts, tp, providerName, err := resolveAuth(s.AuthFlags)
 	if err != nil {
 		return err
 	}
@@ -57,6 +57,7 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 	if cfg.Metrics, err = resolveMetrics(ctx, globals.MetricsAddr, globals.MetricsMaxTargets, logger); err != nil {
 		return err
 	}
+	cfg.TokenProvider = observeTokenFetch(tp, cfg.Metrics, providerName)
 
 	return sender.SOCKS5Proxy(ctx, cfg)
 }

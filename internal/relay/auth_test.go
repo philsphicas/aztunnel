@@ -394,3 +394,189 @@ func TestEntraTokenProvider_RespectsRefreshOn(t *testing.T) {
 		}
 	})
 }
+
+// stubTokenProvider is a TokenProvider whose GetToken behaviour is
+// configured per-test. delay simulates underlying credential latency;
+// err, when set, replaces the token return. Used to drive
+// metricsTokenProvider through both result paths without touching the
+// real EntraTokenProvider or SASTokenProvider machinery.
+type stubTokenProvider struct {
+	delay time.Duration
+	token string
+	err   error
+}
+
+func (s *stubTokenProvider) GetToken(ctx context.Context, _ string) (string, error) {
+	if s.delay > 0 {
+		select {
+		case <-time.After(s.delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if s.err != nil {
+		return "", s.err
+	}
+	return s.token, nil
+}
+
+// recordingObserver captures every ObserveTokenFetch call. Tests inspect
+// observations directly rather than going through the full metrics
+// package — relay's contract with TokenFetchObserver is what's under
+// test here, not the metrics implementation.
+type recordingObserver struct {
+	mu           sync.Mutex
+	observations []tokenFetchObservation
+}
+
+type tokenFetchObservation struct {
+	provider    string
+	result      string
+	durationSec float64
+}
+
+func (r *recordingObserver) ObserveTokenFetch(provider, result string, durationSec float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.observations = append(r.observations, tokenFetchObservation{
+		provider:    provider,
+		result:      result,
+		durationSec: durationSec,
+	})
+}
+
+func (r *recordingObserver) snapshot() []tokenFetchObservation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]tokenFetchObservation, len(r.observations))
+	copy(out, r.observations)
+	return out
+}
+
+// TestMetricsTokenProvider_RecordsLatency_OK verifies that a successful
+// GetToken call yields one observation with result="ok" and a duration
+// that brackets the underlying provider's actual latency. The bracket is
+// loose (40-300ms for a 50ms inner delay) to absorb scheduler jitter on
+// slow CI runners without losing the property under test: the wrapper
+// records the wall-clock time spent inside the inner GetToken, not zero
+// and not the test deadline.
+func TestMetricsTokenProvider_RecordsLatency_OK(t *testing.T) {
+	const innerDelay = 50 * time.Millisecond
+	inner := &stubTokenProvider{token: "tok-ok", delay: innerDelay}
+	obs := &recordingObserver{}
+	tp := WithMetrics(inner, obs, "stub")
+
+	tok, err := tp.GetToken(context.Background(), "ignored")
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if tok != "tok-ok" {
+		t.Errorf("token = %q, want %q", tok, "tok-ok")
+	}
+
+	got := obs.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("observations = %d, want 1", len(got))
+	}
+	if got[0].provider != "stub" {
+		t.Errorf("provider = %q, want %q", got[0].provider, "stub")
+	}
+	if got[0].result != "ok" {
+		t.Errorf("result = %q, want %q", got[0].result, "ok")
+	}
+	if got[0].durationSec < 0.04 || got[0].durationSec > 0.30 {
+		t.Errorf("durationSec = %v, want in [0.04, 0.30] for %v inner delay",
+			got[0].durationSec, innerDelay)
+	}
+}
+
+// TestMetricsTokenProvider_RecordsLatency_Error verifies that a failing
+// GetToken call yields one observation with result="error", the error is
+// surfaced to the caller unchanged (errors.Is matches the sentinel), and
+// the duration still reflects the time spent inside the inner provider.
+func TestMetricsTokenProvider_RecordsLatency_Error(t *testing.T) {
+	sentinel := errors.New("boom")
+	inner := &stubTokenProvider{err: sentinel, delay: 20 * time.Millisecond}
+	obs := &recordingObserver{}
+	tp := WithMetrics(inner, obs, "stub")
+
+	_, err := tp.GetToken(context.Background(), "ignored")
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("GetToken error = %v, want wraps %v", err, sentinel)
+	}
+
+	got := obs.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("observations = %d, want 1", len(got))
+	}
+	if got[0].result != "error" {
+		t.Errorf("result = %q, want %q", got[0].result, "error")
+	}
+	if got[0].durationSec <= 0 {
+		t.Errorf("durationSec = %v, want > 0", got[0].durationSec)
+	}
+}
+
+// TestMetricsTokenProvider_LabelsCorrect verifies the provider label
+// passed to WithMetrics is what shows up on the observation. Covers both
+// the documented ProviderSAS / ProviderEntra constants and an arbitrary
+// custom string, ensuring there is no hidden allow-list of labels.
+func TestMetricsTokenProvider_LabelsCorrect(t *testing.T) {
+	for _, want := range []string{ProviderSAS, ProviderEntra, "custom"} {
+		t.Run(want, func(t *testing.T) {
+			inner := &stubTokenProvider{token: "tok"}
+			obs := &recordingObserver{}
+			tp := WithMetrics(inner, obs, want)
+			if _, err := tp.GetToken(context.Background(), "ignored"); err != nil {
+				t.Fatalf("GetToken: %v", err)
+			}
+			got := obs.snapshot()
+			if len(got) != 1 || got[0].provider != want {
+				t.Errorf("provider label = %q, want %q (observations=%#v)",
+					func() string {
+						if len(got) == 0 {
+							return ""
+						}
+						return got[0].provider
+					}(), want, got)
+			}
+		})
+	}
+}
+
+// TestWithMetrics_NilObserverPassThrough verifies that an untyped-nil
+// observer makes WithMetrics a no-op: the caller gets back the original
+// TokenProvider unchanged, so calls bypass the wrapper entirely. This
+// keeps WithMetrics safe to call from any construction pipeline that
+// may not yet have observability wired in, without forcing callers to
+// branch on a nil observer themselves.
+func TestWithMetrics_NilObserverPassThrough(t *testing.T) {
+	inner := &stubTokenProvider{token: "tok"}
+	tp := WithMetrics(inner, nil, "stub")
+	if tp != TokenProvider(inner) {
+		t.Errorf("WithMetrics(_, nil, _) should return the inner provider unchanged, got %T", tp)
+	}
+	tok, err := tp.GetToken(context.Background(), "ignored")
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
+	}
+	if tok != "tok" {
+		t.Errorf("token = %q, want %q", tok, "tok")
+	}
+}
+
+// TestMetricsTokenProvider_PreservesError verifies that the wrapper
+// returns the inner error reference unmodified (not a wrapped or copied
+// error) so errors.Is/As callers see exactly what the underlying
+// provider produced.
+func TestMetricsTokenProvider_PreservesError(t *testing.T) {
+	sentinel := errors.New("inner")
+	inner := &stubTokenProvider{err: sentinel}
+	obs := &recordingObserver{}
+	tp := WithMetrics(inner, obs, "stub")
+
+	_, err := tp.GetToken(context.Background(), "ignored")
+	if err != sentinel {
+		t.Errorf("error = %v, want exactly %v (wrapper must not wrap)", err, sentinel)
+	}
+}

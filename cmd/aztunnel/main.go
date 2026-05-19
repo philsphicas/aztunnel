@@ -96,10 +96,14 @@ func resolveHyco(hycoFlag string) (string, error) {
 // Auth resolution: SAS env vars (AZTUNNEL_KEY_NAME + AZTUNNEL_KEY) →
 // SAS; otherwise → Entra ID via DefaultAzureCredential.
 //
+// providerName is the short label ("sas" or "entra") matching
+// relay.Provider* — callers use it as the `provider` label when
+// wrapping tp with relay.WithMetrics.
+//
 // --relay-insecure-tls (or AZTUNNEL_RELAY_INSECURE_TLS=1) populates
 // opts.TLSConfig with InsecureSkipVerify. Callers are expected to log
 // a warning when this is set.
-func resolveAuth(af AuthFlags) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, err error) {
+func resolveAuth(af AuthFlags) (endpoint string, opts relay.ClientOptions, tp relay.TokenProvider, providerName string, err error) {
 	ns := af.Relay
 	if ns == "" {
 		ns = af.Namespace
@@ -108,7 +112,7 @@ func resolveAuth(af AuthFlags) (endpoint string, opts relay.ClientOptions, tp re
 		ns = os.Getenv("AZTUNNEL_RELAY_NAME")
 	}
 	if ns == "" {
-		return "", relay.ClientOptions{}, nil, fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
+		return "", relay.ClientOptions{}, nil, "", fmt.Errorf("relay namespace is required: use --relay or set AZTUNNEL_RELAY_NAME")
 	}
 	suffix := af.RelaySuffix
 	if suffix == "" {
@@ -120,7 +124,7 @@ func resolveAuth(af AuthFlags) (endpoint string, opts relay.ClientOptions, tp re
 
 	endpoint = relay.ParseRelay(ns, suffix)
 	if endpoint == "" {
-		return "", relay.ClientOptions{}, nil, fmt.Errorf("invalid relay endpoint: %q", ns)
+		return "", relay.ClientOptions{}, nil, "", fmt.Errorf("invalid relay endpoint: %q", ns)
 	}
 
 	if af.RelayInsecureTLS || os.Getenv("AZTUNNEL_RELAY_INSECURE_TLS") == "1" {
@@ -130,14 +134,28 @@ func resolveAuth(af AuthFlags) (endpoint string, opts relay.ClientOptions, tp re
 	keyName := os.Getenv("AZTUNNEL_KEY_NAME")
 	key := os.Getenv("AZTUNNEL_KEY")
 	if keyName != "" && key != "" {
-		return endpoint, opts, &relay.SASTokenProvider{KeyName: keyName, Key: key}, nil
+		return endpoint, opts, &relay.SASTokenProvider{KeyName: keyName, Key: key}, relay.ProviderSAS, nil
 	}
 
 	entra, err := relay.NewEntraTokenProvider()
 	if err != nil {
-		return "", relay.ClientOptions{}, nil, fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
+		return "", relay.ClientOptions{}, nil, "", fmt.Errorf("no SAS credentials found (AZTUNNEL_KEY_NAME/AZTUNNEL_KEY) and Entra auth failed: %w", err)
 	}
-	return endpoint, opts, entra, nil
+	return endpoint, opts, entra, relay.ProviderEntra, nil
+}
+
+// observeTokenFetch wraps tp with relay.WithMetrics when m is a live
+// (non-nil) *metrics.Metrics. m can be nil (when --metrics-addr is not
+// set), in which case tp is returned unchanged. The explicit nil check
+// is needed at the call site: a typed-nil *metrics.Metrics wrapped in
+// a TokenFetchObserver interface compares != nil, and relay.WithMetrics
+// cannot tell from the interface value alone whether the underlying
+// pointer is nil without reflection.
+func observeTokenFetch(tp relay.TokenProvider, m *metrics.Metrics, providerName string) relay.TokenProvider {
+	if m == nil {
+		return tp
+	}
+	return relay.WithMetrics(tp, m, providerName)
 }
 
 // warnInsecureTLS emits a one-line warning when opts.TLSConfig disables
