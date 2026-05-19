@@ -5,14 +5,12 @@
 //
 // Subcommands:
 //
-//	setup      — Create namespace + RG + grant self Azure Relay Owner
+//	setup      — Create namespace + permanent SAS rules + grant self Azure Relay Owner
 //	ci         — setup + create Entra app + federated credential + GitHub secrets
 //	clean      — Delete the resource group (and everything in it)
 //	grant      — Grant Azure Relay Owner to a principal
 //	env        — Print the env vars required to run e2e tests locally
-//	janitor    — Delete orphan e2e-{entra,sas}-<hex> hycos AND
-//	             e2e-run-<hex>-{listener,sender} namespace SAS rules
-//	             older than --max-age
+//	janitor    — Delete orphan e2e-{entra,sas}-<hex> hycos older than --max-age
 package main
 
 import (
@@ -36,12 +34,12 @@ var CLI struct {
 	ResourceGroup string `name:"resource-group" env:"RESOURCE_GROUP" default:"aztunnel-e2e" help:"Resource group containing the relay namespace."`
 	RelayName     string `name:"relay-name" env:"RELAY_NAME" help:"Relay namespace name (auto-generated from subscription + RG if empty)."`
 
-	Setup   SetupCmd   `cmd:"" help:"Create namespace + grant self Azure Relay Owner."`
-	CI      CICmd      `cmd:"" help:"Full CI setup: namespace + Entra app + GitHub secrets."`
+	Setup   SetupCmd   `cmd:"" help:"Create namespace + permanent SAS rules + grant self Azure Relay Owner."`
+	CI      CICmd      `cmd:"" help:"Full CI setup: namespace + permanent SAS rules + Entra app + GitHub secrets."`
 	Clean   CleanCmd   `cmd:"" help:"Delete the resource group."`
 	Grant   GrantCmd   `cmd:"" help:"Grant Azure Relay Owner to a principal."`
 	Env     EnvCmd     `cmd:"" help:"Print E2E_* env vars for local test runs."`
-	Janitor JanitorCmd `cmd:"" help:"Delete orphan e2e-{entra,sas}-<hex> hycos AND e2e-run-<hex>-{listener,sender} namespace SAS rules."`
+	Janitor JanitorCmd `cmd:"" help:"Delete orphan e2e-{entra,sas}-<hex> hycos."`
 }
 
 // SetupCmd creates the resource group + relay namespace and grants the
@@ -62,6 +60,9 @@ func (c *SetupCmd) Run(ctx context.Context) error {
 	}
 	if _, err := prov.EnsureNamespace(ctx); err != nil {
 		return fmt.Errorf("ensure namespace: %w", err)
+	}
+	if err := prov.EnsureRunRules(ctx); err != nil {
+		return fmt.Errorf("ensure run rules: %w", err)
 	}
 	if c.SkipRBAC {
 		fmt.Fprintln(os.Stderr, "    (skipping RBAC per --skip-rbac)")
@@ -95,6 +96,9 @@ func (c *CICmd) Run(ctx context.Context) error {
 	}
 	if _, err := prov.EnsureNamespace(ctx); err != nil {
 		return fmt.Errorf("ensure namespace: %w", err)
+	}
+	if err := prov.EnsureRunRules(ctx); err != nil {
+		return fmt.Errorf("ensure run rules: %w", err)
 	}
 	if err := prov.GrantOwnerSelf(ctx); err != nil {
 		return fmt.Errorf("grant self: %w", err)
@@ -200,10 +204,9 @@ func (c *EnvCmd) Run(ctx context.Context) error {
 	return nil
 }
 
-// JanitorCmd deletes orphan per-invocation hycos and per-run namespace
-// SAS rules older than --max-age.
+// JanitorCmd deletes orphan per-invocation hycos older than --max-age.
 type JanitorCmd struct {
-	MaxAge time.Duration `name:"max-age" default:"4h" help:"Delete e2e-{entra,sas}-<hex> hycos AND e2e-run-<hex>-{listener,sender} rules older than this."`
+	MaxAge time.Duration `name:"max-age" default:"4h" help:"Delete e2e-{entra,sas}-<hex> hycos older than this."`
 	DryRun bool          `name:"dry-run" help:"Print what would be deleted without deleting."`
 }
 

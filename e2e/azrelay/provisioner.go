@@ -45,12 +45,6 @@ var HycoNamePattern = regexp.MustCompile(`^e2e-(entra|sas)-[0-9a-f]{12}$`)
 // for any realistic CI volume.
 const suffixLen = 12
 
-// readinessMaxWait bounds how long readKey will retry ListKeys after a
-// rule create. ARM propagation is normally well under a second; we allow
-// more to absorb the occasional regional blip without forcing tests to
-// handle the transient 404 themselves.
-const readinessMaxWait = 30 * time.Second
-
 // Bounds on the createRule / bestEffortDelete retry loop that absorbs
 // the transient 40901 MessagingGatewayTooManyRequests conflict produced
 // when Azure Relay's control plane serialises authorizationRule
@@ -96,7 +90,7 @@ type Config struct {
 	// the single-use Provisioner type (it serialises by construction).
 	Concurrency int
 
-	// RunRules supplies the run-scoped namespace SAS rules whose keys
+	// RunRules supplies the namespace-permanent SAS rules whose keys
 	// every PairToken Result stamps onto its ListenerKey/SenderKey
 	// fields. Required for NewProvider and Provisioner; AcquireRunRules
 	// populates it.
@@ -175,7 +169,7 @@ func New(cfg Config) (*Provisioner, error) {
 }
 
 // Provision creates the Entra and SAS hybrid connections and stamps the
-// run-scoped SAS rule key info from cfg.RunRules onto the returned
+// namespace SAS rule key info from cfg.RunRules onto the returned
 // Result. If any step fails after a hyco has been created, Provision
 // attempts a best-effort teardown before returning the error so the
 // caller does not need to handle partial state.
@@ -311,9 +305,9 @@ func defaultAuthRuleRetry() authRuleRetry {
 // The function honours ctx cancellation between retries.
 //
 // Exposed for use by callers outside this package that mutate the same
-// Microsoft.Relay authorizationRules scope (e.g. the janitor's
-// sweep-and-delete loop), so they share the same retry envelope as
-// AcquireRunRules / RunRules.Teardown.
+// Microsoft.Relay authorizationRules scope — currently `e2e-infra`'s
+// namespace SAS-rule provisioning (Provisioner.EnsureRunRules) — so
+// they share the same 40901 retry envelope.
 func RetryOnAuthRuleConflict(ctx context.Context, fn func() error) error {
 	return retryOnAuthRuleConflict(ctx, defaultAuthRuleRetry(), fn)
 }

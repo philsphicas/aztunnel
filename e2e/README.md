@@ -50,13 +50,15 @@ reaps anything left behind by killed runners.
 
 Authentication is via `DefaultAzureCredential`: `az login` for local
 development, OIDC federated workload identity for GitHub Actions. No SAS
-listener/sender keys need to be configured by hand — `TestMain` acquires
-two namespace-scoped authorization rules once per `go test` invocation
-(`e2e-run-<hex>-listener` for `Listen` and `e2e-run-<hex>-sender` for
-`Send`) via `azrelay.AcquireRunRules`, reads their keys via
-`Microsoft.Relay/...ListKeys`, and reuses them across every per-test SAS
-hyco. The rules are torn down on `TestMain` exit; the orphan janitor
-reaps anything left behind.
+listener/sender keys need to be configured by hand — the namespace
+holds two **permanent** namespace-scoped authorization rules,
+`e2e-listener` (Listen-only) and `e2e-sender` (Send-only), provisioned
+once by `e2e-infra setup` (or `e2e-infra ci`). `TestMain` reads their
+keys via `azrelay.AcquireRunRules` (a `Microsoft.Relay/...ListKeys`
+call against each permanent rule — no create / no delete) and reuses
+them across every per-test SAS hyco. The rules outlive every test
+invocation; the orphan janitor sweeps only hybrid connections, not
+authorization rules.
 
 ## Test Scenarios
 
@@ -136,14 +138,14 @@ out to no external tooling (no `az`, no `gh`, no `jq`).
 
 ### CLI Subcommands
 
-| Make target         | CLI subcommand                                 | Purpose                                                                                                     |
-| ------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `e2e-infra-setup`   | `e2e-infra setup`                              | Create RG + namespace + grant yourself `Azure Relay Owner`.                                                 |
-| `e2e-infra-ci`      | `e2e-infra ci`                                 | Above + Entra app + federated credential + GitHub secrets.                                                  |
-| `e2e-infra-clean`   | `e2e-infra clean --yes`                        | Delete the resource group (and everything in it).                                                           |
-| `e2e-infra-env`     | `e2e-infra env`                                | Print `export` statements for `E2E_*` and `AZURE_*` vars.                                                   |
-| `e2e-infra-janitor` | `e2e-infra janitor [--max-age 4h] [--dry-run]` | Delete orphan `e2e-{entra,sas}-<hex>` hycos AND `e2e-run-<hex>-{listener,sender}` rules older than max-age. |
-| (none)              | `e2e-infra grant --self\|--user\|--sp …`       | Grant `Azure Relay Owner` to a principal.                                                                   |
+| Make target         | CLI subcommand                                 | Purpose                                                                           |
+| ------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------- |
+| `e2e-infra-setup`   | `e2e-infra setup`                              | Create RG + namespace + permanent SAS rules + grant yourself `Azure Relay Owner`. |
+| `e2e-infra-ci`      | `e2e-infra ci`                                 | Above + Entra app + federated credential + GitHub secrets.                        |
+| `e2e-infra-clean`   | `e2e-infra clean --yes`                        | Delete the resource group (and everything in it).                                 |
+| `e2e-infra-env`     | `e2e-infra env`                                | Print `export` statements for `E2E_*` and `AZURE_*` vars.                         |
+| `e2e-infra-janitor` | `e2e-infra janitor [--max-age 4h] [--dry-run]` | Delete orphan `e2e-{entra,sas}-<hex>` hycos older than max-age.                   |
+| (none)              | `e2e-infra grant --self\|--user\|--sp …`       | Grant `Azure Relay Owner` to a principal.                                         |
 
 ### Environment Variable Overrides
 
@@ -251,21 +253,19 @@ collisions between concurrent invocations are eliminated at the hyco level:
   longer required and are intentionally not provisioned by the new setup.
 - Hyco names are matched against `^e2e-(entra|sas)-[0-9a-f]{12}$` for the
   janitor, so any unrelated hycos in the namespace are not touched.
-- SAS authorization rules live at **namespace scope**, not per hyco: each
-  `go test` invocation provisions two rules
-  (`e2e-run-<hex>-listener` with Listen-only, `e2e-run-<hex>-sender` with
-  Send-only) once in `TestMain` via `azrelay.AcquireRunRules` and tears
-  them down on exit. Every per-test hyco signs SAS tokens with these
-  run-scoped keys. The two-rule split preserves the contract that a
-  listener key cannot send and vice versa
+- SAS authorization rules live at **namespace scope**, not per hyco,
+  and are permanent fixtures of the namespace: two rules
+  (`e2e-listener` with Listen-only, `e2e-sender` with Send-only) are
+  provisioned once by `e2e-infra setup` and reused across every
+  `go test` invocation. `TestMain` calls `azrelay.AcquireRunRules` to
+  read their primary keys via `ListKeys` — no create, no delete, no
+  per-test rule churn. Every per-test hyco signs SAS tokens with these
+  shared permanent keys. The two-rule split preserves the contract
+  that a listener key cannot send and vice versa
   (asserted by `TestWrongSASClaim`).
-- Run rules are matched against `^e2e-run-[0-9a-f]{12}-(listener|sender)$`
-  for the janitor, which sweeps orphaned rules with the same `--max-age`
-  rule as orphaned hycos.
-- Azure Relay caps authorization rules at 12 per namespace, and the
-  default `RootManageSharedAccessKey` rule consumes one of those
-  slots, so the two-rule-per-run design supports up to five
-  concurrent `go test` invocations in the same namespace before the
-  cap bites.
+- Permanent SAS rules keep the e2e-owned authorization-rule count
+  fixed at two (`e2e-listener` + `e2e-sender`), well below the
+  Azure Relay 12-rules-per-namespace cap, regardless of how many
+  `go test` invocations are running concurrently.
 - The relay namespace itself is shared across pipelines; only hybrid
-  connections are per-test and authorization rules are per-`go test`-run.
+  connections are per-test (authorization rules are permanent).

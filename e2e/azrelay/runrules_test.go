@@ -9,58 +9,32 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 )
 
-func TestRunRuleNamePattern(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"valid listener", "e2e-run-0123456789ab-listener", true},
-		{"valid sender", "e2e-run-abcdef012345-sender", true},
-		{"missing role", "e2e-run-0123456789ab", false},
-		{"unknown role", "e2e-run-0123456789ab-admin", false},
-		{"short suffix", "e2e-run-0123456789a-listener", false},
-		{"long suffix", "e2e-run-0123456789abc-listener", false},
-		{"uppercase suffix", "e2e-run-0123456789AB-listener", false},
-		{"non-hex suffix", "e2e-run-0123456789xy-listener", false},
-		{"uppercase role", "e2e-run-0123456789ab-LISTENER", false},
-		{"wrong prefix", "e2e-rule-0123456789ab-listener", false},
-		{"unrelated name", "production-rule", false},
-		{"empty", "", false},
-		// Hyco names must NOT accidentally match.
-		{"hyco entra rejected", "e2e-entra-0123456789ab", false},
-		{"hyco sas rejected", "e2e-sas-0123456789ab", false},
+func TestPermanentRuleNamesAreStable(t *testing.T) {
+	// Pin the permanent rule names against accidental rename. The
+	// names are baked into operational tooling (`e2e-infra setup`
+	// provisions them; `az relay namespace authorization-rule …`
+	// is how maintainers manage them out-of-band), so changing
+	// them silently would orphan the existing rules and break
+	// every CI run.
+	if PermanentListenerRuleName != "e2e-listener" {
+		t.Errorf("PermanentListenerRuleName = %q, want %q (orphans the rule in every provisioned namespace if changed)",
+			PermanentListenerRuleName, "e2e-listener")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := RunRuleNamePattern.MatchString(tc.in); got != tc.want {
-				t.Errorf("RunRuleNamePattern.MatchString(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-		})
+	if PermanentSenderRuleName != "e2e-sender" {
+		t.Errorf("PermanentSenderRuleName = %q, want %q (orphans the rule in every provisioned namespace if changed)",
+			PermanentSenderRuleName, "e2e-sender")
 	}
 }
 
-func TestRunRuleAndHycoPatternsAreDisjoint(t *testing.T) {
-	// Janitor relies on the two sweeps owning disjoint name spaces;
-	// regression-test the pair so a future rename can't silently
-	// cause one sweep to delete entities the other owns.
-	const suffix = "0123456789ab"
-	listener := "e2e-run-" + suffix + "-listener"
-	sender := "e2e-run-" + suffix + "-sender"
-	entra := "e2e-entra-" + suffix
-	sas := "e2e-sas-" + suffix
-
-	if !RunRuleNamePattern.MatchString(listener) || !RunRuleNamePattern.MatchString(sender) {
-		t.Fatalf("RunRuleNamePattern must match its own outputs (%s, %s)", listener, sender)
-	}
-	if HycoNamePattern.MatchString(listener) || HycoNamePattern.MatchString(sender) {
-		t.Fatalf("HycoNamePattern must not match run-rule names (%s, %s)", listener, sender)
-	}
-	if !HycoNamePattern.MatchString(entra) || !HycoNamePattern.MatchString(sas) {
-		t.Fatalf("HycoNamePattern must match its own outputs (%s, %s)", entra, sas)
-	}
-	if RunRuleNamePattern.MatchString(entra) || RunRuleNamePattern.MatchString(sas) {
-		t.Fatalf("RunRuleNamePattern must not match hyco names (%s, %s)", entra, sas)
+func TestPermanentRulesAreDistinctFromHycoPattern(t *testing.T) {
+	// The janitor sweeps hycos by HycoNamePattern. If a permanent
+	// rule name ever drifted into the hyco regex's match space, the
+	// janitor would attempt to delete the rule as a hyco — wrong
+	// resource type, but a regression worth pinning anyway.
+	for _, name := range []string{PermanentListenerRuleName, PermanentSenderRuleName} {
+		if HycoNamePattern.MatchString(name) {
+			t.Errorf("HycoNamePattern must not match permanent rule name %q", name)
+		}
 	}
 }
 
@@ -118,15 +92,36 @@ func TestValidateForRunRules_MirrorsValidate(t *testing.T) {
 	}
 }
 
+func TestTeardownIsNoOp(t *testing.T) {
+	// RunRules.Teardown is a no-op because the permanent rules are
+	// owned by `e2e-infra setup`. Pin that contract so a future
+	// refactor doesn't silently reintroduce delete-on-teardown —
+	// which would race every other in-flight CI run sharing the
+	// namespace.
+	rr := &RunRules{
+		ListenerName: PermanentListenerRuleName,
+		ListenerKey:  "listener-key",
+		SenderName:   PermanentSenderRuleName,
+		SenderKey:    "sender-key",
+	}
+	if err := rr.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown should be a no-op, got error: %v", err)
+	}
+	// Idempotent — multiple calls remain safe.
+	if err := rr.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown second call should still be a no-op, got error: %v", err)
+	}
+}
+
 // stubRunRules returns a non-nil *RunRules suitable only for satisfying
 // the Config.RunRules-required check in NewProvider for unit tests that
 // never reach the actual ARM rule-mutation path. Production callers
 // must go through AcquireRunRules.
 func stubRunRules() *RunRules {
 	return &RunRules{
-		ListenerName: "e2e-run-stubstubstub-listener",
+		ListenerName: PermanentListenerRuleName,
 		ListenerKey:  "stub-listener-key",
-		SenderName:   "e2e-run-stubstubstub-sender",
+		SenderName:   PermanentSenderRuleName,
 		SenderKey:    "stub-sender-key",
 	}
 }

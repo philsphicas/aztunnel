@@ -18,10 +18,11 @@
 // via azrelay.Provider in TestMain and tears them down via t.Cleanup.
 // SAS keys are not configured by hand: TestMain acquires two namespace-
 // scoped authorization rules once per `go test` invocation (Listen-only
-// and Send-only, named e2e-run-<hex>-{listener,sender}) via
+// and Send-only, named e2e-listener and e2e-sender) via
 // azrelay.AcquireRunRules, and Provider.Provision stamps the resulting
-// keys onto every per-test SAS hyco. The run rules are torn down on
-// TestMain exit; the orphan janitor reaps anything left behind.
+// keys onto every per-test SAS hyco. The rules are permanent fixtures
+// of the namespace, not torn down on TestMain exit; the orphan janitor
+// sweeps stale hycos only.
 //
 // Functional tests run against all available auth methods (entra, sas)
 // unless E2E_AUTH=entra or E2E_AUTH=sas is set to pin one.
@@ -253,10 +254,10 @@ func TestSASKeyAuth(t *testing.T) {
 	env := requireDedicatedHyco(t)
 	// requireDedicatedHyco always returns a fully-populated SAS pair:
 	// the per-test SAS hyco is created by Provider.Provision, and the
-	// listener/sender keys are stamped from the run-scoped namespace
-	// rules acquired once by AcquireRunRules in TestMain. The defensive
-	// check here flags a Provider contract regression rather than a
-	// contributor mis-configuration.
+	// listener/sender keys are stamped from the permanent namespace
+	// rules whose keys were read once by AcquireRunRules in TestMain.
+	// The defensive check here flags a Provider contract regression
+	// rather than a contributor mis-configuration.
 	if env.sasHyco == "" || env.sasListenerKeyName == "" || env.sasListenerKey == "" || env.sasSenderKeyName == "" || env.sasSenderKey == "" {
 		var missing []string
 		if env.sasHyco == "" {

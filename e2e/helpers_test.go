@@ -43,9 +43,7 @@ type authConfig struct {
 // hycoProvisionTimeout bounds a single Provider.Provision call from
 // requireDedicatedHyco. The provisioner already retries 429s and
 // transient 5xx through azcore (MaxRetries=6, MaxRetryDelay=60s); per-
-// pair provisioning no longer mutates authorization rules, so the
-// 40901 retry loop in retryOnAuthRuleConflict is only paid once per
-// `go test` invocation (by AcquireRunRules), not per Provision. This
+// pair provisioning does not mutate authorization rules, so this
 // ceiling stops a genuinely stuck control plane from hanging the test
 // until the suite-wide go-test -timeout fires.
 const hycoProvisionTimeout = 3 * time.Minute
