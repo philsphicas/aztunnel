@@ -31,6 +31,7 @@ func RunReliabilitySuite(t *testing.T, b Backend) {
 	}{
 		{"ErrorPropagation_TargetRefused", ScenarioErrorPropagation_TargetRefused},
 		{"ErrorPropagation_TargetUnreachable", ScenarioErrorPropagation_TargetUnreachable},
+		{"ErrorPropagation_TargetDNSFailure", ScenarioErrorPropagation_TargetDNSFailure},
 		{"ErrorPropagation_TargetHangs", ScenarioErrorPropagation_TargetHangs},
 		{"SlowConsumer_BackPressure", ScenarioSlowConsumer_BackPressure},
 		{"HalfClose_RequestResponse", ScenarioHalfClose_RequestResponse},
@@ -386,6 +387,69 @@ sampling:
 		t.Errorf("writer pushed %d bytes during %v window; expected >= 1 KiB",
 			writtenMid, slowConsumerTestDuration)
 	}
+}
+
+// dnsFailureTarget is the host:port the DNS-failure scenario asks the
+// listener to dial. The hostname uses the RFC 6761 reserved ".invalid"
+// TLD with a trailing dot so resolver search-domain expansion cannot
+// turn it into a real lookup. Every conformant resolver should answer
+// NXDOMAIN, surfacing as *net.DNSError{IsNotFound:true} inside
+// dialer.DialContext.
+const dnsFailureTarget = "nonexistent.invalid.:80"
+
+// ScenarioErrorPropagation_TargetDNSFailure asserts that when the
+// listener fails to resolve the target hostname, the failure is
+// classified as a DNS error in the listener metrics rather than as a
+// generic dial failure or a network-layer timeout. This is the
+// operator-visible signal that lets dashboards and alerts separate
+// "DNS misconfigured" from "target unreachable on the network".
+//
+// The scenario uses SOCKS5 so the client receives a clean SOCKS5-reply
+// failure (current sender maps unknown protocol codes to
+// RepHostUnreachable, so the REP byte itself is not asserted; the
+// metric reason label is the contract under test). The listener's
+// connection_errors_total{reason="dns_not_found"} counter is polled
+// via the Listener.ConnectionErrors accessor, which both backends
+// implement — in-process Registry.Gather for the mock backend and
+// /metrics scrape for the Azure backend.
+func ScenarioErrorPropagation_TargetDNSFailure(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModeSOCKS5,
+		AllowedTargets: []string{dnsFailureTarget},
+		ConnectTimeout: 5 * time.Second,
+	})
+
+	_, err := DialSOCKS5(tun.SenderAddr, dnsFailureTarget, 15*time.Second)
+	if err == nil {
+		t.Fatalf("expected SOCKS5 dial to DNS-NXDOMAIN target to fail")
+	}
+	var sErr *SOCKS5Error
+	if !errors.As(err, &sErr) {
+		// A SOCKS5-level reply is the expected outcome; anything else
+		// (e.g. a dial-proxy IO error) would mean the listener never
+		// got far enough to even attempt the dial, which would mask
+		// the metric we're trying to assert.
+		t.Fatalf("expected SOCKS5Error from DNS-failed dial, got %T: %v", err, err)
+	}
+
+	if tun.Listeners[0].ConnectionErrors == nil {
+		t.Skip("backend does not expose ConnectionErrors on Listener")
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	var seen int64
+	for time.Now().Before(deadline) {
+		seen = tun.Listeners[0].ConnectionErrors("dns_not_found")
+		if seen > 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("listener connection_errors_total{reason=dns_not_found} did not increment within 15s after a SOCKS5 dial to %s (last value %d)",
+		dnsFailureTarget, seen)
 }
 
 // ScenarioHalfClose_RequestResponse is the acceptance-contract test

@@ -29,6 +29,16 @@ const (
 	ReasonAuthFailed        = "auth_failed"
 	ReasonEnvelopeError     = "envelope_error"
 	ReasonAllowlistRejected = "allowlist_rejected"
+	// ReasonDNSNotFound is the reason label for dial failures caused by
+	// name resolution returning no result (typically NXDOMAIN or NODATA).
+	// Distinct from ReasonDialFailed so operators can see DNS-misconfig
+	// failures separately from network-layer failures.
+	ReasonDNSNotFound = "dns_not_found"
+	// ReasonDNSTimeout is the reason label for dial failures caused by
+	// DNS resolution exceeding the resolver's deadline. Distinct from
+	// ReasonDialTimeout because the failure happened before any SYN was
+	// sent; the underlying network may be fine.
+	ReasonDNSTimeout = "dns_timeout"
 )
 
 // Metrics holds all Prometheus metrics for aztunnel.
@@ -182,12 +192,34 @@ func (m *Metrics) ConnectionError(role, reason string) {
 	m.connectionErrors.WithLabelValues(role, reason).Inc()
 }
 
-// DialReason returns "dial_timeout" if err is a network timeout, otherwise
-// returns fallback. Use this to distinguish timeout errors from other dial
-// failures in metrics.
+// DialReason maps a dial error to a metric reason label. It returns
+// ReasonDialTimeout for network timeouts, ReasonDNSTimeout for DNS
+// resolver timeouts, ReasonDNSNotFound for non-timeout DNS failures, or
+// fallback for any other error.
+//
+// The DNS-error classification is scoped to listener target dials by
+// gating on `fallback == ReasonDialFailed`. Sender callers pass
+// ReasonRelayFailed and skip the DNS branch entirely; their DNS errors
+// fall through to the timeout / fallback paths below.
+//
+// Ordering mirrors classifyDialError in internal/listener: ctx-deadline
+// is checked first so operator-cancelled dials keep the timeout
+// classification; *net.DNSError is checked before the generic
+// netErr.Timeout() branch because DNS timeouts also satisfy
+// net.Error.Timeout() and would otherwise be misclassified as
+// ReasonDialTimeout.
 func DialReason(err error, fallback string) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return ReasonDialTimeout
+	}
+	if fallback == ReasonDialFailed {
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			if dnsErr.IsTimeout {
+				return ReasonDNSTimeout
+			}
+			return ReasonDNSNotFound
+		}
 	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {

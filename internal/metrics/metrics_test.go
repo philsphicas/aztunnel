@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -149,6 +150,62 @@ func TestDialReason(t *testing.T) {
 	wrappedDeadline := fmt.Errorf("dial: %w", context.DeadlineExceeded)
 	if r := DialReason(wrappedDeadline, "relay_failed"); r != ReasonDialTimeout {
 		t.Errorf("DialReason(wrapped DeadlineExceeded) = %q, want %q", r, ReasonDialTimeout)
+	}
+}
+
+func TestDialReason_DNSNotFound(t *testing.T) {
+	// Bare *net.DNSError without IsTimeout maps to ReasonDNSNotFound,
+	// matching classifyDialError's behaviour so the metric reason and
+	// the protocol code line up for the common NXDOMAIN case.
+	dnsErr := &net.DNSError{Err: "no such host", Name: "nonexistent.invalid", IsNotFound: true}
+	if r := DialReason(dnsErr, ReasonDialFailed); r != ReasonDNSNotFound {
+		t.Errorf("DialReason(DNSError{IsNotFound}) = %q, want %q", r, ReasonDNSNotFound)
+	}
+
+	// Wrapped in *net.OpError (the form net.Dialer actually returns).
+	wrapped := &net.OpError{Op: "dial", Net: "tcp", Err: dnsErr}
+	if r := DialReason(wrapped, ReasonDialFailed); r != ReasonDNSNotFound {
+		t.Errorf("DialReason(OpError wrapping DNSError) = %q, want %q", r, ReasonDNSNotFound)
+	}
+}
+
+func TestDialReason_DNSTimeout(t *testing.T) {
+	// DNS-layer timeout takes precedence over the generic dial_timeout
+	// reason — *net.DNSError satisfies net.Error.Timeout(), so without
+	// the explicit DNS branch in DialReason this would be classified
+	// as ReasonDialTimeout.
+	dnsErr := &net.DNSError{Err: "i/o timeout", Name: "slow.example", IsTimeout: true}
+	if r := DialReason(dnsErr, ReasonDialFailed); r != ReasonDNSTimeout {
+		t.Errorf("DialReason(DNSError{IsTimeout}) = %q, want %q", r, ReasonDNSTimeout)
+	}
+
+	// context.DeadlineExceeded still wins over a DNS-layer timeout when
+	// both are present in the chain — mirrors classifyDialError.
+	combined := errors.Join(context.DeadlineExceeded, dnsErr)
+	if r := DialReason(combined, ReasonDialFailed); r != ReasonDialTimeout {
+		t.Errorf("DialReason(Join(DeadlineExceeded, DNS timeout)) = %q, want %q",
+			r, ReasonDialTimeout)
+	}
+}
+
+func TestDialReason_DNSClassificationGatedByFallback(t *testing.T) {
+	// DNS classification is scoped to listener target dials
+	// (fallback == ReasonDialFailed). With ReasonRelayFailed the DNS
+	// branch is skipped and DialReason returns the fallback.
+	dnsErr := &net.DNSError{Err: "no such host", Name: "nonexistent.invalid", IsNotFound: true}
+	if r := DialReason(dnsErr, ReasonRelayFailed); r != ReasonRelayFailed {
+		t.Errorf("DialReason(DNSError, ReasonRelayFailed) = %q, want %q (DNS classification must not leak to sender callers)",
+			r, ReasonRelayFailed)
+	}
+
+	// DNS timeouts with ReasonRelayFailed bypass the gated DNS branch
+	// and fall through to the generic netErr.Timeout() check:
+	// *net.DNSError satisfies net.Error and Timeout() returns IsTimeout,
+	// so the result is ReasonDialTimeout.
+	dnsTimeout := &net.DNSError{Err: "i/o timeout", Name: "slow.example", IsTimeout: true}
+	if r := DialReason(dnsTimeout, ReasonRelayFailed); r != ReasonDialTimeout {
+		t.Errorf("DialReason(DNSError{IsTimeout}, ReasonRelayFailed) = %q, want %q",
+			r, ReasonDialTimeout)
 	}
 }
 

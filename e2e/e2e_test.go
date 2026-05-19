@@ -1627,3 +1627,33 @@ func sumMetric(text, name string) float64 {
 	}
 	return total
 }
+
+// sumMetricByLabel sums sample values for metric `name` whose labels
+// include the requested labelName=labelValue pair. Label order in the
+// scraped /metrics output is not stable across Prometheus versions, so
+// the match is a substring check against the well-formed `name="value"`
+// form rather than a position-sensitive parse.
+func sumMetricByLabel(text, name, labelName, labelValue string) float64 {
+	var total float64
+	needle := labelName + `="` + labelValue + `"`
+	scanner := bufio.NewScanner(strings.NewReader(text))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, name+"{") {
+			continue
+		}
+		if !strings.Contains(line, needle) {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			var v float64
+			fmt.Sscanf(parts[len(parts)-1], "%f", &v)
+			total += v
+		}
+	}
+	return total
+}

@@ -1,6 +1,14 @@
 package listener
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"net"
+	"syscall"
+	"testing"
+
+	"github.com/philsphicas/aztunnel/internal/protocol"
+)
 
 func TestIsAllowed(t *testing.T) {
 	tests := []struct {
@@ -54,6 +62,81 @@ func TestSplitAllowEntry(t *testing.T) {
 			}
 			if p != tt.wantPort {
 				t.Errorf("port = %q, want %q", p, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestClassifyDialError_Nil(t *testing.T) {
+	if got := classifyDialError(nil); got != "" {
+		t.Errorf("classifyDialError(nil) = %q, want %q", got, "")
+	}
+}
+
+func TestClassifyDialError_DNSNotFound(t *testing.T) {
+	err := &net.DNSError{Err: "no such host", Name: "nonexistent.invalid", IsNotFound: true}
+	if got := classifyDialError(err); got != protocol.CodeDNSNotFound {
+		t.Errorf("classifyDialError(DNSError{IsNotFound}) = %q, want %q", got, protocol.CodeDNSNotFound)
+	}
+}
+
+func TestClassifyDialError_DNSTimeout(t *testing.T) {
+	err := &net.DNSError{Err: "i/o timeout", Name: "slow.example", IsTimeout: true}
+	if got := classifyDialError(err); got != protocol.CodeDNSTimeout {
+		t.Errorf("classifyDialError(DNSError{IsTimeout}) = %q, want %q", got, protocol.CodeDNSTimeout)
+	}
+}
+
+func TestClassifyDialError_DNSTemporary(t *testing.T) {
+	// Non-timeout, non-not-found DNS errors (e.g. SERVFAIL) fall through
+	// to CodeDNSNotFound under the current spec. This documents that
+	// behaviour so a future refinement (e.g. a separate dns_failed code)
+	// is a deliberate change rather than an accidental one.
+	err := &net.DNSError{Err: "server misbehaving", Name: "example.invalid"}
+	if got := classifyDialError(err); got != protocol.CodeDNSNotFound {
+		t.Errorf("classifyDialError(DNSError{plain}) = %q, want %q", got, protocol.CodeDNSNotFound)
+	}
+}
+
+func TestClassifyDialError_DNSWrappedInOpError(t *testing.T) {
+	// net.Dialer wraps DNS failures inside *net.OpError; classifyDialError
+	// must unwrap via errors.As to find the underlying *net.DNSError.
+	dnsErr := &net.DNSError{Err: "no such host", Name: "nonexistent.invalid", IsNotFound: true}
+	wrapped := &net.OpError{Op: "dial", Net: "tcp", Err: dnsErr}
+	if got := classifyDialError(wrapped); got != protocol.CodeDNSNotFound {
+		t.Errorf("classifyDialError(OpError wrapping DNSError) = %q, want %q", got, protocol.CodeDNSNotFound)
+	}
+}
+
+func TestClassifyDialError_ContextDeadlineBeatsDNSTimeout(t *testing.T) {
+	// When the dial error is both a DNS timeout AND ctx.DeadlineExceeded,
+	// the context-deadline branch must win: the operator deliberately
+	// cancelled, so CodeTimeout reflects that intent better than the
+	// underlying DNS-layer detail.
+	dnsErr := &net.DNSError{Err: "i/o timeout", Name: "slow.example", IsTimeout: true}
+	combined := errors.Join(context.DeadlineExceeded, dnsErr)
+	if got := classifyDialError(combined); got != protocol.CodeTimeout {
+		t.Errorf("classifyDialError(Join(DeadlineExceeded, DNS timeout)) = %q, want %q",
+			got, protocol.CodeTimeout)
+	}
+}
+
+func TestClassifyDialError_OtherErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"refused", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, protocol.CodeConnectionRefused},
+		{"host unreachable", &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}, protocol.CodeHostUnreachable},
+		{"net unreachable", &net.OpError{Op: "dial", Err: syscall.ENETUNREACH}, protocol.CodeNetworkUnreachable},
+		{"context deadline", context.DeadlineExceeded, protocol.CodeTimeout},
+		{"unclassified", errors.New("something broke"), ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyDialError(tt.err); got != tt.want {
+				t.Errorf("classifyDialError(%v) = %q, want %q", tt.err, got, tt.want)
 			}
 		})
 	}
