@@ -10,10 +10,15 @@ import (
 // Option configures a Server constructed via NewServerForTesting. Each
 // Option arms a deterministic fault — a close code, a delay, or a
 // rejection — that exercises a relay failure mode the in-process
-// mock can reproduce reliably but Azure Relay cannot. Production code
-// MUST NOT use NewServerForTesting or Option; both live in this
-// package so they cannot be wired into the aztunnel-relay CLI without
-// importing it explicitly.
+// mock can reproduce reliably but Azure Relay cannot.
+//
+// Options are testing-only: the production constructor NewServer
+// never invokes any Option, so a Server returned from NewServer is
+// guaranteed to have every fault knob disarmed regardless of which
+// callers (including the aztunnel-relay CLI) import this package.
+// The "do not use in production" rule is therefore enforced by code
+// path, not by import boundary; callers building production
+// binaries MUST construct their Server with NewServer.
 type Option func(*Server) error
 
 // faults holds the configured fault-injection state for a Server. It
