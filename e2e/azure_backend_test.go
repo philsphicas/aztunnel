@@ -16,23 +16,35 @@ import (
 // in-process MockBackend (mockrelay/testharness/parity) is a behavioural gap in
 // the mock that we have to either fix or document.
 //
-// Each instance is bound to a single authConfig (Entra or SAS) so the
-// caller can run the same scenario suite once per available auth.
-// All listeners and senders are real aztunnel subprocesses driven by
-// the existing helpers (startListener, startPortForwardSender,
+// Each instance is bound to a single auth method ("entra" or "sas")
+// so the caller can run the same scenario suite once per available
+// auth. All listeners and senders are real aztunnel subprocesses
+// driven by the existing helpers (startListener, startPortForwardSender,
 // startSOCKS5Sender), so they exercise the same code paths that
 // production users hit. Each subprocess exposes its own Prometheus
 // /metrics endpoint via --metrics-addr 127.0.0.1:0, which the
 // Listener / Sender accessor closures scrape on demand to satisfy
 // Completed() / Active() reads.
+//
+// Each Setup call acquires a relayEnv via acquireEnv. The two
+// strategies in tree:
+//
+//   - requireDedicatedHyco: provisions a fresh (entra, sas) hyco pair
+//     and registers a t.Cleanup that tears it down. Used by
+//     TestParity_Azure so each scenario gets isolation between
+//     successive Setup calls — and so scenarios that call Setup
+//     twice (e.g. ScenarioErrorPropagation_*) hold disjoint hycos.
+//   - leaseSharedHyco: returns a process-shared, lazily-leased pair
+//     drained at TestMain exit. Used by BenchmarkParity_Azure so
+//     benchstat runs do not pay per-sub-bench provisioning.
 type azureBackend struct {
-	env  *relayEnv
-	auth authConfig
+	authName   string
+	acquireEnv func(testing.TB) *relayEnv
 }
 
 // Name returns the backend identifier used in test sub-paths, e.g.
 // "azure-entra" or "azure-sas".
-func (b *azureBackend) Name() string { return "azure-" + b.auth.name }
+func (b *azureBackend) Name() string { return "azure-" + b.authName }
 
 // Setup brings up the requested topology (NumListeners listeners and
 // max(NumSenders,1) senders), waits until every listener has logged
@@ -40,6 +52,14 @@ func (b *azureBackend) Name() string { return "azure-" + b.auth.name }
 // address, then attaches metrics-scrape closures and returns the
 // Tunnel handle. All subprocesses are torn down via the existing
 // t.Cleanup wiring inside startAztunnelWithSAS.
+//
+// acquireEnv MUST be the first side-effect: when it provisions a
+// dedicated pair (requireDedicatedHyco), the t.Cleanup registered
+// for PairToken.Teardown then sits BENEATH the listener/sender
+// Stop cleanups registered later. LIFO order ensures every
+// subprocess in this Setup is killed before its hyco pair is
+// deleted, which prevents ARM Delete from racing a still-attached
+// listener's keep-alives.
 func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relayparity.Tunnel {
 	t.Helper()
 	if opts.NumListeners < 1 {
@@ -49,6 +69,9 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 	if numSenders < 1 {
 		numSenders = 1
 	}
+
+	env := b.acquireEnv(t)
+	auth := authFromEnv(t, env, b.authName)
 
 	listenerArgs := []string{"--metrics-addr", "127.0.0.1:0"}
 	for _, target := range opts.AllowedTargets {
@@ -65,7 +88,7 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 
 	spawnListener := func(t testing.TB) *relayparity.Listener {
 		t.Helper()
-		lst := startListener(t, b.env, b.auth, listenerArgs...)
+		lst := startListener(t, env, auth, listenerArgs...)
 		waitForLog(t, lst, "control channel connected", 30*time.Second)
 		metricsAddr := lst.MetricsAddr(t, 15*time.Second)
 		return &relayparity.Listener{
@@ -90,10 +113,10 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 		var logMsg string
 		switch opts.SenderMode {
 		case relayparity.ModePortForward:
-			proc = startPortForwardSender(t, b.env, b.auth, opts.Target, senderArgs...)
+			proc = startPortForwardSender(t, env, auth, opts.Target, senderArgs...)
 			logMsg = "port-forward listening"
 		case relayparity.ModeSOCKS5:
-			proc = startSOCKS5Sender(t, b.env, b.auth, senderArgs...)
+			proc = startSOCKS5Sender(t, env, auth, senderArgs...)
 			logMsg = "socks5-proxy listening"
 		default:
 			t.Fatalf("unknown SenderMode %v", opts.SenderMode)
