@@ -172,29 +172,47 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 			continue
 		}
 
+		// Mint a short-lived accept_id before the semaphore check so
+		// the drop path carries the same correlation key as the
+		// accepted path. Subsequent lifecycle log lines (acquire,
+		// release, rendezvous dial start/end) all go through
+		// acceptLogger so an operator can group them with one filter;
+		// the control_session_id binding on logger flows through so
+		// every accept line carries both attributes.
+		acceptID := idgen.NewAcceptID()
+		acceptLogger := logger.With("accept_id", acceptID)
+
 		if !sem.tryAcquire(loopCtx) {
-			logger.Warn("max connections reached, dropping accept")
+			acceptLogger.Warn("accept dropped", "reason", "semaphore_full")
 			continue
 		}
+		acceptLogger.Debug("accept acquired")
 
 		wg.Add(1)
-		go func(addr string) {
+		go func(addr string, logger *slog.Logger) {
 			defer wg.Done()
-			defer sem.release()
-			if err := handleAccept(loopCtx, addr, cfg); err != nil {
+			defer func() {
+				sem.release()
+				logger.Debug("accept released")
+			}()
+			if err := handleAccept(loopCtx, addr, cfg, logger); err != nil {
 				logger.Warn("accept failed", "error", err)
 			}
-		}(msg.Accept.Address)
+		}(msg.Accept.Address, acceptLogger)
 	}
 }
 
-func handleAccept(ctx context.Context, addr string, cfg ControlConfig) error {
+func handleAccept(ctx context.Context, addr string, cfg ControlConfig, logger *slog.Logger) error {
+	logger.Debug("accept dial started")
 	dialCtx, dialCancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer dialCancel()
 	ws, _, err := websocket.Dial(dialCtx, addr, cfg.Options.dialOptions())
 	if err != nil {
-		return fmt.Errorf("dial rendezvous: %w", sanitizeErr(err))
+		sanitized := sanitizeErr(err)
+		logger.Debug("accept dial complete", "ok", false, "error", sanitized)
+		return fmt.Errorf("dial rendezvous: %w", sanitized)
 	}
+	logger.Debug("accept dial complete", "ok", true)
 	defer func() { _ = ws.CloseNow() }()
 
 	cfg.Handler(ctx, ws)

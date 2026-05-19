@@ -136,7 +136,54 @@ func TestNewControlSessionID_NoCollisions(t *testing.T) {
 	}
 }
 
-// TestIDs_DistinctConstructors asserts the three constructors mint
+// TestNewAcceptID_Format mirrors TestNewBridgeID_Format for the
+// per-accept id. The format is a public contract because log
+// scrapers grep for accept_id=<value> across listener stderr; any
+// drift here breaks operator queries.
+func TestNewAcceptID_Format(t *testing.T) {
+	const want = 16
+	for i := 0; i < 32; i++ {
+		id := NewAcceptID()
+		if len(id) != want {
+			t.Fatalf("NewAcceptID() len = %d, want %d (id=%q)", len(id), want, id)
+		}
+		for j, c := range id {
+			ok := (c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')
+			if !ok {
+				t.Fatalf("NewAcceptID() id=%q: invalid char %q at %d", id, c, j)
+			}
+		}
+	}
+}
+
+// TestNewAcceptID_NoCollisions defends the 80-bit entropy claim for
+// accept ids. Each accept attempt mints a fresh id; collisions here
+// would silently merge the lifecycle log lines of unrelated accepts.
+func TestNewAcceptID_NoCollisions(t *testing.T) {
+	const n = 10_000
+	seen := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		id := NewAcceptID()
+		if _, dup := seen[id]; dup {
+			t.Fatalf("collision after %d IDs: %q", i+1, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestNewAcceptID_NotEmpty is a defence against the zero-value
+// regression — a caller that fails to call NewAcceptID and binds the
+// zero value onto a logger would emit accept_id="" on every log
+// line, silently breaking the correlation guarantee. A non-empty
+// contract here means "this function never produces that signal by
+// accident".
+func TestNewAcceptID_NotEmpty(t *testing.T) {
+	if NewAcceptID() == "" {
+		t.Fatalf("NewAcceptID() returned empty string")
+	}
+}
+
+// TestIDs_DistinctConstructors asserts the four constructors mint
 // independent values even though they share an internal helper. A
 // regression that collapsed them onto one source (e.g. a memoised
 // global) would defeat correlation by introducing matching ids
@@ -150,5 +197,14 @@ func TestIDs_DistinctConstructors(t *testing.T) {
 	}
 	if NewListenerID() == NewControlSessionID() {
 		t.Fatalf("expected distinct ids from independent constructors (listener vs control-session)")
+	}
+	if NewBridgeID() == NewAcceptID() {
+		t.Fatalf("expected distinct ids from independent constructors (bridge vs accept)")
+	}
+	if NewListenerID() == NewAcceptID() {
+		t.Fatalf("expected distinct ids from independent constructors (listener vs accept)")
+	}
+	if NewControlSessionID() == NewAcceptID() {
+		t.Fatalf("expected distinct ids from independent constructors (control-session vs accept)")
 	}
 }

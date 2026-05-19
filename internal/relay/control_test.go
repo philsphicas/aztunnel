@@ -105,7 +105,7 @@ func TestHandleAccept(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := handleAccept(ctx, "wss://"+testEndpoint(rendezvousSrv), cfg)
+		err := handleAccept(ctx, "wss://"+testEndpoint(rendezvousSrv), cfg, discardLogger())
 		if err != nil {
 			t.Fatalf("handleAccept returned error: %v", err)
 		}
@@ -130,7 +130,7 @@ func TestHandleAccept(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := handleAccept(ctx, "ws://127.0.0.1:1", cfg)
+		err := handleAccept(ctx, "ws://127.0.0.1:1", cfg, discardLogger())
 		if err == nil {
 			t.Fatal("expected error for bad address")
 		}
@@ -1118,4 +1118,389 @@ func extractSessionID(t *testing.T, rec *logRecorder) string {
 	}
 	t.Fatalf("no control_session_id in captured records: %s", string(rec.buf))
 	return ""
+}
+
+// ---------- TestAcceptID ----------
+
+// capStore is the shared backing store for captureHandler clones
+// produced by With/WithAttrs/WithGroup. Records always end up in the
+// same slice no matter which derived handler emits them.
+type capStore struct {
+	mu      sync.Mutex
+	records []capRecord
+}
+
+// capRecord is a single captured log emission with its attribute map
+// flattened across With(...) and Record-level attrs. Tests query
+// attrs by key (e.g. attrs["accept_id"]) instead of scraping the
+// rendered text.
+type capRecord struct {
+	level slog.Level
+	msg   string
+	attrs map[string]any
+}
+
+// captureHandler is a slog.Handler that snapshots every record into a
+// shared capStore. Used to assert structured attributes (accept_id,
+// reason, ok) on lifecycle log lines.
+type captureHandler struct {
+	store *capStore
+	attrs []slog.Attr
+}
+
+func newCaptureHandler() (*slog.Logger, *capStore) {
+	s := &capStore{}
+	return slog.New(&captureHandler{store: s}), s
+}
+
+func (h *captureHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	rec := capRecord{
+		level: r.Level,
+		msg:   r.Message,
+		attrs: make(map[string]any, len(h.attrs)+r.NumAttrs()),
+	}
+	for _, a := range h.attrs {
+		rec.attrs[a.Key] = a.Value.Any()
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Any()
+		return true
+	})
+	h.store.mu.Lock()
+	h.store.records = append(h.store.records, rec)
+	h.store.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	combined := make([]slog.Attr, 0, len(h.attrs)+len(attrs))
+	combined = append(combined, h.attrs...)
+	combined = append(combined, attrs...)
+	return &captureHandler{store: h.store, attrs: combined}
+}
+
+func (h *captureHandler) WithGroup(_ string) slog.Handler {
+	// Groups are unused in the relay package; preserve attrs unchanged
+	// so tests still see accept_id without group prefixing.
+	return &captureHandler{store: h.store, attrs: h.attrs}
+}
+
+// snapshot returns a copy of the captured records under the store
+// lock, so callers can iterate without racing the producer goroutines.
+func (s *capStore) snapshot() []capRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]capRecord, len(s.records))
+	copy(out, s.records)
+	return out
+}
+
+// filterByMsg returns every captured record whose message equals msg.
+func (s *capStore) filterByMsg(msg string) []capRecord {
+	var out []capRecord
+	for _, r := range s.snapshot() {
+		if r.msg == msg {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// waitForRecord polls until at least one record matches msg, or the
+// deadline expires. Returns the first match, or zero-value + false on
+// timeout. Used to synchronise the test on lifecycle events (e.g.
+// wait until "accept acquired" is logged before sending the next
+// accept message) so the suite doesn't rely on time.Sleep heuristics.
+func (s *capStore) waitForRecord(msg string, timeout time.Duration) (capRecord, bool) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if recs := s.filterByMsg(msg); len(recs) > 0 {
+			return recs[0], true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return capRecord{}, false
+}
+
+// TestAcceptID_StableAcrossLifecycle drives one accept through the
+// happy path (acquire → dial start → dial complete → release) and
+// asserts every lifecycle log line carries the same accept_id, so
+// operators can group them with a single filter.
+func TestAcceptID_StableAcrossLifecycle(t *testing.T) {
+	useInsecureTransport(t)
+
+	rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		// Block until the handler is done and the client closes.
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	rendezvousAddr := "wss://" + testEndpoint(rendezvousSrv)
+
+	handlerDone := make(chan struct{})
+	controlSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+
+		msg := map[string]interface{}{
+			"accept": map[string]interface{}{
+				"address": rendezvousAddr,
+				"id":      "test-id-0",
+			},
+		}
+		data, _ := json.Marshal(msg)
+		if err := ws.Write(r.Context(), websocket.MessageText, data); err != nil {
+			return
+		}
+		// Wait for the in-process accept handler to finish, then close
+		// the control channel so runControlLoop returns and any
+		// deferred "accept released" line gets flushed before the
+		// test inspects the capture store.
+		select {
+		case <-handlerDone:
+		case <-time.After(3 * time.Second):
+		}
+		ws.Close(websocket.StatusNormalClosure, "done")
+	}))
+
+	// Cap test runtime well above the expected lifecycle round-trip
+	// but cancel proactively as soon as the expected records are
+	// observed (runControlLoop's deferred wg.Wait would otherwise sit
+	// on the renew/ping goroutines, which only exit on ctx.Done()).
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	logger, store := newCaptureHandler()
+	tp := &mockTokenProvider{token: "test-token"}
+	cfg := ControlConfig{
+		Endpoint:      testEndpoint(controlSrv),
+		EntityPath:    "test-entity",
+		TokenProvider: tp,
+		Handler: func(ctx context.Context, ws *websocket.Conn) {
+			close(handlerDone)
+		},
+		DialTimeout: 2 * time.Second,
+		Logger:      logger,
+	}
+
+	loopErrCh := make(chan error, 1)
+	go func() {
+		_, err := runControlLoop(ctx, cfg)
+		loopErrCh <- err
+	}()
+
+	// Wait for the deferred release line: that's the last lifecycle
+	// event for the accepted attempt and arrives after the goroutine
+	// returns. Once seen, cancel ctx so the renew/ping goroutines
+	// exit and runControlLoop unwinds promptly.
+	if _, ok := store.waitForRecord("accept released", 10*time.Second); !ok {
+		cancel()
+		<-loopErrCh
+		t.Fatalf("never observed 'accept released' (records=%v)", store.snapshot())
+	}
+	cancel()
+	if err := <-loopErrCh; err == nil {
+		t.Fatal("expected error from runControlLoop")
+	}
+
+	lifecycle := []string{"accept acquired", "accept dial started", "accept dial complete", "accept released"}
+	var acceptID string
+	for _, msg := range lifecycle {
+		recs := store.filterByMsg(msg)
+		if len(recs) == 0 {
+			t.Fatalf("no captured record with msg=%q (have %d total records)", msg, len(store.snapshot()))
+		}
+		id, ok := recs[0].attrs["accept_id"].(string)
+		if !ok || id == "" {
+			t.Fatalf("record msg=%q missing accept_id attribute (attrs=%v)", msg, recs[0].attrs)
+		}
+		if acceptID == "" {
+			acceptID = id
+		} else if id != acceptID {
+			t.Fatalf("record msg=%q accept_id=%q differs from first accept_id=%q — lifecycle lines must share one ID",
+				msg, id, acceptID)
+		}
+	}
+
+	// Dial-complete on the happy path reports ok=true.
+	dialComplete := store.filterByMsg("accept dial complete")
+	if got, want := dialComplete[0].attrs["ok"], true; got != want {
+		t.Errorf("accept dial complete: ok=%v, want %v", got, want)
+	}
+
+	// accept_id is a 16-char base32 [A-Z2-7] string (idgen contract).
+	if len(acceptID) != 16 {
+		t.Errorf("accept_id %q: want 16 base32 chars", acceptID)
+	}
+	for _, c := range acceptID {
+		ok := (c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')
+		if !ok {
+			t.Errorf("accept_id %q has non-base32 char %q", acceptID, c)
+			break
+		}
+	}
+}
+
+// TestAcceptID_PresentOnDrop saturates the listener-side semaphore
+// (MaxConnections=1, first accept blocks in-handler), then sends a
+// second accept that must drop. The dropped log line must carry an
+// accept_id distinct from the accepted one, plus a structured drop
+// reason — operators can filter on the dropped accept_id and find
+// no further lifecycle lines for it.
+func TestAcceptID_PresentOnDrop(t *testing.T) {
+	useInsecureTransport(t)
+
+	rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	rendezvousAddr := "wss://" + testEndpoint(rendezvousSrv)
+
+	logger, store := newCaptureHandler()
+
+	// Buffered so the in-process handler's send always completes —
+	// the unbuffered+default form silently lost the only sync signal
+	// when the receiver hadn't yet reached its select case.
+	handlerEntered := make(chan struct{}, 1)
+	controlSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+
+		send := func(id string) error {
+			msg := map[string]interface{}{
+				"accept": map[string]interface{}{
+					"address": rendezvousAddr,
+					"id":      id,
+				},
+			}
+			data, _ := json.Marshal(msg)
+			return ws.Write(r.Context(), websocket.MessageText, data)
+		}
+
+		// First accept: must be acquired and held by the in-process
+		// handler (which blocks on context).
+		if err := send("first"); err != nil {
+			return
+		}
+		// Wait until the first handler actually entered (i.e. the
+		// semaphore slot is held) before sending the second accept.
+		// This removes the time.Sleep race that a slow CI runner
+		// could lose, where the second accept arrives before the
+		// first handler grabs the semaphore.
+		select {
+		case <-handlerEntered:
+		case <-time.After(5 * time.Second):
+			ws.Close(websocket.StatusNormalClosure, "first handler never entered")
+			return
+		}
+		// Second accept: semaphore is now full, must be dropped.
+		if err := send("second"); err != nil {
+			return
+		}
+
+		// Wait for the drop to be logged before closing so the test
+		// can observe it on the capture store deterministically.
+		if _, ok := store.waitForRecord("accept dropped", 5*time.Second); !ok {
+			ws.Close(websocket.StatusNormalClosure, "drop never logged")
+			return
+		}
+		ws.Close(websocket.StatusNormalClosure, "done")
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	tp := &mockTokenProvider{token: "test-token"}
+	cfg := ControlConfig{
+		Endpoint:       testEndpoint(controlSrv),
+		EntityPath:     "test-entity",
+		TokenProvider:  tp,
+		MaxConnections: 1,
+		Handler: func(ctx context.Context, ws *websocket.Conn) {
+			// Signal that we entered (the semaphore slot is held)
+			// then block until the control loop tears us down. The
+			// buffered+default pattern keeps the send non-blocking
+			// even though the buffer guarantees it always lands.
+			select {
+			case handlerEntered <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+		},
+		DialTimeout: 2 * time.Second,
+		Logger:      logger,
+	}
+
+	loopErrCh := make(chan error, 1)
+	go func() {
+		_, err := runControlLoop(ctx, cfg)
+		loopErrCh <- err
+	}()
+
+	// Wait for both the acquired and dropped log lines, then cancel
+	// ctx to unwind runControlLoop promptly.
+	if _, ok := store.waitForRecord("accept acquired", 10*time.Second); !ok {
+		cancel()
+		<-loopErrCh
+		t.Fatalf("never observed 'accept acquired'")
+	}
+	if _, ok := store.waitForRecord("accept dropped", 10*time.Second); !ok {
+		cancel()
+		<-loopErrCh
+		t.Fatalf("never observed 'accept dropped' (records=%v)", store.snapshot())
+	}
+	cancel()
+	if err := <-loopErrCh; err == nil {
+		t.Fatal("expected error from runControlLoop when server closes")
+	}
+
+	acquired := store.filterByMsg("accept acquired")
+	dropped := store.filterByMsg("accept dropped")
+	if len(acquired) == 0 {
+		t.Fatalf("no 'accept acquired' record captured (have %d records total)", len(store.snapshot()))
+	}
+	if len(dropped) == 0 {
+		t.Fatalf("no 'accept dropped' record captured (have %d records total)", len(store.snapshot()))
+	}
+
+	acqID, _ := acquired[0].attrs["accept_id"].(string)
+	dropID, _ := dropped[0].attrs["accept_id"].(string)
+	if acqID == "" {
+		t.Errorf("accept acquired missing accept_id (attrs=%v)", acquired[0].attrs)
+	}
+	if dropID == "" {
+		t.Errorf("accept dropped missing accept_id (attrs=%v)", dropped[0].attrs)
+	}
+	if acqID == dropID {
+		t.Errorf("accept_id %q reused across accept lifecycle — each accept attempt must mint its own", acqID)
+	}
+	if got, want := dropped[0].attrs["reason"], "semaphore_full"; got != want {
+		t.Errorf("accept dropped reason=%v, want %v", got, want)
+	}
+	if got, want := dropped[0].level, slog.LevelWarn; got != want {
+		t.Errorf("accept dropped level=%v, want %v (drops are operator-actionable)", got, want)
+	}
 }
