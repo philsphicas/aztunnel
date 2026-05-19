@@ -63,6 +63,15 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	// Fault injection: optionally reject the next authenticated control
+	// dial with 503 to exercise the listener's control-dial failure
+	// code path. Single-shot; we check after auth so unauthenticated
+	// probes cannot consume the fault.
+	if s.faults.rejectControlDial.CompareAndSwap(true, false) {
+		s.log.Debug("fault: rejecting control dial", "entity", entity)
+		http.Error(w, "service unavailable (fault injection)", http.StatusServiceUnavailable)
+		return
+	}
 	activity := make(chan struct{}, 1)
 	notify := func() {
 		select {
@@ -164,6 +173,15 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 		}
 		if msg.RenewToken != nil {
 			s.log.Debug("listener renewed token", "entity", entity)
+			// Fault injection: close the control WS as soon as we
+			// observe a renewToken. Single-shot. The listener's
+			// renewLoop / pingLoop will surface this as a forced
+			// reconnect on its next read or write.
+			if s.faults.closeControlOnRenew.CompareAndSwap(true, false) {
+				s.log.Debug("fault: closing control on renew", "entity", entity)
+				_ = ws.Close(websocket.StatusGoingAway, "fault: close on renew")
+				return
+			}
 			continue
 		}
 		s.log.Debug("listener sent unrecognized control message", "entity", entity, "len", len(data))
