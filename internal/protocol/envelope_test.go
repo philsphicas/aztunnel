@@ -11,6 +11,7 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 		Version:  CurrentVersion,
 		Target:   "10.0.0.5:22",
 		Metadata: map[string]string{"trace": "abc123"},
+		BridgeID: "ABCDEFGHIJKLMNOP",
 	}
 	data, err := json.Marshal(env)
 	if err != nil {
@@ -29,6 +30,9 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 	if got.Metadata["trace"] != "abc123" {
 		t.Errorf("metadata[trace] = %q, want %q", got.Metadata["trace"], "abc123")
+	}
+	if got.BridgeID != env.BridgeID {
+		t.Errorf("bridge_id = %q, want %q", got.BridgeID, env.BridgeID)
 	}
 }
 
@@ -66,6 +70,15 @@ func TestEnvelopeOmitEmptyMetadata(t *testing.T) {
 	s := string(data)
 	if strings.Contains(s, "metadata") {
 		t.Errorf("expected metadata to be omitted, got: %s", s)
+	}
+}
+
+func TestEnvelopeOmitEmptyBridgeID(t *testing.T) {
+	env := ConnectEnvelope{Version: CurrentVersion, Target: "host:22"}
+	data, _ := json.Marshal(env)
+	s := string(data)
+	if strings.Contains(s, "bridge_id") {
+		t.Errorf("expected bridge_id to be omitted, got: %s", s)
 	}
 }
 

@@ -10,6 +10,7 @@
 package parity
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -79,17 +80,19 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 		KeyName: server.DefaultSASKeyName,
 		Key:     server.DefaultSASKey,
 	}
-	silentLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	tun := &relayparity.Tunnel{}
 
 	// startListener brings up a single listener goroutine and returns
 	// its relayparity handle. Each listener owns a private metrics
 	// surface so Completed() / Active() report only that listener's
-	// bridges.
+	// bridges, and a private log buffer so Logs() returns only this
+	// listener's lines (cross-process correlation tests rely on the
+	// per-handle isolation).
 	startListener := func(t testing.TB) *relayparity.Listener {
 		t.Helper()
 		m := metrics.New()
+		logs := newCaptureBuffer()
 		lctx, lcancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 
@@ -101,7 +104,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			AllowList:      opts.AllowedTargets,
 			MaxConnections: opts.MaxConnections,
 			ConnectTimeout: opts.ConnectTimeout,
-			Logger:         silentLogger,
+			Logger:         slog.New(slog.NewTextHandler(logs, nil)),
 			Metrics:        m,
 		}
 
@@ -139,6 +142,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			Completed: counterReader(m, "aztunnel_connections_total"),
 			Active:    gaugeReader(m, "aztunnel_active_connections"),
 			Stop:      stop,
+			Logs:      logs.String,
 		}
 	}
 
@@ -154,6 +158,8 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 	// MaxConnections.
 	startOneSender := func() *relayparity.Sender {
 		m := metrics.New()
+		logs := newCaptureBuffer()
+		senderLogger := slog.New(slog.NewTextHandler(logs, nil))
 		sctx, scancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 		addrCh := make(chan net.Addr, 1)
@@ -178,7 +184,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 					ClientOptions: clientOpts,
 					Target:        opts.Target,
 					BindAddress:   "127.0.0.1:0",
-					Logger:        silentLogger,
+					Logger:        senderLogger,
 					Metrics:       m,
 					Ready:         ready,
 				})
@@ -189,7 +195,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 					TokenProvider: tokenProvider,
 					ClientOptions: clientOpts,
 					BindAddress:   "127.0.0.1:0",
-					Logger:        silentLogger,
+					Logger:        senderLogger,
 					Metrics:       m,
 					Ready:         ready,
 				})
@@ -221,6 +227,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			Completed: counterReader(m, "aztunnel_connections_total"),
 			Active:    gaugeReader(m, "aztunnel_active_connections"),
 			Stop:      stop,
+			Logs:      logs.String,
 		}
 	}
 
@@ -364,4 +371,33 @@ func gaugeValue(m *metrics.Metrics, name string) float64 {
 		}
 	}
 	return 0
+}
+
+// captureBuffer is a goroutine-safe io.Writer used as the destination
+// for a slog TextHandler. slog.Handler implementations are themselves
+// goroutine-safe only when their underlying writer is — bytes.Buffer
+// is not — so observability parity scenarios that scrape the captured
+// output across multiple bridges need this mutex-guarded wrapper.
+type captureBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func newCaptureBuffer() *captureBuffer { return &captureBuffer{} }
+
+// Write appends p to the buffer under a mutex. The mutex is what
+// makes the wrapped slog handler safe for concurrent use across the
+// listener / sender goroutines that share this buffer.
+func (c *captureBuffer) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+// String returns the captured output as a single string. Safe to
+// call from any goroutine; a snapshot of the buffer at call time.
+func (c *captureBuffer) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
 }

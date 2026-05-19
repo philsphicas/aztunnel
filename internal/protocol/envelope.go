@@ -17,6 +17,14 @@ type ConnectEnvelope struct {
 	// Metadata carries extensible key-value pairs for future use
 	// (auth tokens, compression negotiation, trace IDs, etc.).
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// BridgeID is a sender-minted opaque identifier for this bridge.
+	// Listeners bind it into their request-scoped logger so logs on
+	// both sides correlate via grep for the same value. Listeners
+	// receiving an empty value MUST NOT mint a fallback; absence
+	// means a sender on a pre-P5 version. The format is unspecified
+	// (callers should not parse).
+	BridgeID string `json:"bridge_id,omitempty"`
 }
 
 // ConnectResponse is sent by the relay-listener back to the relay-sender

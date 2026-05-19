@@ -96,6 +96,7 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 			Completed: scrapeCounter(metricsAddr, "aztunnel_connections_total"),
 			Active:    scrapeGauge(metricsAddr, "aztunnel_active_connections"),
 			Stop:      func() { lst.Stop(t) },
+			Logs:      func() string { return lst.logs.String() },
 		}
 	}
 
@@ -129,6 +130,7 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 			Completed: scrapeCounter(metricsAddr, "aztunnel_connections_total"),
 			Active:    scrapeGauge(metricsAddr, "aztunnel_active_connections"),
 			Stop:      func() { proc.Stop(t) },
+			Logs:      func() string { return proc.logs.String() },
 		})
 	}
 

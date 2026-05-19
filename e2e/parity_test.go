@@ -30,6 +30,7 @@ func TestParity_Azure(t *testing.T) {
 			relayparity.RunCoreSuite(t, b)
 			relayparity.RunTopologySuite(t, b)
 			relayparity.RunReliabilitySuite(t, b)
+			relayparity.RunObservabilitySuite(t, b)
 		})
 	}
 }
