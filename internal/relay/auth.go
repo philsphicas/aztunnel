@@ -48,6 +48,84 @@ type TokenProvider interface {
 	GetToken(ctx context.Context, resourceURI string) (string, error)
 }
 
+// Provider label values for TokenFetchObserver. These are the values
+// passed as the `provider` label on aztunnel_token_fetch_seconds /
+// _total when WithMetrics wraps a TokenProvider. Defined here so the
+// label vocabulary is shared between the wiring side (cmd/aztunnel)
+// and the wrapper itself, and not duplicated as string literals.
+const (
+	ProviderSAS   = "sas"
+	ProviderEntra = "entra"
+)
+
+// TokenFetchObserver receives one observation per TokenProvider.GetToken
+// call when WithMetrics is applied. The metrics package's *Metrics type
+// satisfies this interface via its ObserveTokenFetch method; declaring
+// the interface here lets internal/relay wrap a provider without
+// importing internal/metrics, which would create an import cycle
+// (metrics already imports relay).
+type TokenFetchObserver interface {
+	// ObserveTokenFetch records one GetToken call. result is "ok" for
+	// successful fetches and "error" for failures; durationSec is the
+	// wall-clock time spent inside the wrapped provider's GetToken.
+	ObserveTokenFetch(provider, result string, durationSec float64)
+}
+
+// metricsTokenProvider wraps another TokenProvider and reports each
+// GetToken call to a TokenFetchObserver. It is intentionally
+// transparent to callers: the inner provider's token and error are
+// returned unchanged.
+//
+// Placement matters. Wrapping an EntraTokenProvider (the cached
+// provider) means cache-hit returns are observed too, with near-zero
+// latency — what an operator dashboard sees is effective end-to-end
+// GetToken latency, not pure upstream-credential refresh latency. The
+// metric Help text reflects that contract.
+type metricsTokenProvider struct {
+	inner    TokenProvider
+	provider string
+	obs      TokenFetchObserver
+}
+
+// GetToken delegates to the wrapped provider and reports latency +
+// outcome to the observer. The observer is never nil here — WithMetrics
+// short-circuits a nil observer at construction time, so this hot path
+// pays no per-call branch.
+func (p *metricsTokenProvider) GetToken(ctx context.Context, resourceURI string) (string, error) {
+	start := time.Now()
+	tok, err := p.inner.GetToken(ctx, resourceURI)
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	p.obs.ObserveTokenFetch(p.provider, result, time.Since(start).Seconds())
+	return tok, err
+}
+
+// WithMetrics returns a TokenProvider that reports each GetToken call
+// to obs as (provider, result, durationSec). provider is a short label
+// string such as ProviderSAS or ProviderEntra; result is "ok" or
+// "error" depending on the inner call's outcome.
+//
+// If obs is the plain (untyped) nil, p is returned unchanged — no
+// wrapping, no overhead. Callers passing an interface value whose
+// underlying concrete pointer is nil (the classic "typed-nil-in-an-
+// interface" pitfall) MUST handle that themselves at the call site,
+// e.g.:
+//
+//	if m != nil {
+//	    tp = relay.WithMetrics(tp, m, relay.ProviderEntra)
+//	}
+//
+// because WithMetrics cannot tell from the interface value alone
+// whether the underlying observer is nil without reflection.
+func WithMetrics(p TokenProvider, obs TokenFetchObserver, provider string) TokenProvider {
+	if obs == nil {
+		return p
+	}
+	return &metricsTokenProvider{inner: p, provider: provider, obs: obs}
+}
+
 // SASTokenProvider generates Shared Access Signature tokens.
 type SASTokenProvider struct {
 	KeyName string

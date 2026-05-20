@@ -24,7 +24,7 @@ func (p *PortForwardCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	endpoint, opts, tp, err := resolveAuth(p.AuthFlags)
+	endpoint, opts, tp, providerName, err := resolveAuth(p.AuthFlags)
 	if err != nil {
 		return err
 	}
@@ -59,6 +59,7 @@ func (p *PortForwardCmd) Run(globals *Globals) error {
 	if cfg.Metrics, err = resolveMetrics(ctx, globals.MetricsAddr, globals.MetricsMaxTargets, logger); err != nil {
 		return err
 	}
+	cfg.TokenProvider = observeTokenFetch(tp, cfg.Metrics, providerName)
 
 	return sender.PortForward(ctx, cfg)
 }

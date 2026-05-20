@@ -57,6 +57,8 @@ type Metrics struct {
 	controlChannelUp   prometheus.Gauge
 	connectionDuration *prometheus.HistogramVec
 	dialDuration       *prometheus.HistogramVec
+	tokenFetchSeconds  *prometheus.HistogramVec
+	tokenFetchTotal    *prometheus.CounterVec
 
 	targetCount atomic.Int64
 	targets     sync.Map // map[string]struct{}
@@ -114,6 +116,27 @@ func New() *Metrics {
 			Help:      "Time to establish outbound connections in seconds.",
 			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
 		}, []string{"role"}),
+
+		tokenFetchSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: namespace,
+			Name:      "token_fetch_seconds",
+			Help: "Latency of TokenProvider.GetToken calls. " +
+				"Records end-to-end GetToken latency, including any " +
+				"in-process caching the wrapped provider performs " +
+				"(e.g. EntraTokenProvider's cache hits land as " +
+				"sub-millisecond observations alongside underlying-" +
+				"credential refreshes; SAS providers re-sign per call " +
+				"and have no cache, so observations reflect the signing " +
+				"cost). The tail extends to 60s to keep slow-path " +
+				"signal (e.g. `az` shell-out cold start) bucketed.",
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60},
+		}, []string{"provider", "result"}),
+
+		tokenFetchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "token_fetch_total",
+			Help:      "Count of TokenProvider.GetToken calls by outcome.",
+		}, []string{"provider", "result"}),
 	}
 
 	reg.MustRegister(
@@ -124,6 +147,8 @@ func New() *Metrics {
 		m.controlChannelUp,
 		m.connectionDuration,
 		m.dialDuration,
+		m.tokenFetchSeconds,
+		m.tokenFetchTotal,
 	)
 
 	return m
@@ -234,6 +259,18 @@ func (m *Metrics) ObserveDialDuration(role string, seconds float64) {
 		return
 	}
 	m.dialDuration.WithLabelValues(role).Observe(seconds)
+}
+
+// ObserveTokenFetch records the latency and outcome of a single
+// TokenProvider.GetToken call. Safe to call on a nil receiver — observation
+// is dropped silently in that case so callers can wire the observer
+// unconditionally and let the call site decide whether metrics are enabled.
+func (m *Metrics) ObserveTokenFetch(provider, result string, durationSec float64) {
+	if m == nil {
+		return
+	}
+	m.tokenFetchSeconds.WithLabelValues(provider, result).Observe(durationSec)
+	m.tokenFetchTotal.WithLabelValues(provider, result).Inc()
 }
 
 // SetControlChannelConnected sets the control channel gauge.

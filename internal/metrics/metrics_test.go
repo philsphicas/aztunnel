@@ -31,6 +31,7 @@ func TestNew(t *testing.T) {
 	// Trigger all metrics so they appear in Gather output.
 	m.ConnectionError("test", "test")
 	m.ObserveDialDuration("test", 0.1)
+	m.ObserveTokenFetch("stub", "ok", 0.01)
 	m.SetControlChannelConnected(true)
 	tracker := m.ConnectionOpened("test", "test:22")
 	tracker.Done(1.0, 100, 200, nil)
@@ -48,6 +49,8 @@ func TestNew(t *testing.T) {
 		"aztunnel_control_channel_connected",
 		"aztunnel_connection_duration_seconds",
 		"aztunnel_dial_duration_seconds",
+		"aztunnel_token_fetch_seconds",
+		"aztunnel_token_fetch_total",
 	}
 	got := make(map[string]bool)
 	for _, f := range fams {
@@ -489,9 +492,79 @@ func TestNilMetrics(t *testing.T) {
 
 	m.ConnectionError("sender", ReasonDialFailed)
 	m.ObserveDialDuration("sender", 0.1)
+	m.ObserveTokenFetch("entra", "ok", 0.1)
 	m.SetControlChannelConnected(true)
 
 	// Calling Done on a nil *ConnectionTracker must not panic.
 	var nilTracker *ConnectionTracker
 	nilTracker.Done(1.0, 100, 200, nil)
+}
+
+// TestObserveTokenFetch_RecordsHistogramAndCounter verifies that a
+// single ObserveTokenFetch call increments both the counter (by 1) and
+// the histogram (one sample) under the exact (provider, result) label
+// pair passed in.
+func TestObserveTokenFetch_RecordsHistogramAndCounter(t *testing.T) {
+	m := New()
+	m.ObserveTokenFetch("entra", "ok", 0.123)
+	m.ObserveTokenFetch("entra", "ok", 0.456)
+	m.ObserveTokenFetch("entra", "error", 1.5)
+
+	fams, err := m.Registry.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+
+	var sawCounter, sawHistogram bool
+	for _, f := range fams {
+		switch f.GetName() {
+		case "aztunnel_token_fetch_total":
+			sawCounter = true
+			counts := map[string]float64{}
+			for _, sample := range f.GetMetric() {
+				key := labelKey(sample, "provider", "result")
+				counts[key] = sample.GetCounter().GetValue()
+			}
+			if counts["entra/ok"] != 2 {
+				t.Errorf("token_fetch_total{entra,ok} = %v, want 2", counts["entra/ok"])
+			}
+			if counts["entra/error"] != 1 {
+				t.Errorf("token_fetch_total{entra,error} = %v, want 1", counts["entra/error"])
+			}
+		case "aztunnel_token_fetch_seconds":
+			sawHistogram = true
+			samples := map[string]uint64{}
+			for _, sample := range f.GetMetric() {
+				key := labelKey(sample, "provider", "result")
+				samples[key] = sample.GetHistogram().GetSampleCount()
+			}
+			if samples["entra/ok"] != 2 {
+				t.Errorf("token_fetch_seconds{entra,ok} count = %v, want 2", samples["entra/ok"])
+			}
+			if samples["entra/error"] != 1 {
+				t.Errorf("token_fetch_seconds{entra,error} count = %v, want 1", samples["entra/error"])
+			}
+		}
+	}
+	if !sawCounter {
+		t.Error("aztunnel_token_fetch_total not registered")
+	}
+	if !sawHistogram {
+		t.Error("aztunnel_token_fetch_seconds not registered")
+	}
+}
+
+// labelKey concatenates the named label values from a Prometheus
+// metric sample in the order given, separated by "/". Used to index
+// histogram/counter samples by their label tuple in tests.
+func labelKey(sample *dto.Metric, names ...string) string {
+	values := make(map[string]string)
+	for _, lp := range sample.GetLabel() {
+		values[lp.GetName()] = lp.GetValue()
+	}
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = values[n]
+	}
+	return strings.Join(parts, "/")
 }

@@ -25,7 +25,7 @@ func (r *RelayListenerCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	endpoint, opts, tp, err := resolveAuth(r.AuthFlags)
+	endpoint, opts, tp, providerName, err := resolveAuth(r.AuthFlags)
 	if err != nil {
 		return err
 	}
@@ -44,7 +44,7 @@ func (r *RelayListenerCmd) Run(globals *Globals) error {
 	cfg := listener.Config{
 		Endpoint:       endpoint,
 		EntityPath:     hyco,
-		TokenProvider:  tp,
+		TokenProvider:  observeTokenFetch(tp, m, providerName),
 		ClientOptions:  opts,
 		AllowList:      r.Allow,
 		MaxConnections: r.MaxConnections,
