@@ -29,6 +29,7 @@ func RunObservabilitySuite(t *testing.T, b Backend) {
 		{"SenderLogsCode_OnConnectFailure", ScenarioSenderLogsCode_OnConnectFailure},
 		{"ListenerDialFailureLog_CarriesCode", ScenarioListenerDialFailureLog_CarriesCode},
 		{"BridgeCauseLogs", ScenarioBridgeCauseLogs},
+		{"BridgePerDirection_NormalClose", ScenarioBridgePerDirection_NormalClose},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -469,5 +470,56 @@ func ScenarioBridgeCauseLogs(t *testing.T, b Backend) {
 		`msg="bridge ended"`, "cause=")
 	if !strings.Contains(listenerLine, "cause=peer_close") {
 		t.Fatalf("listener bridge-end cause not peer_close:\n%s", listenerLine)
+	}
+}
+
+// ScenarioBridgePerDirection_NormalClose drives one port-forward
+// bridge to a local clean close, then asserts that the sender's
+// bridge-end slog line does NOT carry the per-direction error
+// attributes tcp_to_ws_err= / ws_to_tcp_err=. These attributes are
+// conditional in the caller (emitted only when the respective
+// direction's error is non-nil after the induced-cancellation
+// filter), so their absence proves both sender pumps ended cleanly:
+// tcpToWS returned nil on TCP EOF (after conn.Close), and wsToTCP
+// was induced-cancelled by the bridge's own ctx-cancel (filtered to
+// nil).
+//
+// The listener side is intentionally not asserted: the sender's
+// post-bridge ws.CloseNow() does not exchange a normal-close frame,
+// so the listener's wsToTCP pump observes an abrupt frame-header
+// EOF — a real per-direction error that the new attribute correctly
+// surfaces.
+//
+// Cross-backend: identical on mock and Azure. The conditional
+// log-attr policy lives in the sender call site, and the per-
+// direction nil/non-nil decision lives in relay.Bridge's
+// isInducedCancellation filter — neither depends on the relay
+// service.
+func ScenarioBridgePerDirection_NormalClose(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+	requireLogs(t, tun)
+
+	conn := dialWithRetry(t, tun.SenderAddr, 5*time.Second)
+	want := []byte("p11 per-direction\n")
+	writeAll(t, conn, want)
+	got := readN(t, conn, len(want), 10*time.Second)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("echo mismatch: got=%q want=%q", got, want)
+	}
+	_ = conn.Close()
+
+	senderLine := waitForLogLineContaining(t, tun.Senders[0].Logs, 10*time.Second,
+		`msg="bridge ended"`, "cause=")
+	if strings.Contains(senderLine, "tcp_to_ws_err=") || strings.Contains(senderLine, "ws_to_tcp_err=") {
+		t.Fatalf("sender bridge-end carries per-direction error on normal close:\n%s", senderLine)
 	}
 }

@@ -20,20 +20,58 @@ const (
 	bridgePingTimeout  = 10 * time.Second
 )
 
-// BridgeStats holds the post-mortem of a completed bridge: bidirectional
-// byte counts and a short classifier ("peer_close", "local_close",
-// "renew_failure", ...) that operators log to triage why the bridge
-// ended. Cause is one of the labels returned by bridgecause.Name.
+// BridgeStats holds the bidirectional byte counts of a completed
+// bridge. The TCPToWS / WSToTCP fields tally bytes copied in each
+// direction across the bridge's lifetime; the end-cause classifier
+// lives on BridgeResult.EndCause so per-direction errors and the
+// overall cause sit on the same result struct.
 type BridgeStats struct {
-	TCPToWS int64  // bytes copied from the TCP/local side to the WebSocket
-	WSToTCP int64  // bytes copied from the WebSocket to the TCP/local side
-	Cause   string // classifier from bridgecause.Name(context.Cause(...))
+	TCPToWS int64 // bytes copied from the TCP/local side to the WebSocket
+	WSToTCP int64 // bytes copied from the WebSocket to the TCP/local side
+}
+
+// BridgeResult is the outcome of one completed bridge. It carries the
+// byte counters (Stats) plus the per-direction terminating errors and
+// the bridgecause classifier that ended the overall bridge.
+//
+// TCPToWS / WSToTCP are nil on a clean direction (normal close, EOF,
+// or an "induced cancellation" — see below). A non-nil value is the
+// terminating error of that direction's pump after the normal-close
+// filters (ignoreNormalClose, ignoreEOF) have run.
+//
+// Induced cancellations are suppressed to nil so the per-direction
+// fields surface only that direction's own failure: when the first
+// pump returns the bridge cancels its internal ctx (interrupting the
+// second pump's ws.Reader with context.Canceled) and calls
+// tcp.SetReadDeadline(time.Now()) (interrupting the second pump's
+// tcp.Read with net.Error.Timeout()). Both shapes match
+// isInducedCancellation and are filtered out before BridgeResult is
+// returned. The same filter also catches both pumps' ctx.Canceled /
+// ctx.DeadlineExceeded under a parent-ctx cancel/timeout, so
+// user-cancel and timeout bridges report nil per-direction errors
+// alongside an EndCause of "user_cancel" / "timeout".
+//
+// EndCause is bridgecause.Name(context.Cause(bridgeCtx)) at return
+// time — one of the stable short labels operators grep on.
+type BridgeResult struct {
+	// Stats is the byte counters for this bridge.
+	Stats BridgeStats
+
+	// TCPToWS is the terminating error of the TCP→WebSocket
+	// direction (nil on normal close / induced cancellation).
+	TCPToWS error
+
+	// WSToTCP is the terminating error of the WebSocket→TCP
+	// direction (nil on normal close / induced cancellation).
+	WSToTCP error
+
+	// EndCause is the bridgecause label for the overall bridge end.
+	EndCause string
 }
 
 // pumpResult identifies which I/O operation a bridge pump exited on
 // so the cause classifier can distinguish a peer-side failure
-// (ws.Write to a dead peer) from a local-side failure (tcp.Read EOF)
-// when the two pumps share a single error channel.
+// (ws.Write to a dead peer) from a local-side failure (tcp.Read EOF).
 type pumpResult struct {
 	op  string // "ws_read" / "ws_write" / "tcp_read" / "tcp_write"
 	err error
@@ -41,8 +79,10 @@ type pumpResult struct {
 
 // Bridge copies data bidirectionally between a WebSocket connection
 // and a TCP connection until one side closes or the context is
-// cancelled. It returns byte-transfer statistics including a Cause
-// classifier and the first error from either direction.
+// cancelled. It returns a BridgeResult with byte counters, the
+// per-direction terminating errors, and an EndCause classifier; the
+// second return is the first non-nil pump error for backward-compat
+// with callers that just check `if err != nil`.
 //
 // The classifier comes from context.Cause on an internal
 // WithCancelCause-derived child context. Cause-cancel is first-cancel-
@@ -57,41 +97,125 @@ type pumpResult struct {
 //     still running, that cause propagates down to the child first;
 //     the bridge's later pump-exit cancel is then the no-op, and the
 //     parent's cause wins.
-func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) (BridgeStats, error) {
+//
+// Bridge waits for every spawned goroutine (both pumps and the ping
+// loop) before returning, so it does not leak goroutines on its
+// caller.
+func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) (BridgeResult, error) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 
 	var tcpToWSBytes, wsToTCPBytes atomic.Int64
-	errc := make(chan pumpResult, 2)
+	// One single-slot channel per direction so the bridge can
+	// attribute each error to the pump that produced it.
+	wsToTCPCh := make(chan pumpResult, 1)
+	tcpToWSCh := make(chan pumpResult, 1)
+	pingDone := make(chan struct{})
 
 	// WebSocket → TCP
 	go func() {
 		op, err := wsToTCP(ctx, ws, tcp, &wsToTCPBytes)
-		errc <- pumpResult{op: op, err: err}
+		wsToTCPCh <- pumpResult{op: op, err: err}
 	}()
 
 	// TCP → WebSocket
 	go func() {
 		op, err := tcpToWS(ctx, ws, tcp, &tcpToWSBytes)
-		errc <- pumpResult{op: op, err: err}
+		tcpToWSCh <- pumpResult{op: op, err: err}
 	}()
 
 	// WebSocket keepalive pings to prevent Azure Relay idle timeout.
-	go bridgePingLoop(ctx, ws)
+	// Wrapped in a tracking goroutine so Bridge can join it before
+	// returning and not leak this goroutine past the caller.
+	go func() {
+		defer close(pingDone)
+		bridgePingLoop(ctx, ws)
+	}()
 
-	// Wait for the first direction to finish, then cancel the other.
-	first := <-errc
-	cancel(causeFromPumpExit(first.op, first.err))
-	// Unblock tcp.Read in tcpToWS by closing the read side.
-	_ = tcp.SetReadDeadline(time.Now())
-	<-errc
-
-	stats := BridgeStats{
-		TCPToWS: tcpToWSBytes.Load(),
-		WSToTCP: wsToTCPBytes.Load(),
-		Cause:   bridgecause.Name(context.Cause(ctx)),
+	// Wait for the first direction to finish, stamp cause, then
+	// unblock the other pump.
+	var first, second pumpResult
+	var firstWasWSToTCP bool
+	select {
+	case r := <-wsToTCPCh:
+		first = r
+		firstWasWSToTCP = true
+	case r := <-tcpToWSCh:
+		first = r
 	}
-	return stats, first.err
+	cancel(causeFromPumpExit(first.op, first.err))
+	// Unblock tcp.Read in the second pump (if it was tcpToWS) by
+	// expiring its read deadline. The ws-side pump's ws.Reader sees
+	// the cancel via the internal ctx.
+	_ = tcp.SetReadDeadline(time.Now())
+
+	if firstWasWSToTCP {
+		second = <-tcpToWSCh
+	} else {
+		second = <-wsToTCPCh
+	}
+
+	// Join the ping loop before returning. ctx is already cancelled,
+	// so the loop's select returns on the next iteration; any
+	// in-flight ws.Ping aborts via its pingCtx (derived from ctx).
+	<-pingDone
+
+	var wsErr, tcpErr error
+	if firstWasWSToTCP {
+		wsErr = first.err
+		tcpErr = second.err
+	} else {
+		tcpErr = first.err
+		wsErr = second.err
+	}
+	if isInducedCancellation(wsErr) {
+		wsErr = nil
+	}
+	if isInducedCancellation(tcpErr) {
+		tcpErr = nil
+	}
+
+	result := BridgeResult{
+		Stats: BridgeStats{
+			TCPToWS: tcpToWSBytes.Load(),
+			WSToTCP: wsToTCPBytes.Load(),
+		},
+		TCPToWS:  tcpErr,
+		WSToTCP:  wsErr,
+		EndCause: bridgecause.Name(context.Cause(ctx)),
+	}
+
+	// Backward-compat primary error: the first pump's raw err.
+	// Returning nil on a normal close preserves the single-error
+	// callers' existing observable behavior (WARN-on-cancel sender
+	// callers still fire on a parent-ctx cancellation; a normal
+	// peer-close stays at DEBUG). The second pump's err is reported
+	// via result.{TCPToWS,WSToTCP} for the diagnostic log.
+	return result, first.err
+}
+
+// isInducedCancellation reports whether err is the artifact of the
+// bridge tearing the other direction down — context.Canceled /
+// context.DeadlineExceeded propagated to ws.Reader/ws.Write, or a
+// net.Error.Timeout() from tcp.Read after the bridge expired its
+// deadline. The bridge's only sources of pump-level timeouts are the
+// parent ctx deadline (also classified into EndCause) and the
+// SetReadDeadline call the bridge itself makes on the second pump;
+// in both cases the per-direction error is noise, so filtering it to
+// nil keeps BridgeResult.{TCPToWS,WSToTCP} focused on each direction's
+// own failure.
+func isInducedCancellation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return false
 }
 
 // causeFromPumpExit picks the sentinel a pump's exit should stamp on

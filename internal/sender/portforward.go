@@ -112,11 +112,17 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	logAccept(logger, target, listenerID)
 
 	// Bridge data.
-	stats, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
+	result, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
 	attrs := []any{
-		"cause", stats.Cause,
-		"tcp_to_ws", stats.TCPToWS,
-		"ws_to_tcp", stats.WSToTCP,
+		"cause", result.EndCause,
+		"tcp_to_ws", result.Stats.TCPToWS,
+		"ws_to_tcp", result.Stats.WSToTCP,
+	}
+	if result.TCPToWS != nil {
+		attrs = append(attrs, "tcp_to_ws_err", result.TCPToWS)
+	}
+	if result.WSToTCP != nil {
+		attrs = append(attrs, "ws_to_tcp_err", result.WSToTCP)
 	}
 	if code, ok := relay.WSCloseCode(bridgeErr); ok {
 		attrs = append(attrs, "close_code", code)
