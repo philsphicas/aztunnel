@@ -220,7 +220,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 
 	// control_started fires here, after the dial has succeeded —
 	// this is the operational milestone every other listener
-	// readiness signal (metric, OnConnect callback, parity test
+	// readiness signal (metric, OnConnect callback, e2e test
 	// waitForLog) hangs off. On dial failure, only control_ended
 	// fires with reason=dial_failed/auth_failed; that single
 	// signal is sufficient to tell an operator the loop terminated

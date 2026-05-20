@@ -1,13 +1,13 @@
-// Package parity wires the shared relay-parity scenario suite
-// (internal/testharness/relayparity) up against an in-process mock relay.
+// Package mockbackend wires the shared e2e scenario suite
+// (internal/testharness/e2escenarios) up against an in-process mock relay.
 //
 // MockBackend brings up a real aztunnel listener + sender (the same
 // code paths exercised against Azure Relay) talking to a mock relay
-// server in-process. Tests written against the relayparity.Backend
+// server in-process. Tests written against the e2escenarios.Backend
 // interface run unmodified against this backend, and the e2e module's
 // azureBackend, so any behavioural divergence between mock and Azure
 // shows up as a failing scenario in one but not the other.
-package parity
+package mockbackend
 
 import (
 	"bytes"
@@ -29,15 +29,16 @@ import (
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/relay"
 	"github.com/philsphicas/aztunnel/internal/sender"
-	"github.com/philsphicas/aztunnel/internal/testharness/relayparity"
+	"github.com/philsphicas/aztunnel/internal/testharness/e2escenarios"
 	"github.com/philsphicas/aztunnel/mockrelay/server"
 	dto "github.com/prometheus/client_model/go"
 )
 
-// MockBackend implements relayparity.Backend by standing up a mock
+// MockBackend implements e2escenarios.Backend by standing up a mock
 // relay server + aztunnel listener(s) + aztunnel sender(s) all in the
-// same process. It is the fast, deterministic side of the parity
-// matrix and runs in the default `go test ./mockrelay/...` job.
+// same process. It is the fast, deterministic side of the mock-vs-
+// Azure conformance matrix and runs in the default
+// `go test ./mockrelay/...` job.
 type MockBackend struct{}
 
 // Name returns the backend identifier used in test sub-paths.
@@ -47,13 +48,13 @@ func (*MockBackend) Name() string { return "mock" }
 // until every listener's control channel is attached and every sender
 // bind is accepting TCP. All goroutines, the mock HTTP server, and
 // the sender binds are released via t.Cleanup.
-func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relayparity.Tunnel {
+func (*MockBackend) Setup(t testing.TB, opts e2escenarios.SetupOptions) *e2escenarios.Tunnel {
 	t.Helper()
 	if opts.NumListeners < 1 {
 		t.Fatalf("NumListeners must be >= 1, got %d", opts.NumListeners)
 	}
 	switch opts.SenderMode {
-	case relayparity.ModePortForward, relayparity.ModeSOCKS5:
+	case e2escenarios.ModePortForward, e2escenarios.ModeSOCKS5:
 	default:
 		t.Fatalf("unknown SenderMode %v", opts.SenderMode)
 	}
@@ -82,15 +83,15 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 		Key:     server.DefaultSASKey,
 	}
 
-	tun := &relayparity.Tunnel{}
+	tun := &e2escenarios.Tunnel{}
 
 	// startListener brings up a single listener goroutine and returns
-	// its relayparity handle. Each listener owns a private metrics
+	// its e2escenarios handle. Each listener owns a private metrics
 	// surface so Completed() / Active() report only that listener's
 	// bridges, and a private log buffer so Logs() returns only this
 	// listener's lines (cross-process correlation tests rely on the
 	// per-handle isolation).
-	startListener := func(t testing.TB) *relayparity.Listener {
+	startListener := func(t testing.TB) *e2escenarios.Listener {
 		t.Helper()
 		m := metrics.New()
 		logs := newCaptureBuffer()
@@ -138,7 +139,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			})
 		}
 
-		return &relayparity.Listener{
+		return &e2escenarios.Listener{
 			Addr:             "",
 			Completed:        counterReader(m, "aztunnel_connections_total"),
 			Active:           gaugeReader(m, "aztunnel_active_connections"),
@@ -158,7 +159,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 	// fires immediately after net.Listen — there is no probe TCP
 	// connection that would consume a listener slot under
 	// MaxConnections.
-	startOneSender := func() *relayparity.Sender {
+	startOneSender := func() *e2escenarios.Sender {
 		m := metrics.New()
 		logs := newCaptureBuffer()
 		senderLogger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -178,7 +179,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			defer close(done)
 			var err error
 			switch opts.SenderMode {
-			case relayparity.ModePortForward:
+			case e2escenarios.ModePortForward:
 				err = sender.PortForward(sctx, sender.PortForwardConfig{
 					Endpoint:      host,
 					EntityPath:    entity,
@@ -190,7 +191,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 					Metrics:       m,
 					Ready:         ready,
 				})
-			case relayparity.ModeSOCKS5:
+			case e2escenarios.ModeSOCKS5:
 				err = sender.SOCKS5Proxy(sctx, sender.SOCKS5Config{
 					Endpoint:      host,
 					EntityPath:    entity,
@@ -224,7 +225,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			})
 		}
 
-		return &relayparity.Sender{
+		return &e2escenarios.Sender{
 			Addr:      addr.String(),
 			Completed: counterReader(m, "aztunnel_connections_total"),
 			Active:    gaugeReader(m, "aztunnel_active_connections"),
@@ -239,7 +240,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 		tun.SenderAddrs = append(tun.SenderAddrs, s.Addr)
 	}
 	tun.SenderAddr = tun.SenderAddrs[0]
-	tun.AddListener = func(t *testing.T) *relayparity.Listener {
+	tun.AddListener = func(t *testing.T) *e2escenarios.Listener {
 		t.Helper()
 		l := startListener(t)
 		tun.Listeners = append(tun.Listeners, l)
@@ -420,7 +421,7 @@ func gaugeValue(m *metrics.Metrics, name string) float64 {
 // captureBuffer is a goroutine-safe io.Writer used as the destination
 // for a slog TextHandler. slog.Handler implementations are themselves
 // goroutine-safe only when their underlying writer is — bytes.Buffer
-// is not — so observability parity scenarios that scrape the captured
+// is not — so observability e2e scenarios that scrape the captured
 // output across multiple bridges need this mutex-guarded wrapper.
 type captureBuffer struct {
 	mu  sync.Mutex

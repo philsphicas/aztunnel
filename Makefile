@@ -91,12 +91,12 @@ e2e-infra-janitor: ## Delete orphaned per-invocation hybrid connections older th
 vulncheck: ## Check Go dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
-bench: ## Run mock parity benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
+bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
 	cd mockrelay && go test -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
 		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
-		./testharness/parity/...
+		./testharness/mockbackend/...
 
-bench-compare: ## Compare parity benchmarks across two refs: BASE=<sha> [HEAD=<sha>]
+bench-compare: ## Compare e2e benchmarks across two refs: BASE=<sha> [HEAD=<sha>]
 	@if [ -z "$(BASE)" ]; then \
 		echo "usage: make bench-compare BASE=<sha> [HEAD=<sha>] [BACKEND=mock|azure] [COUNT=N] [BENCHTIME=...]" >&2; \
 		exit 2; \

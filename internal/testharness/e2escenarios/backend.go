@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"testing"
@@ -30,13 +30,13 @@ func (m SenderMode) String() string {
 	}
 }
 
-// Backend is the abstraction parity scenarios run against. Each
+// Backend is the abstraction e2e scenarios run against. Each
 // implementation knows how to bring up a topology that satisfies
 // SetupOptions and to tear it down cleanly via t.Cleanup.
 //
 // Setup takes testing.TB rather than *testing.T so the same backend
-// implementation is reachable from both tests (RunCoreSuite,
-// RunTopologySuite) and benchmarks (RunBenchSuite). The only TB
+// implementation is reachable from both tests (RunCoreScenarios,
+// RunTopologyScenarios) and benchmarks (RunBenchmarks). The only TB
 // methods used are Helper / Fatalf / Logf / Cleanup, all on the
 // shared interface.
 type Backend interface {
@@ -143,7 +143,7 @@ type Listener struct {
 	Stop func()
 
 	// Logs returns every log line this listener has emitted so far,
-	// joined by newlines. Observability parity scenarios grep this
+	// joined by newlines. Observability e2e scenarios grep this
 	// string for cross-process correlation IDs (e.g. bridge_id).
 	// Optional: backends that do not capture logs may leave this nil
 	// and scenarios that need it call t.Skip.

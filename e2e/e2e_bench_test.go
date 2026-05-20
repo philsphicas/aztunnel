@@ -5,12 +5,12 @@ package e2e
 import (
 	"testing"
 
-	"github.com/philsphicas/aztunnel/internal/testharness/relayparity"
+	"github.com/philsphicas/aztunnel/internal/testharness/e2escenarios"
 )
 
-// BenchmarkParity_Azure runs the shared parity benchmark suite
+// BenchmarkE2E_Azure runs the shared e2e benchmark suite
 // against a real Azure Relay namespace. Pair with the mock variant
-// (BenchmarkParity_Mock in mockrelay/testharness/parity) for fast
+// (BenchmarkE2E_Mock in mockrelay/testharness/mockbackend) for fast
 // iteration; the Azure variant produces source-of-truth numbers for
 // characterising the relay's connect-latency and short-session-
 // throughput dimensions on a real namespace.
@@ -35,11 +35,11 @@ import (
 //
 //	go test -tags=e2e -run='^$' -bench=. -benchmem -count=5 \
 //	    -benchtime=10x -timeout=60m ./e2e/...
-func BenchmarkParity_Azure(b *testing.B) {
+func BenchmarkE2E_Azure(b *testing.B) {
 	requireProvider(b)
 	name := availableAuthNames(b)[0]
 	b.Run(name, func(b *testing.B) {
 		backend := &azureBackend{authName: name, acquireEnv: leaseSharedHyco}
-		relayparity.RunBenchSuite(b, backend)
+		e2escenarios.RunBenchmarks(b, backend)
 	})
 }

@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"crypto/rand"
@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// RunBenchSuite registers every parity benchmark as a sub-bench under
-// b. Mirrors RunCoreSuite for tests: a single entry point keeps the
+// RunBenchmarks registers every e2e benchmark as a sub-bench under
+// b. Mirrors RunCoreScenarios for tests: a single entry point keeps the
 // per-backend bench_test.go files trivial.
 //
 // The sub-benches measure the connection-setup and concurrent-
@@ -25,7 +25,7 @@ import (
 // and tears it down through t.Cleanup. AssertNoLeaks is deliberately
 // not called: leak polling inside a benchmark would inflate the
 // timer.
-func RunBenchSuite(b *testing.B, backend Backend) {
+func RunBenchmarks(b *testing.B, backend Backend) {
 	b.Helper()
 	b.Run("ConnectLatency_Serial_PortForward", func(b *testing.B) {
 		benchConnectLatencySerial(b, backend, ModePortForward)
@@ -231,6 +231,20 @@ func benchSteadyThroughput(b *testing.B, backend Backend) {
 		b.Fatalf("dial: %v", err)
 	}
 	defer conn.Close() //nolint:errcheck // best-effort
+
+	// Warmup: drive the relay rendezvous before measurement.
+	// net.DialTimeout only completes the local TCP accept; the sender
+	// dials the relay lazily on first data, which on Azure adds ~1s
+	// to iteration 0 unless we flush a probe through.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if _, err := conn.Write([]byte{0}); err != nil {
+		b.Fatalf("warmup write: %v", err)
+	}
+	var warmupBuf [1]byte
+	if _, err := io.ReadFull(conn, warmupBuf[:]); err != nil {
+		b.Fatalf("warmup read: %v", err)
+	}
+	_ = conn.SetDeadline(time.Time{})
 
 	const transferSize = 1024 * 1024
 	body := make([]byte, transferSize)
