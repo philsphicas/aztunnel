@@ -1,7 +1,7 @@
 // Package idgen mints short opaque identifiers used as log
 // correlation keys across the aztunnel observability surface
-// (bridge_id, listener_id, control_session_id; future accept_id and
-// related ids will join here).
+// (bridge_id, listener_id, control_session_id, accept_id; future
+// ids will join here).
 //
 // IDs are not security-sensitive — they exist to correlate
 // observations across components. All ids share one shape: 16
@@ -51,6 +51,19 @@ func NewListenerID() string {
 // mints a new id, letting operators mechanically split before-and-
 // after log streams. Panics on OS RNG failure (see NewBridgeID).
 func NewControlSessionID() string {
+	return newID()
+}
+
+// NewAcceptID returns a fresh, opaque correlation ID for a single
+// listener-side accept attempt. Callers bind the result onto their
+// slog logger with `logger.With("accept_id", id)` so every lifecycle
+// log line for that attempt (drop, acquire, rendezvous dial start,
+// rendezvous dial end, release) shares the same key — letting
+// operators group one accept's events with a single grep. An accept
+// that succeeds owns a distinct id from the bridge_id assigned later
+// by the sender; the two are not expected to be related. Panics on
+// OS RNG failure (see NewBridgeID).
+func NewAcceptID() string {
 	return newID()
 }
 
