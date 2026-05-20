@@ -43,8 +43,9 @@ type Provisioner struct {
 
 // NewProvisioner constructs a Provisioner using DefaultAzureCredential.
 // It does not call Azure other than to resolve the subscription ID, which
-// is read from AZURE_SUBSCRIPTION_ID env var (set by `azure/login` in CI
-// and by `az account set` locally).
+// is read from AZURE_SUBSCRIPTION_ID env var (set by `azure/login` in CI)
+// and otherwise falls back to ~/.azure/azureProfile.json (`az account
+// show`'s default subscription) so a contributor only needs `az login`.
 func NewProvisioner(ctx context.Context, cfg Config) (*Provisioner, error) {
 	if cfg.ResourceGroup == "" {
 		return nil, errors.New("ResourceGroup is required")
@@ -53,9 +54,6 @@ func NewProvisioner(ctx context.Context, cfg Config) (*Provisioner, error) {
 		cfg.SubscriptionID = os.Getenv("AZURE_SUBSCRIPTION_ID")
 	}
 	if cfg.SubscriptionID == "" {
-		// Fall back to the Azure CLI's default subscription so contributors
-		// who have only run `az login` get a working `e2e-infra env` /
-		// `make e2e-infra-env` without an extra pre-export step.
 		if id, err := defaultSubscriptionFromAzureCLIProfile(); err == nil {
 			cfg.SubscriptionID = id
 		}
@@ -100,8 +98,9 @@ func (p *Provisioner) ResolvedNamespace() string { return p.resolvedRelay }
 //
 //  1. Config.RelayName, if non-empty.
 //  2. Any single existing namespace already present in the resource
-//     group (so migrating users do not silently end up with a second
-//     namespace alongside the one their previous tooling created).
+//     group (so attaching to an existing setup does not silently end
+//     up with a second namespace alongside the one another tool
+//     created).
 //  3. A deterministic hash derived from subscription + RG (see
 //     generateRelayName).
 //
@@ -199,7 +198,7 @@ func (p *Provisioner) DiscoverNamespace(ctx context.Context) (string, error) {
 	}
 	switch len(names) {
 	case 0:
-		return "", fmt.Errorf("no relay namespace found in %s — run `e2e-infra setup` first", p.cfg.ResourceGroup)
+		return "", fmt.Errorf("no relay namespace found in %s — run `make e2e-setup` first", p.cfg.ResourceGroup)
 	case 1:
 		p.resolvedRelay = names[0]
 		return names[0], nil
@@ -242,30 +241,51 @@ func generateRelayName(subID, rg string) string {
 // contributors who have authenticated via `az login` but have not
 // exported AZURE_SUBSCRIPTION_ID into their shell environment.
 func defaultSubscriptionFromAzureCLIProfile() (string, error) {
-	home, err := os.UserHomeDir()
+	p, err := ReadAzureCLIProfileDefault()
 	if err != nil {
 		return "", err
+	}
+	return p.Subscription, nil
+}
+
+// AzureCLIDefaults is the resolved default subscription + tenant from
+// the Azure CLI's local profile. Either field may be empty when the
+// profile is absent or unparseable.
+type AzureCLIDefaults struct {
+	Subscription string
+	Tenant       string
+}
+
+// ReadAzureCLIProfileDefault parses ~/.azure/azureProfile.json and
+// returns the subscription id + tenant id flagged as the current
+// default. Used by `make e2e-status` to detect identity-context drift
+// without making any network calls.
+func ReadAzureCLIProfileDefault() (AzureCLIDefaults, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return AzureCLIDefaults{}, err
 	}
 	path := filepath.Join(home, ".azure", "azureProfile.json")
 	data, err := os.ReadFile(path) //nolint:gosec // path is under user's home dir
 	if err != nil {
-		return "", err
+		return AzureCLIDefaults{}, err
 	}
 	// Azure CLI on Windows writes a UTF-8 BOM.
 	trimmed := strings.TrimPrefix(string(data), "\ufeff")
 	var profile struct {
 		Subscriptions []struct {
 			ID        string `json:"id"`
+			TenantID  string `json:"tenantId"`
 			IsDefault bool   `json:"isDefault"`
 		} `json:"subscriptions"`
 	}
 	if err := json.Unmarshal([]byte(trimmed), &profile); err != nil {
-		return "", fmt.Errorf("parse %s: %w", path, err)
+		return AzureCLIDefaults{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	for _, s := range profile.Subscriptions {
 		if s.IsDefault {
-			return s.ID, nil
+			return AzureCLIDefaults{Subscription: s.ID, Tenant: s.TenantID}, nil
 		}
 	}
-	return "", errors.New("no default subscription in azureProfile.json")
+	return AzureCLIDefaults{}, errors.New("no default subscription in azureProfile.json")
 }

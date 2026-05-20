@@ -8,6 +8,7 @@ bin/
 *.out
 coverage.txt
 coverage.html
+e2e/.local.json
 
 # IDE
 .vscode/

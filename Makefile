@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-infra-setup e2e-infra-ci e2e-infra-clean e2e-infra-env e2e-infra-janitor vulncheck bench bench-compare help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor vulncheck bench bench-compare help
 
 .DEFAULT_GOAL := help
 
@@ -63,9 +63,8 @@ fmt: ## Format markdown and YAML with prettier
 fmt-check: ## Check formatting (same as CI)
 	npx --yes prettier --check .
 
-e2e: build ## Run end-to-end tests (requires Azure Relay credentials)
-	go test -tags=e2e -timeout=20m -v ./e2e/azrelay/
-	go test -tags=e2e -timeout=20m -v ./e2e/
+e2e: build ## Run end-to-end tests (configure once via `make e2e-setup`)
+	go test -tags=e2e -timeout=40m -v ./e2e/azrelay/ ./e2e/
 
 e2e-docker: ## Run container-to-container e2e tests
 	@status=0; \
@@ -73,20 +72,34 @@ e2e-docker: ## Run container-to-container e2e tests
 	docker compose -f docker-compose.e2e.yml down; \
 	exit $$status
 
-e2e-infra-setup: ## Deploy e2e Azure infra + grant yourself access
+e2e-setup: ## Provision per-developer e2e infra and write e2e/.local.json
 	cd e2e/infra && go run ./cmd/e2e-infra setup
 
-e2e-infra-ci: ## Full CI setup: infra + identity + GitHub secrets (maintainer)
-	cd e2e/infra && go run ./cmd/e2e-infra ci
+e2e-attach: ## Record an existing e2e RG/namespace in e2e/.local.json
+	@if [ -z "$(RESOURCE_GROUP)" ]; then \
+		echo "error: RESOURCE_GROUP is required (example: make e2e-attach RESOURCE_GROUP=aztunnel-e2e)" >&2; \
+		exit 2; \
+	fi
+	cd e2e/infra && RESOURCE_GROUP="$(RESOURCE_GROUP)" RELAY_NAME="$(RELAY_NAME)" go run ./cmd/e2e-infra attach
 
-e2e-infra-clean: ## Delete e2e Azure resource group (requires --yes confirmation)
-	cd e2e/infra && go run ./cmd/e2e-infra clean
+e2e-status: ## Show persisted config and Azure-side health checks
+	cd e2e/infra && go run ./cmd/e2e-infra status
 
-e2e-infra-env: ## Print E2E_* env vars for local test runs (eval $$(make e2e-infra-env))
-	@cd e2e/infra && go run ./cmd/e2e-infra env
+e2e-clean: ## Delete your e2e RG (pass CLEAN_ARGS="--yes [--force]")
+	cd e2e/infra && go run ./cmd/e2e-infra clean $(CLEAN_ARGS)
 
-e2e-infra-janitor: ## Delete orphaned per-invocation hybrid connections older than 4h
-	cd e2e/infra && go run ./cmd/e2e-infra janitor
+e2e-grant: ## Grant Azure Relay Owner to another principal
+	@if [ -z "$(ASSIGNEE)" ]; then \
+		echo "error: ASSIGNEE is required (example: make e2e-grant ASSIGNEE=alice@contoso.com)" >&2; \
+		exit 2; \
+	fi
+	cd e2e/infra && go run ./cmd/e2e-infra grant --assignee "$(ASSIGNEE)"
+
+e2e-ci: ## Configure the shared CI e2e infrastructure and secrets
+	cd e2e/infra && RESOURCE_GROUP="$(or $(RESOURCE_GROUP),aztunnel-e2e)" go run ./cmd/e2e-infra ci
+
+e2e-janitor: ## Delete orphaned per-invocation hybrid connections older than 4h
+	cd e2e/infra && RESOURCE_GROUP="$(or $(RESOURCE_GROUP),aztunnel-e2e)" go run ./cmd/e2e-infra janitor
 
 vulncheck: ## Check Go dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
@@ -105,5 +118,5 @@ bench-compare: ## Compare e2e benchmarks across two refs: BASE=<sha> [HEAD=<sha>
 		scripts/bench-compare.sh '$(BASE)' '$(HEAD)'
 
 help: ## Show this help
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'

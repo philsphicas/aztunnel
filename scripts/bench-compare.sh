@@ -24,7 +24,7 @@
 #   COUNT      -count= passed to `go test -bench` (default: 5).
 #   BENCH      -bench= regex passed to `go test` (default: .).
 #   BACKEND    "mock" (default) or "azure". Azure benchmarks require
-#              `make e2e-infra-setup` + `eval "$(make e2e-infra-env)"`
+#              `make e2e-setup`
 #              first; pin E2E_AUTH for benchstat name stability.
 #   BENCHTIME  -benchtime= passed to `go test` (default: 1s for mock,
 #              10x for azure — each azure iteration is a real relay
@@ -95,6 +95,15 @@ echo "==> adding worktree base@$BASE_SHORT"
 git worktree add --detach --quiet "$base_wt" "$BASE_SHA"
 echo "==> adding worktree head@$HEAD_SHORT"
 git worktree add --detach --quiet "$head_wt" "$HEAD_SHA"
+
+if [ "$BACKEND" = "azure" ]; then
+  if [ ! -f "$repo_root/e2e/.local.json" ]; then
+    echo "error: BACKEND=azure requires $repo_root/e2e/.local.json (run \`make e2e-setup\` first)" >&2
+    exit 1
+  fi
+  cp "$repo_root/e2e/.local.json" "$base_wt/e2e/.local.json"
+  cp "$repo_root/e2e/.local.json" "$head_wt/e2e/.local.json"
+fi
 
 run_bench() {
   local wt=$1
