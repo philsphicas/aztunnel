@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/philsphicas/aztunnel/internal/bridgecause"
 )
 
 // mockTokenProvider is a simple TokenProvider for control tests.
@@ -395,16 +398,16 @@ func TestPingLoop(t *testing.T) {
 		srv.Close()
 
 		cancelCalled := make(chan struct{})
-		loopCtx, loopCancel := context.WithCancel(ctx)
-		defer loopCancel()
+		loopCtx, loopCancel := context.WithCancelCause(ctx)
+		defer loopCancel(nil)
 
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			pingLoop(loopCtx, ws, discardLogger(), func() {
+			pingLoop(loopCtx, ws, discardLogger(), func(cause error) {
 				close(cancelCalled)
-				loopCancel()
-			}, &loopState{})
+				loopCancel(cause)
+			}, &loopState{}, pingInterval)
 		}()
 
 		select {
@@ -440,17 +443,17 @@ func TestPingLoop(t *testing.T) {
 		}
 		defer ws.CloseNow()
 
-		loopCtx, loopCancel := context.WithCancel(ctx)
+		loopCtx, loopCancel := context.WithCancelCause(ctx)
 
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			pingLoop(loopCtx, ws, discardLogger(), func() {
-				t.Error("cancel should not be called on context cancel")
-			}, &loopState{})
+			pingLoop(loopCtx, ws, discardLogger(), func(cause error) {
+				t.Errorf("cancel should not be called on context cancel; cause=%v", cause)
+			}, &loopState{}, pingInterval)
 		}()
 
-		loopCancel()
+		loopCancel(nil)
 
 		select {
 		case <-done:
@@ -495,20 +498,20 @@ func TestRenewLoop(t *testing.T) {
 
 		tp := &mockTokenProvider{err: fmt.Errorf("always fails")}
 
-		loopCtx, loopCancel := context.WithCancel(ctx)
+		loopCtx, loopCancel := context.WithCancelCause(ctx)
 
 		done := make(chan struct{})
 		cancelCalled := make(chan struct{})
 		go func() {
 			defer close(done)
-			renewLoop(loopCtx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger(), func() {
+			renewLoop(loopCtx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger(), func(cause error) {
 				close(cancelCalled)
-				loopCancel()
+				loopCancel(cause)
 			}, &loopState{}, defaultRenewInterval)
 		}()
 
 		// Cancel the context; renewLoop should exit via <-ctx.Done().
-		loopCancel()
+		loopCancel(nil)
 
 		select {
 		case <-done:
@@ -520,6 +523,110 @@ func TestRenewLoop(t *testing.T) {
 }
 
 // ---------- TestRunControlLoop ----------
+
+// TestRenewLoop_StampsCauseRenewFailure verifies that when renewLoop's
+// per-tick renewOnce returns an error, the cancel callback is invoked
+// with bridgecause.CauseRenewFailure so that in-flight bridges resolve
+// context.Cause(ctx) to that sentinel rather than to context.Canceled.
+func TestRenewLoop_StampsCauseRenewFailure(t *testing.T) {
+	useInsecureTransport(t)
+
+	srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Close the WS first so the renewOnce ws.Write fails immediately
+	// (the only non-retried failure path; token errors retry with
+	// 5s/10s backoff and slow the test).
+	_ = ws.CloseNow()
+
+	tp := &mockTokenProvider{token: "valid-token"}
+
+	loopCtx, loopCancel := context.WithCancelCause(ctx)
+	defer loopCancel(nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		renewLoop(loopCtx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger(), loopCancel, &loopState{}, 50*time.Millisecond)
+	}()
+
+	select {
+	case <-loopCtx.Done():
+		if cause := context.Cause(loopCtx); !errors.Is(cause, bridgecause.CauseRenewFailure) {
+			t.Errorf("context.Cause = %v, want CauseRenewFailure", cause)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("renewLoop did not cancel after write failure")
+	}
+	<-done
+}
+
+// TestPingLoop_StampsCauseControlError verifies that when pingLoop's
+// per-tick ws.Ping returns an error, the cancel callback is invoked
+// with bridgecause.CauseControlError.
+func TestPingLoop_StampsCauseControlError(t *testing.T) {
+	useInsecureTransport(t)
+
+	srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ws, _, err := websocket.Dial(ctx, "wss://"+testEndpoint(srv), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Close the WS so the next ws.Ping fails fast without waiting
+	// out pingTimeout.
+	_ = ws.CloseNow()
+
+	loopCtx, loopCancel := context.WithCancelCause(ctx)
+	defer loopCancel(nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pingLoop(loopCtx, ws, discardLogger(), loopCancel, &loopState{}, 50*time.Millisecond)
+	}()
+
+	select {
+	case <-loopCtx.Done():
+		if cause := context.Cause(loopCtx); !errors.Is(cause, bridgecause.CauseControlError) {
+			t.Errorf("context.Cause = %v, want CauseControlError", cause)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pingLoop did not cancel after ping failure")
+	}
+	<-done
+}
 
 func TestRunControlLoop(t *testing.T) {
 	useInsecureTransport(t)

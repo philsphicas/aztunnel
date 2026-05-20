@@ -50,6 +50,19 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 	logAccept(logger, cfg.Target, listenerID)
 
 	stdio := &stdioConn{in: cfg.Stdin, out: cfg.Stdout}
-	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, stdio, "sender", cfg.Target)
+	stats, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, stdio, "sender", cfg.Target)
+	attrs := []any{
+		"target", cfg.Target,
+		"cause", stats.Cause,
+		"tcp_to_ws", stats.TCPToWS,
+		"ws_to_tcp", stats.WSToTCP,
+	}
+	if bridgeErr != nil {
+		attrs = append(attrs, "error", bridgeErr)
+	}
+	if code, ok := relay.WSCloseCode(bridgeErr); ok {
+		attrs = append(attrs, "close_code", code)
+	}
+	logger.Debug("bridge ended", attrs...)
 	return bridgeErr
 }

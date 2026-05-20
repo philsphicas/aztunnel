@@ -73,7 +73,10 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 	env := b.acquireEnv(t)
 	auth := authFromEnv(t, env, b.authName)
 
-	listenerArgs := []string{"--metrics-addr", "127.0.0.1:0"}
+	// Parity backend runs at debug log level so observability
+	// scenarios can assert on Debug-level lifecycle lines
+	// (e.g. "bridge ended") without per-scenario log-level overrides.
+	listenerArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
 	for _, target := range opts.AllowedTargets {
 		listenerArgs = append(listenerArgs, "--allow", target)
 	}
@@ -101,7 +104,7 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 		}
 	}
 
-	senderArgs := []string{"--metrics-addr", "127.0.0.1:0"}
+	senderArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
 
 	listeners := make([]*relayparity.Listener, 0, opts.NumListeners)
 	for i := 0; i < opts.NumListeners; i++ {

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/philsphicas/aztunnel/internal/bridgecause"
 )
 
 func TestBridge(t *testing.T) {
@@ -312,5 +314,204 @@ func TestWSCloseCode_WrappedCloseError(t *testing.T) {
 	}
 	if code != 1011 {
 		t.Errorf("code=%d; want 1011", code)
+	}
+}
+
+// TestBridge_Cause_PeerNormalClose drives a bridge where the WS server
+// sends a normal close frame. The wsToTCP pump returns first with op=ws_read
+// and a nil error (normal close is filtered to nil by ignoreNormalClose),
+// so the bridge stamps CausePeerClose.
+func TestBridge_Cause_PeerNormalClose(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// Send a normal close to the client and exit. The bridge's
+		// wsToTCP pump observes a normal close and returns (ws_read, nil).
+		_ = ws.Close(websocket.StatusNormalClosure, "bye")
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.CloseNow()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	stats, _ := Bridge(ctx, ws, serverConn)
+	if stats.Cause != "peer_close" {
+		t.Errorf("Cause = %q, want %q", stats.Cause, "peer_close")
+	}
+}
+
+// TestBridge_Cause_LocalEOF closes the local TCP side; the tcpToWS pump
+// reads EOF and returns (tcp_read, nil), stamping CauseLocalClose.
+func TestBridge_Cause_LocalEOF(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.CloseNow()
+
+	clientConn, serverConn := net.Pipe()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type result struct {
+		stats BridgeStats
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		s, e := Bridge(ctx, ws, serverConn)
+		ch <- result{s, e}
+	}()
+
+	// Close the local side; tcp.Read returns EOF, tcpToWS returns
+	// (tcp_read, nil) after ignoreEOF, and the bridge stamps
+	// CauseLocalClose.
+	_ = clientConn.Close()
+
+	select {
+	case res := <-ch:
+		if res.stats.Cause != "local_close" {
+			t.Errorf("Cause = %q, want %q", res.stats.Cause, "local_close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not terminate")
+	}
+	_ = serverConn.Close()
+}
+
+// TestBridge_Cause_ParentCanceled cancels the bridge's parent context
+// with CauseUserCancel via WithCancelCause. The cause propagates down
+// to Bridge's internal child ctx, so context.Cause(internalCtx) returns
+// CauseUserCancel and bridgecause.Name maps it to "user_cancel".
+func TestBridge_Cause_ParentCanceled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.CloseNow()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	parent, parentCancel := context.WithCancelCause(context.Background())
+
+	type result struct {
+		stats BridgeStats
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		s, e := Bridge(parent, ws, serverConn)
+		ch <- result{s, e}
+	}()
+
+	parentCancel(bridgecause.CauseUserCancel)
+
+	select {
+	case res := <-ch:
+		if res.stats.Cause != "user_cancel" {
+			t.Errorf("Cause = %q, want %q", res.stats.Cause, "user_cancel")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not terminate after parent cancel")
+	}
+}
+
+// TestBridge_Cause_ExternalSiteCancel simulates the control loop tearing
+// the bridge down on renew failure: the caller cancels the bridge ctx
+// with CauseRenewFailure mid-flight. The Bridge sees its internal ctx
+// done with that cause and reports stats.Cause == "renew_failure".
+func TestBridge_Cause_ExternalSiteCancel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, _, err := websocket.Dial(context.Background(), wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.CloseNow()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	bridgeCtx, bridgeCancel := context.WithCancelCause(context.Background())
+
+	type result struct {
+		stats BridgeStats
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		s, e := Bridge(bridgeCtx, ws, serverConn)
+		ch <- result{s, e}
+	}()
+
+	bridgeCancel(bridgecause.CauseRenewFailure)
+
+	select {
+	case res := <-ch:
+		if res.stats.Cause != "renew_failure" {
+			t.Errorf("Cause = %q, want %q", res.stats.Cause, "renew_failure")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not terminate after external cancel")
 	}
 }

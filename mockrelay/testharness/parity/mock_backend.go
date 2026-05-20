@@ -105,7 +105,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 			AllowList:      opts.AllowedTargets,
 			MaxConnections: opts.MaxConnections,
 			ConnectTimeout: opts.ConnectTimeout,
-			Logger:         slog.New(slog.NewTextHandler(logs, nil)),
+			Logger:         slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			Metrics:        m,
 		}
 
@@ -161,7 +161,7 @@ func (*MockBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relaypar
 	startOneSender := func() *relayparity.Sender {
 		m := metrics.New()
 		logs := newCaptureBuffer()
-		senderLogger := slog.New(slog.NewTextHandler(logs, nil))
+		senderLogger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		sctx, scancel := context.WithCancel(ctx)
 		done := make(chan struct{})
 		addrCh := make(chan net.Addr, 1)
