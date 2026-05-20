@@ -13,10 +13,5 @@ import (
 // the CI `test` job enforces.
 func TestE2E_Mock(t *testing.T) {
 	var b mockbackend.MockBackend
-	t.Run(b.Name(), func(t *testing.T) {
-		e2escenarios.RunCoreScenarios(t, &b)
-		e2escenarios.RunTopologyScenarios(t, &b)
-		e2escenarios.RunReliabilityScenarios(t, &b)
-		e2escenarios.RunObservabilityScenarios(t, &b)
-	})
+	e2escenarios.RunAllScenarios(t, &b)
 }
