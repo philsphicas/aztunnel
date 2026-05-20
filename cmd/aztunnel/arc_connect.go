@@ -11,6 +11,7 @@ import (
 
 	"github.com/philsphicas/aztunnel/internal/arc"
 	"github.com/philsphicas/aztunnel/internal/metrics"
+	"github.com/philsphicas/aztunnel/internal/relay"
 )
 
 // ArcConnectCmd connects stdin/stdout through an Arc relay.
@@ -71,7 +72,20 @@ func (c *ArcConnectCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 	logger.Debug("connected to arc relay", "resource", resourceID)
 
 	stdio := &arcStdioConn{in: os.Stdin, out: os.Stdout}
-	_, bridgeErr := m.TrackedBridge(ctx, ws, stdio, "sender", target)
+	stats, bridgeErr := m.TrackedBridge(ctx, ws, stdio, "sender", target)
+	attrs := []any{
+		"target", target,
+		"cause", stats.Cause,
+		"tcp_to_ws", stats.TCPToWS,
+		"ws_to_tcp", stats.WSToTCP,
+	}
+	if bridgeErr != nil {
+		attrs = append(attrs, "error", bridgeErr)
+	}
+	if code, ok := relay.WSCloseCode(bridgeErr); ok {
+		attrs = append(attrs, "close_code", code)
+	}
+	logger.Debug("bridge ended", attrs...)
 	return bridgeErr
 }
 

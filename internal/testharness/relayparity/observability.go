@@ -28,6 +28,7 @@ func RunObservabilitySuite(t *testing.T, b Backend) {
 		{"ControlSessionID_OnConnectedLine", ScenarioControlSessionID_OnConnectedLine},
 		{"SenderLogsCode_OnConnectFailure", ScenarioSenderLogsCode_OnConnectFailure},
 		{"ListenerDialFailureLog_CarriesCode", ScenarioListenerDialFailureLog_CarriesCode},
+		{"BridgeCauseLogs", ScenarioBridgeCauseLogs},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -414,4 +415,59 @@ func ScenarioListenerDialFailureLog_CarriesCode(t *testing.T, b Backend) {
 				accepted, line)
 		}
 	})
+}
+
+// ScenarioBridgeCauseLogs drives one port-forward bridge to completion
+// by writing+reading a short payload then closing the client side,
+// then asserts that the bridge-end slog lines on BOTH sides carry a
+// non-empty cause field that classifies which side terminated the
+// bridge. The client's close is the canonical local_close on the
+// sender's side; the listener observes the resulting WebSocket
+// teardown as a peer_close from its perspective.
+//
+// The scenario asserts the *shape* of the cause attribute rather
+// than exact close-code values: per-pump scheduling and per-backend
+// WebSocket close-code semantics can vary, but the cause field is
+// always populated to one of bridgecause.Name's stable labels.
+//
+// Cross-backend: identical on mock and Azure. The bridge cancel-
+// cause classifier sits inside relay.Bridge, so neither the relay
+// service nor the protocol layer affect what cause the operator
+// sees in the log.
+func ScenarioBridgeCauseLogs(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+	requireLogs(t, tun)
+
+	conn := dialWithRetry(t, tun.SenderAddr, 5*time.Second)
+	want := []byte("p10 bridge cause\n")
+	writeAll(t, conn, want)
+	got := readN(t, conn, len(want), 10*time.Second)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("echo mismatch: got=%q want=%q", got, want)
+	}
+	// Close the local client side: the sender's tcpToWS pump
+	// reads EOF and classifies as local_close. The sender then
+	// tears down the WebSocket, which the listener observes as
+	// peer_close (a peer-side WebSocket failure).
+	_ = conn.Close()
+
+	senderLine := waitForLogLineContaining(t, tun.Senders[0].Logs, 10*time.Second,
+		`msg="bridge ended"`, "cause=")
+	if !strings.Contains(senderLine, "cause=local_close") {
+		t.Fatalf("sender bridge-end cause not local_close:\n%s", senderLine)
+	}
+	listenerLine := waitForLogLineContaining(t, tun.Listeners[0].Logs, 10*time.Second,
+		`msg="bridge ended"`, "cause=")
+	if !strings.Contains(listenerLine, "cause=peer_close") {
+		t.Fatalf("listener bridge-end cause not peer_close:\n%s", listenerLine)
+	}
 }

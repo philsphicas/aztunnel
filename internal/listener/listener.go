@@ -190,14 +190,20 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	}
 
 	// Bridge data.
-	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "listener", env.Target)
-	if bridgeErr != nil {
-		attrs := []any{"target", env.Target, "error", bridgeErr}
-		if code, ok := relay.WSCloseCode(bridgeErr); ok {
-			attrs = append(attrs, "close_code", code)
-		}
-		logger.Debug("bridge ended", attrs...)
+	stats, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "listener", env.Target)
+	attrs := []any{
+		"target", env.Target,
+		"cause", stats.Cause,
+		"tcp_to_ws", stats.TCPToWS,
+		"ws_to_tcp", stats.WSToTCP,
 	}
+	if bridgeErr != nil {
+		attrs = append(attrs, "error", bridgeErr)
+	}
+	if code, ok := relay.WSCloseCode(bridgeErr); ok {
+		attrs = append(attrs, "close_code", code)
+	}
+	logger.Debug("bridge ended", attrs...)
 }
 
 func sendResponse(ctx context.Context, ws *websocket.Conn, cfg Config, ok bool, errMsg string) error {

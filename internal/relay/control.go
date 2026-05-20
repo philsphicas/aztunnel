@@ -14,6 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/philsphicas/aztunnel/internal/bridgecause"
 	"github.com/philsphicas/aztunnel/internal/idgen"
 )
 
@@ -233,14 +234,22 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 	}
 	connected = true
 
-	// Cancel used by ping/renew failure to force reconnect.
-	loopCtx, loopCancel := context.WithCancel(ctx)
-	defer loopCancel()
+	// Cancel used by ping/renew failure to force reconnect. The
+	// internal cancel carries a bridgecause sentinel so in-flight
+	// bridges observe context.Cause(ctx) == CauseRenewFailure or
+	// CauseControlError when the control loop tears them down,
+	// rather than the unclassified context.Canceled.
+	loopCtx, loopCancel := context.WithCancelCause(ctx)
 
 	sem := newConnSemaphore(cfg.MaxConnections)
 
 	var wg sync.WaitGroup
+	// Cancel ordering matters: the deferred loopCancel must run
+	// BEFORE wg.Wait so in-flight bridges observe loopCtx done and
+	// can exit. Defers run LIFO, so register wg.Wait FIRST (runs
+	// last) and loopCancel SECOND (runs first).
 	defer wg.Wait()
+	defer loopCancel(nil)
 
 	renewInterval := cfg.RenewInterval
 	if renewInterval == 0 {
@@ -258,21 +267,25 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		pingLoop(loopCtx, ws, logger, loopCancel, state)
+		pingLoop(loopCtx, ws, logger, loopCancel, state, pingInterval)
 	}()
 
 	// Read accept messages from the control channel.
 	for {
 		_, data, readErr := ws.Read(loopCtx)
 		if readErr != nil {
-			// Cancel renew/ping immediately so the deferred
-			// wg.Wait below unblocks promptly; otherwise it
-			// would sit until the ping ticker (~30s) noticed
-			// the dead socket and called loopCancel itself.
+			// Stamp ControlEndedReadFailed for the deferred
+			// control_ended emit, then cancel with
+			// CauseControlError so in-flight bridges observe
+			// context.Cause == CauseControlError rather than the
+			// unclassified context.Canceled. setEnd is
+			// first-writer-wins; if renew/ping already stamped a
+			// more specific cause, that wins and we don't
+			// overwrite.
 			if loopCtx.Err() == nil {
 				state.setEnd(ControlEndedReadFailed, readErr)
 			}
-			loopCancel()
+			loopCancel(bridgecause.CauseControlError)
 			return true, fmt.Errorf("read control: %w", readErr)
 		}
 
@@ -374,7 +387,7 @@ func handleAccept(ctx context.Context, addr string, cfg ControlConfig, logger *s
 
 const maxRenewRetries = 3
 
-func renewLoop(ctx context.Context, ws *websocket.Conn, resURI string, tp TokenProvider, logger *slog.Logger, cancel context.CancelFunc, state *loopState, interval time.Duration) {
+func renewLoop(ctx context.Context, ws *websocket.Conn, resURI string, tp TokenProvider, logger *slog.Logger, cancel context.CancelCauseFunc, state *loopState, interval time.Duration) {
 	// tokenMintedAt drives the expires_in_seconds attribute on
 	// renew_attempted and the new_expires_in_seconds attribute on
 	// renew_ok. The initial value is the entry time of this
@@ -401,7 +414,7 @@ func renewLoop(ctx context.Context, ws *websocket.Conn, resURI string, tp TokenP
 				if ctx.Err() == nil {
 					state.setEnd(ControlEndedRenewFailed, err)
 				}
-				cancel()
+				cancel(bridgecause.CauseRenewFailure)
 				return
 			}
 			tokenMintedAt = newMint
@@ -474,8 +487,8 @@ func renewOnce(ctx context.Context, ws *websocket.Conn, resURI string, tp TokenP
 	return time.Time{}, lastErr
 }
 
-func pingLoop(ctx context.Context, ws *websocket.Conn, logger *slog.Logger, cancel context.CancelFunc, state *loopState) {
-	ticker := time.NewTicker(pingInterval)
+func pingLoop(ctx context.Context, ws *websocket.Conn, logger *slog.Logger, cancel context.CancelCauseFunc, state *loopState, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -496,7 +509,7 @@ func pingLoop(ctx context.Context, ws *websocket.Conn, logger *slog.Logger, canc
 				// stashes (cause, err) atomically so the emit
 				// reads a consistent pair.
 				state.setEnd(ControlEndedPingFailed, err)
-				cancel()
+				cancel(bridgecause.CauseControlError)
 				return
 			}
 		}
