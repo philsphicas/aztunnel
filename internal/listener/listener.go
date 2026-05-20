@@ -102,7 +102,11 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	defer readCancel()
 	_, data, err := ws.Read(readCtx)
 	if err != nil {
-		logger.Warn("failed to read envelope", "error", err)
+		attrs := []any{"error", err}
+		if code, ok := relay.WSCloseCode(err); ok {
+			attrs = append(attrs, "close_code", code)
+		}
+		logger.Warn("failed to read envelope", attrs...)
 		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
@@ -172,7 +176,11 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	// Bridge data.
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "listener", env.Target)
 	if bridgeErr != nil {
-		logger.Debug("bridge ended", "target", env.Target, "error", bridgeErr)
+		attrs := []any{"target", env.Target, "error", bridgeErr}
+		if code, ok := relay.WSCloseCode(bridgeErr); ok {
+			attrs = append(attrs, "close_code", code)
+		}
+		logger.Debug("bridge ended", attrs...)
 	}
 }
 

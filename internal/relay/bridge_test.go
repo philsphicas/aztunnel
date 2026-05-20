@@ -2,6 +2,8 @@ package relay
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -267,5 +269,48 @@ func TestBridge_ZeroLengthData(t *testing.T) {
 
 	if !strings.Contains(string(total), "after-empty") {
 		t.Errorf("did not receive expected data, got %q", string(total))
+	}
+}
+
+func TestWSCloseCode_Nil_ReturnsFalse(t *testing.T) {
+	code, ok := WSCloseCode(nil)
+	if ok {
+		t.Errorf("ok=true on nil error; want false")
+	}
+	if code != 0 {
+		t.Errorf("code=%d on nil error; want 0", code)
+	}
+}
+
+func TestWSCloseCode_Plain_ReturnsFalse(t *testing.T) {
+	code, ok := WSCloseCode(errors.New("synthetic"))
+	if ok {
+		t.Errorf("ok=true on plain error; want false")
+	}
+	if code != 0 {
+		t.Errorf("code=%d on plain error; want 0", code)
+	}
+}
+
+func TestWSCloseCode_DirectCloseError(t *testing.T) {
+	err := websocket.CloseError{Code: 1006, Reason: "abnormal"}
+	code, ok := WSCloseCode(err)
+	if !ok {
+		t.Fatalf("ok=false on websocket.CloseError; want true")
+	}
+	if code != 1006 {
+		t.Errorf("code=%d; want 1006", code)
+	}
+}
+
+func TestWSCloseCode_WrappedCloseError(t *testing.T) {
+	inner := websocket.CloseError{Code: 1011, Reason: "server error"}
+	wrapped := fmt.Errorf("read response: %w", inner)
+	code, ok := WSCloseCode(wrapped)
+	if !ok {
+		t.Fatalf("ok=false on wrapped CloseError; want true")
+	}
+	if code != 1011 {
+		t.Errorf("code=%d; want 1011", code)
 	}
 }
