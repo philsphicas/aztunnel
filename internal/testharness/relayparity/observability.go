@@ -26,6 +26,7 @@ func RunObservabilitySuite(t *testing.T, b Backend) {
 	}{
 		{"BridgeID_Correlation", ScenarioBridgeID_Correlation},
 		{"ControlSessionID_OnConnectedLine", ScenarioControlSessionID_OnConnectedLine},
+		{"SenderLogsCode_OnConnectFailure", ScenarioSenderLogsCode_OnConnectFailure},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -313,4 +314,48 @@ func containsAll(s string, needles []string) bool {
 		}
 	}
 	return true
+}
+
+// ScenarioSenderLogsCode_OnConnectFailure asserts that the listener's
+// machine-readable classification code from ConnectResponse.Code
+// surfaces on the sender's rejection warn line, so operators see the
+// same classification on both ends of the tunnel without parsing the
+// human-readable error text.
+//
+// The scenario drives one SOCKS5 connection through to refusedAddr
+// (allowlisted so the listener actually attempts the dial and
+// classifies the OS-level ECONNREFUSED), then polls the sender's
+// log capture for the rejection warn line carrying target=<refused>
+// and code=connection_refused.
+//
+// Cross-backend: identical on mock and Azure. The classification is
+// performed listener-side from the OS dial error; the relay just
+// forwards the resulting protocol.Code string verbatim.
+func ScenarioSenderLogsCode_OnConnectFailure(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	refused := refusedAddr(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModeSOCKS5,
+		AllowedTargets: []string{refused},
+		ConnectTimeout: 5 * time.Second,
+	})
+	requireLogs(t, tun)
+
+	_, err := DialSOCKS5(tun.SenderAddr, refused, 15*time.Second)
+	var sErr *SOCKS5Error
+	if !errors.As(err, &sErr) {
+		t.Fatalf("socks5 dial refused: expected SOCKS5Error, got %T: %v", err, err)
+	}
+	if sErr.Rep != 0x05 {
+		t.Fatalf("socks5 REP for refused = %#x, want 0x05", sErr.Rep)
+	}
+
+	waitForLogLineContaining(t, tun.Senders[0].Logs, 10*time.Second,
+		`msg="listener refused connection"`,
+		"target="+refused,
+		"code=connection_refused",
+	)
 }
