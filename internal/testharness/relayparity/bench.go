@@ -232,6 +232,19 @@ func benchSteadyThroughput(b *testing.B, backend Backend) {
 	}
 	defer conn.Close() //nolint:errcheck // best-effort
 
+	// Force the relay rendezvous to complete before the timer starts.
+	// net.DialTimeout only establishes the local TCP connection to the
+	// sender bind; the sender dials the relay lazily on first data.
+	// Without this probe the first timed iteration pays ~1s of hidden
+	// connection setup, skewing the throughput measurement.
+	probe := []byte{0x00}
+	if err := writeFull(conn, probe); err != nil {
+		b.Fatalf("warmup write: %v", err)
+	}
+	if _, err := io.ReadFull(conn, probe); err != nil {
+		b.Fatalf("warmup read: %v", err)
+	}
+
 	const transferSize = 1024 * 1024
 	body := make([]byte, transferSize)
 	if _, err := rand.Read(body); err != nil {
