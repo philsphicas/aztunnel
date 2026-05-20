@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run the parity benchmark suite against two git refs and produce a
+# Run the e2e benchmark suite against two git refs and produce a
 # benchstat comparison. Designed for characterising PR #47 once it
 # merges:
 #
@@ -107,7 +107,7 @@ run_bench() {
       cd "$wt/mockrelay"
       go test -run='^$' -bench="$BENCH" -benchmem \
         -count="$COUNT" -benchtime="$BENCHTIME" \
-        ./testharness/parity/...
+        ./testharness/mockbackend/...
     ) | tee "$out"
     ;;
   azure)

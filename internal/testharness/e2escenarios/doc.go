@@ -1,9 +1,9 @@
-// Package relayparity defines a backend abstraction for running the
+// Package e2escenarios defines a backend abstraction for running the
 // same end-to-end test scenarios against multiple relay implementations.
 //
 // Two implementations exist:
 //
-//   - github.com/philsphicas/aztunnel/mockrelay/testharness/parity.MockBackend
+//   - github.com/philsphicas/aztunnel/mockrelay/testharness/mockbackend.MockBackend
 //     runs the mock relay server (mockrelay/server) and the aztunnel
 //     listener and sender in-process. Fast, deterministic, no external
 //     dependencies. Lives in the mockrelay module so the in-process
@@ -19,4 +19,4 @@
 // tunnel and are written once. They run against both backends so any
 // divergence is surfaced as a test failure (or documented contract
 // gap).
-package relayparity
+package e2escenarios

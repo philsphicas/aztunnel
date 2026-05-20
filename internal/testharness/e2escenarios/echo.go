@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"io"

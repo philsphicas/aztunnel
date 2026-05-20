@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"encoding/binary"
@@ -23,7 +23,7 @@ import (
 // timeout. The conn deadline is cleared on successful return; on
 // error the conn is closed.
 //
-// This is a minimal SOCKS5 client suitable for parity tests; it does
+// This is a minimal SOCKS5 client suitable for e2e tests; it does
 // not support auth methods, BIND, or UDP ASSOCIATE.
 func DialSOCKS5(proxyAddr, target string, timeout time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(timeout)

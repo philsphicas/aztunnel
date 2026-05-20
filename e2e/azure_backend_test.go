@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/philsphicas/aztunnel/internal/testharness/relayparity"
+	"github.com/philsphicas/aztunnel/internal/testharness/e2escenarios"
 )
 
-// azureBackend implements relayparity.Backend against a real Azure
-// Relay namespace. It is the source-of-truth side of the parity
-// matrix: any scenario divergence between this backend and the
-// in-process MockBackend (mockrelay/testharness/parity) is a behavioural gap in
-// the mock that we have to either fix or document.
+// azureBackend implements e2escenarios.Backend against a real Azure
+// Relay namespace. It is the source-of-truth side of the mock-vs-Azure
+// conformance matrix: any scenario divergence between this backend and
+// the in-process MockBackend (mockrelay/testharness/mockbackend) is a
+// behavioural gap in the mock that we have to either fix or document.
 //
 // Each instance is bound to a single auth method ("entra" or "sas")
 // so the caller can run the same scenario suite once per available
@@ -31,11 +31,11 @@ import (
 //
 //   - requireDedicatedHyco: provisions a fresh (entra, sas) hyco pair
 //     and registers a t.Cleanup that tears it down. Used by
-//     TestParity_Azure so each scenario gets isolation between
+//     TestE2E_Azure so each scenario gets isolation between
 //     successive Setup calls — and so scenarios that call Setup
 //     twice (e.g. ScenarioErrorPropagation_*) hold disjoint hycos.
 //   - leaseSharedHyco: returns a process-shared, lazily-leased pair
-//     drained at TestMain exit. Used by BenchmarkParity_Azure so
+//     drained at TestMain exit. Used by BenchmarkE2E_Azure so
 //     benchstat runs do not pay per-sub-bench provisioning.
 type azureBackend struct {
 	authName   string
@@ -60,7 +60,7 @@ func (b *azureBackend) Name() string { return "azure-" + b.authName }
 // subprocess in this Setup is killed before its hyco pair is
 // deleted, which prevents ARM Delete from racing a still-attached
 // listener's keep-alives.
-func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relayparity.Tunnel {
+func (b *azureBackend) Setup(t testing.TB, opts e2escenarios.SetupOptions) *e2escenarios.Tunnel {
 	t.Helper()
 	if opts.NumListeners < 1 {
 		t.Fatalf("NumListeners must be >= 1, got %d", opts.NumListeners)
@@ -73,7 +73,7 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 	env := b.acquireEnv(t)
 	auth := authFromEnv(t, env, b.authName)
 
-	// Parity backend runs at debug log level so observability
+	// Azure backend runs at debug log level so observability
 	// scenarios can assert on Debug-level lifecycle lines
 	// (e.g. "bridge ended") without per-scenario log-level overrides.
 	listenerArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
@@ -89,12 +89,12 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 			opts.ConnectTimeout.String())
 	}
 
-	spawnListener := func(t testing.TB) *relayparity.Listener {
+	spawnListener := func(t testing.TB) *e2escenarios.Listener {
 		t.Helper()
 		lst := startListener(t, env, auth, listenerArgs...)
 		waitForLog(t, lst, "control_started", 30*time.Second)
 		metricsAddr := lst.MetricsAddr(t, 15*time.Second)
-		return &relayparity.Listener{
+		return &e2escenarios.Listener{
 			Addr:             metricsAddr,
 			Completed:        scrapeCounter(metricsAddr, "aztunnel_connections_total"),
 			Active:           scrapeGauge(metricsAddr, "aztunnel_active_connections"),
@@ -106,21 +106,21 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 
 	senderArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
 
-	listeners := make([]*relayparity.Listener, 0, opts.NumListeners)
+	listeners := make([]*e2escenarios.Listener, 0, opts.NumListeners)
 	for i := 0; i < opts.NumListeners; i++ {
 		listeners = append(listeners, spawnListener(t))
 	}
 
 	senderAddrs := make([]string, 0, numSenders)
-	senders := make([]*relayparity.Sender, 0, numSenders)
+	senders := make([]*e2escenarios.Sender, 0, numSenders)
 	for i := 0; i < numSenders; i++ {
 		var proc *aztunnelProcess
 		var logMsg string
 		switch opts.SenderMode {
-		case relayparity.ModePortForward:
+		case e2escenarios.ModePortForward:
 			proc = startPortForwardSender(t, env, auth, opts.Target, senderArgs...)
 			logMsg = "port-forward listening"
-		case relayparity.ModeSOCKS5:
+		case e2escenarios.ModeSOCKS5:
 			proc = startSOCKS5Sender(t, env, auth, senderArgs...)
 			logMsg = "socks5-proxy listening"
 		default:
@@ -129,7 +129,7 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 		bindAddr := waitForLogAddr(t, proc, logMsg, 15*time.Second)
 		metricsAddr := proc.MetricsAddr(t, 15*time.Second)
 		senderAddrs = append(senderAddrs, bindAddr)
-		senders = append(senders, &relayparity.Sender{
+		senders = append(senders, &e2escenarios.Sender{
 			Addr:      bindAddr,
 			Completed: scrapeCounter(metricsAddr, "aztunnel_connections_total"),
 			Active:    scrapeGauge(metricsAddr, "aztunnel_active_connections"),
@@ -138,13 +138,13 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 		})
 	}
 
-	tun := &relayparity.Tunnel{
+	tun := &e2escenarios.Tunnel{
 		SenderAddr:  senderAddrs[0],
 		SenderAddrs: senderAddrs,
 		Senders:     senders,
 		Listeners:   listeners,
 	}
-	tun.AddListener = func(t *testing.T) *relayparity.Listener {
+	tun.AddListener = func(t *testing.T) *e2escenarios.Listener {
 		t.Helper()
 		l := spawnListener(t)
 		tun.Listeners = append(tun.Listeners, l)
@@ -178,7 +178,7 @@ func scrapeGauge(addr, name string) func() int64 {
 // scrapeConnectionErrors returns a closure that scrapes /metrics on
 // addr and returns the sum of aztunnel_connection_errors_total samples
 // whose `reason` label equals the requested reason. Used by negative-
-// path parity scenarios that assert the listener classified a dial
+// path e2e scenarios that assert the listener classified a dial
 // failure into a specific reason bucket.
 func scrapeConnectionErrors(addr string) func(reason string) int64 {
 	return func(reason string) int64 {

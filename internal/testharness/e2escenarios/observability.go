@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// RunObservabilitySuite runs the cross-backend observability parity
+// RunObservabilityScenarios runs the cross-backend observability e2e
 // scenarios against b. Each scenario asserts a log-shape contract
 // that operators rely on for cross-process correlation (e.g. a
 // bridge_id present on both ends).
@@ -18,7 +18,7 @@ import (
 // Sender.Logs are nil) will trip the t.Fatal in the scenario itself;
 // adding a new backend therefore forces the implementer to wire
 // log capture so the parity claim stays honest.
-func RunObservabilitySuite(t *testing.T, b Backend) {
+func RunObservabilityScenarios(t *testing.T, b Backend) {
 	t.Helper()
 	scenarios := []struct {
 		name string
@@ -231,7 +231,7 @@ var controlSessionIDRe = regexp.MustCompile(`control_session_id=([A-Z2-7]+)`)
 // listener's control_started log line carries a non-empty
 // control_session_id field. control_started fires once per
 // control-loop attempt, immediately after the dial succeeds and at
-// the same operational milestone the parity test harness blocks on
+// the same operational milestone the e2e test harness blocks on
 // during Setup. The id on this line is the same id every other
 // per-session log record (renew_*, accept_*, control_ended) carries
 // across the rest of the loop.

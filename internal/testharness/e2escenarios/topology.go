@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"bytes"
@@ -13,15 +13,16 @@ import (
 	"time"
 )
 
-// RunTopologySuite runs the multi-listener / multi-sender / single-target
-// parity scenarios against b. Each scenario fires at a curated set of
+// RunTopologyScenarios runs the multi-listener / multi-sender /
+// single-target e2e scenarios against b. Each scenario fires at a
+// curated set of
 // (N, M) matrix cells; cells that don't meet a scenario's minimum
 // requirements are simply not emitted (no t.Skip noise in output).
 //
 // Cells are conservative — we cover the four corners of the {1,2}×{1,2}
 // matrix only where they add information. Scaling K up at high cells
 // burns mock-CI budget without adding new failure modes.
-func RunTopologySuite(t *testing.T, b Backend) {
+func RunTopologyScenarios(t *testing.T, b Backend) {
 	t.Helper()
 
 	type cell struct{ n, m int }

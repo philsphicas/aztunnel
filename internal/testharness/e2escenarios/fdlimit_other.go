@@ -1,6 +1,6 @@
 //go:build !unix
 
-package relayparity
+package e2escenarios
 
 // getFDLimit on non-Unix platforms (Windows, plan9, js) returns
 // (0, false) so skipIfFDLimitTooLow becomes a no-op there. Windows

@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"context"
@@ -13,8 +13,8 @@ import (
 	"time"
 )
 
-// RunReliabilitySuite runs the negative-path and back-pressure parity
-// scenarios against b. Each runs as a sub-test of the caller's t and
+// RunReliabilityScenarios runs the negative-path and back-pressure
+// e2e scenarios against b. Each runs as a sub-test of the caller's t and
 // must pass against both the in-process mock backend and the real
 // Azure backend — this is the "behavior is the same shape on both
 // sides of the relay" parity gate.
@@ -23,7 +23,7 @@ import (
 // (i.e. the test name shows up in output) but t.Skip()s until the
 // bridge propagates half-close. The skip exists so the suite stays
 // green while that capability is missing.
-func RunReliabilitySuite(t *testing.T, b Backend) {
+func RunReliabilityScenarios(t *testing.T, b Backend) {
 	t.Helper()
 	scenarios := []struct {
 		name string

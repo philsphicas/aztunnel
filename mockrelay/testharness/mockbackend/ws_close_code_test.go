@@ -1,4 +1,4 @@
-package parity
+package mockbackend
 
 import (
 	"context"

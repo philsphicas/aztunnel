@@ -1,4 +1,4 @@
-package relayparity
+package e2escenarios
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// RunCoreSuite runs every single-flow parity scenario against b as a
+// RunCoreScenarios runs every single-flow e2e scenario against b as a
 // set of sub-tests under the caller's t. New scenarios get added here.
 //
 // The scenarios run sequentially, each in its own t.Run; backends
@@ -24,7 +24,7 @@ import (
 // Behaviors that depend on capabilities the bridge does not yet
 // implement (e.g. half-close propagation) live outside the core
 // suite so this gate stays green regardless of bridge architecture.
-func RunCoreSuite(t *testing.T, b Backend) {
+func RunCoreScenarios(t *testing.T, b Backend) {
 	t.Helper()
 	scenarios := []struct {
 		name string
@@ -59,7 +59,7 @@ func ScenarioEcho_PortForward(t *testing.T, b Backend) {
 	conn := dialWithRetry(t, tun.SenderAddr, 5*time.Second)
 	defer conn.Close() //nolint:errcheck // best-effort cleanup
 
-	want := []byte("hello aztunnel parity\n")
+	want := []byte("hello aztunnel e2e\n")
 	writeAll(t, conn, want)
 	got := readN(t, conn, len(want), 10*time.Second)
 	if !bytes.Equal(got, want) {
@@ -86,7 +86,7 @@ func ScenarioEcho_SOCKS5(t *testing.T, b Backend) {
 	}
 	defer conn.Close() //nolint:errcheck // best-effort cleanup
 
-	want := []byte("hello aztunnel socks5 parity\n")
+	want := []byte("hello aztunnel socks5 e2e\n")
 	writeAll(t, conn, want)
 	got := readN(t, conn, len(want), 10*time.Second)
 	if !bytes.Equal(got, want) {

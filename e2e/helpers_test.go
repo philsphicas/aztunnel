@@ -92,16 +92,16 @@ func requireProvider(t testing.TB) *azrelay.Provider {
 // item; the function cannot enforce it because the testing package
 // exposes no "am I parallel yet?" signal.
 //
-// Exception: TestParity_Azure deliberately does NOT call t.Parallel()
-// because relayparity.AssertNoLeaks samples process-wide goroutine
+// Exception: TestE2E_Azure deliberately does NOT call t.Parallel()
+// because e2escenarios.AssertNoLeaks samples process-wide goroutine
 // and FD counts and would false-positive under parallel scenarios.
-// Parity therefore provisions serially via azureBackend.acquireEnv,
-// which is fine — the wall-clock win is bounded by goroutine-leak
-// detection there, not by hyco provisioning.
+// The e2e suite therefore provisions serially via
+// azureBackend.acquireEnv, which is fine — the wall-clock win is
+// bounded by goroutine-leak detection there, not by hyco provisioning.
 //
 // Skips the test when E2E_RELAY_NAME is unset.
 //
-// Backend contract (for callers wiring this into a parity Backend
+// Backend contract (for callers wiring this into an e2escenarios.Backend
 // implementation): one call → one fresh hyco pair. Scenarios that
 // need multiple hyco pairs (e.g. cross-version listeners on
 // different hycos) call requireDedicatedHyco multiple times and pay
@@ -157,7 +157,7 @@ func resultToEnv(r *azrelay.Result) *relayEnv {
 // first leaseSharedHyco call. drainBenchLease releases it after
 // m.Run returns. Concurrent leaseSharedHyco callers are serialised
 // by the mutex; in practice b.Run sub-benches inside a single
-// BenchmarkParity_Azure run sequentially so the lock is uncontended
+// BenchmarkE2E_Azure run sequentially so the lock is uncontended
 // past the first call.
 var (
 	benchLeaseMu  sync.Mutex
@@ -287,7 +287,7 @@ func availableAuths(t testing.TB, env *relayEnv) []authConfig {
 // availableAuthNames returns the auth method names to exercise based
 // on the E2E_AUTH filter, without binding to a specific env. Used by
 // callers that pick an authConfig only AFTER provisioning a fresh
-// hyco pair (e.g. TestParity_Azure / BenchmarkParity_Azure, which
+// hyco pair (e.g. TestE2E_Azure / BenchmarkE2E_Azure, which
 // build authConfig inside Backend.Setup via authFromEnv).
 //
 // Returns ["entra", "sas"] when E2E_AUTH is empty, ["entra"] when
