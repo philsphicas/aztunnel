@@ -16,10 +16,17 @@ import (
 // the in-process MockBackend (mockrelay/testharness/mockbackend) is a
 // behavioural gap in the mock that we have to either fix or document.
 //
-// Each instance is bound to a single auth method ("entra" or "sas")
-// so the caller can run the same scenario suite once per available
-// auth. All listeners and senders are real aztunnel subprocesses
-// driven by the existing helpers (startListener, startPortForwardSender,
+// An azureBackend exists in one of two modes:
+//
+//   - Factory: axis is non-nil, authName is empty. Returned from
+//     newAzureBackendFactory. Axes() reports the auth dimension; the
+//     harness enumerates it via Cell() to produce pinned backends.
+//   - Pinned: axis is nil, authName is "entra" or "sas". Returned
+//     from Cell(). Setup reads authName to pick the auth method.
+//     Pinned backends have no further axes.
+//
+// All listeners and senders are real aztunnel subprocesses driven by
+// the existing helpers (startListener, startPortForwardSender,
 // startSOCKS5Sender), so they exercise the same code paths that
 // production users hit. Each subprocess exposes its own Prometheus
 // /metrics endpoint via --metrics-addr 127.0.0.1:0, which the
@@ -38,13 +45,74 @@ import (
 //     drained at TestMain exit. Used by BenchmarkE2E_Azure so
 //     benchstat runs do not pay per-sub-bench provisioning.
 type azureBackend struct {
+	axis       *authAxis
 	authName   string
 	acquireEnv func(testing.TB) *relayEnv
 }
 
-// Name returns the backend identifier used in test sub-paths, e.g.
-// "azure-entra" or "azure-sas".
-func (b *azureBackend) Name() string { return "azure-" + b.authName }
+// authAxis is the e2escenarios.Axis the Azure backend varies over.
+// Values is the set of auth methods discovered at factory-construction
+// time via availableAuthNames; the harness enumerates them in order
+// and emits one t.Run per value.
+type authAxis struct {
+	values []string
+}
+
+func (*authAxis) Name() string       { return "auth" }
+func (a *authAxis) Values() []string { return a.values }
+
+// newAzureBackendFactory returns an *azureBackend whose Axes() lists
+// the auth methods available in this process — discovered once via
+// availableAuthNames(t) — and whose Cell(values) returns a fresh
+// *azureBackend pinned to values["auth"]. Cell-pinned backends have
+// no further axes (Axes() returns nil), so the harness only loops
+// over the auth axis once.
+//
+// acquireEnv is fixed by the caller (requireDedicatedHyco for
+// scenario runs, leaseSharedHyco for benchmarks).
+func newAzureBackendFactory(t testing.TB, acquireEnv func(testing.TB) *relayEnv) *azureBackend {
+	return &azureBackend{
+		axis:       &authAxis{values: availableAuthNames(t)},
+		acquireEnv: acquireEnv,
+	}
+}
+
+// Name returns the backend identifier (always "azure"). The harness
+// does not embed it in sub-test paths — the auth dimension appears
+// via the axis t.Run wrapping — but scenarios and external callers
+// may surface it in debug output.
+func (*azureBackend) Name() string { return "azure" }
+
+// Axes returns the matrix dimensions this backend varies over.
+// Factory backends (constructed via newAzureBackendFactory) return
+// the auth axis; pinned backends (returned from Cell) return nil.
+func (b *azureBackend) Axes() []e2escenarios.Axis {
+	if b.axis == nil {
+		return nil
+	}
+	return []e2escenarios.Axis{b.axis}
+}
+
+// Cell returns a fresh *azureBackend pinned to the cell described by
+// values. Factory backends require values["auth"]; pinned backends
+// (axis == nil) accept only an empty values map and return a clone
+// of the receiver.
+func (b *azureBackend) Cell(values map[string]string) e2escenarios.Backend {
+	if b.axis == nil {
+		if len(values) != 0 {
+			panic("azureBackend.Cell: pinned backend accepts no axis values")
+		}
+		return &azureBackend{authName: b.authName, acquireEnv: b.acquireEnv}
+	}
+	auth, ok := values["auth"]
+	if !ok {
+		panic("azureBackend.Cell: missing required axis key \"auth\"")
+	}
+	if len(values) != 1 {
+		panic("azureBackend.Cell: expected exactly one axis value (auth)")
+	}
+	return &azureBackend{authName: auth, acquireEnv: b.acquireEnv}
+}
 
 // Setup brings up the requested topology (NumListeners listeners and
 // max(NumSenders,1) senders), waits until every listener has logged

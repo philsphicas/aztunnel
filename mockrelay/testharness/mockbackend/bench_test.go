@@ -20,5 +20,5 @@ import (
 //	    ./testharness/mockbackend/...
 func BenchmarkE2E_Mock(b *testing.B) {
 	var backend mockbackend.MockBackend
-	e2escenarios.RunBenchmarks(b, &backend)
+	e2escenarios.RunAllBenchmarks(b, &backend)
 }

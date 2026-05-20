@@ -41,8 +41,27 @@ import (
 // `go test ./mockrelay/...` job.
 type MockBackend struct{}
 
-// Name returns the backend identifier used in test sub-paths.
+// Name returns the backend identifier (always "mock"). The harness
+// does not embed it in sub-test paths — MockBackend has no axes,
+// so scenarios run directly under the test entry point — but
+// scenarios and external callers may surface it in debug output.
 func (*MockBackend) Name() string { return "mock" }
+
+// Axes returns the matrix dimensions this backend varies over. The
+// mock has none — it only speaks SAS against an in-process server,
+// so the harness runs scenarios directly under the test entry point
+// with no axis sub-path layer.
+func (*MockBackend) Axes() []e2escenarios.Axis { return nil }
+
+// Cell returns the backend pinned to the cell described by values.
+// MockBackend has no axes so values must be empty; Cell returns the
+// receiver unchanged.
+func (m *MockBackend) Cell(values map[string]string) e2escenarios.Backend {
+	if len(values) != 0 {
+		panic("MockBackend.Cell: no axes, expected empty values")
+	}
+	return m
+}
 
 // Setup brings up the in-process topology described by opts and blocks
 // until every listener's control channel is attached and every sender

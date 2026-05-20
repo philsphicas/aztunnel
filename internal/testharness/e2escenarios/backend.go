@@ -30,6 +30,19 @@ func (m SenderMode) String() string {
 	}
 }
 
+// Axis is one matrix dimension a Backend can vary over. The harness
+// enumerates Values in order, wrapping each in t.Run(value, ...) so
+// the rendered sub-test path reads as `<entry>/<value>/<scenario>`
+// (or with deeper axis nesting, `<entry>/<value1>/<value2>/<scenario>`).
+//
+// Axis Names are purely informational (used by error messages and
+// the Cell() contract — see Backend.Cell). They do not appear in
+// sub-test paths; only Values do.
+type Axis interface {
+	Name() string
+	Values() []string
+}
+
 // Backend is the abstraction e2e scenarios run against. Each
 // implementation knows how to bring up a topology that satisfies
 // SetupOptions and to tear it down cleanly via t.Cleanup.
@@ -40,10 +53,34 @@ func (m SenderMode) String() string {
 // methods used are Helper / Fatalf / Logf / Cleanup, all on the
 // shared interface.
 type Backend interface {
-	// Name identifies the backend in test output (e.g. "mock",
-	// "azure-entra", "azure-sas"). Used to make sub-test paths
-	// readable.
+	// Name identifies the backend (e.g. "mock", "azure"). The harness
+	// does not embed it in sub-test paths — axis values fill that
+	// role via t.Run wrapping — but scenarios and external callers
+	// may surface it in debug output.
 	Name() string
+
+	// Axes returns the matrix dimensions this backend varies over.
+	// Order is significant: the harness nests t.Run calls in the
+	// returned order, so Axes()[0] becomes the outermost sub-test
+	// layer. Returning nil (or an empty slice) means the backend has
+	// no axes and the harness jumps straight to scenarios.
+	Axes() []Axis
+
+	// Cell returns a Backend pinned to the cell described by values.
+	// values is keyed by Axis.Name and contains exactly one entry per
+	// axis returned by Axes(); the harness builds it as it descends
+	// the t.Run nesting. When the backend has axes, Cell must return
+	// a fresh Backend instance — never the receiver — because
+	// subsequent cells would otherwise overwrite the pinned state on
+	// the same receiver. A no-axis backend has no per-cell state to
+	// clobber, so Cell({}) on such a backend may return the receiver
+	// unchanged.
+	//
+	// Cell implementations should validate that values contains every
+	// axis key they expect; a missing or misspelled key is a harness
+	// contract bug and should panic with a precise message (Cell has
+	// no testing.TB to fail on cleanly).
+	Cell(values map[string]string) Backend
 
 	// Setup brings up a relay topology described by opts and returns a
 	// Tunnel handle the scenario can drive. All resources (goroutines,

@@ -38,8 +38,9 @@ import (
 func BenchmarkE2E_Azure(b *testing.B) {
 	requireProvider(b)
 	name := availableAuthNames(b)[0]
-	b.Run(name, func(b *testing.B) {
-		backend := &azureBackend{authName: name, acquireEnv: leaseSharedHyco}
-		e2escenarios.RunBenchmarks(b, backend)
-	})
+	f := &azureBackend{
+		axis:       &authAxis{values: []string{name}},
+		acquireEnv: leaseSharedHyco,
+	}
+	e2escenarios.RunAllBenchmarks(b, f)
 }
