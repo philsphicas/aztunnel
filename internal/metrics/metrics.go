@@ -312,16 +312,16 @@ func (t *ConnectionTracker) Done(durationSec float64, toRelayBytes, fromRelayByt
 
 // TrackedBridge wraps relay.Bridge with connection lifecycle tracking.
 // Safe to call on a nil receiver.
-func (m *Metrics) TrackedBridge(ctx context.Context, ws *websocket.Conn, rwc net.Conn, role, target string) (relay.BridgeStats, error) {
+func (m *Metrics) TrackedBridge(ctx context.Context, ws *websocket.Conn, rwc net.Conn, role, target string) (relay.BridgeResult, error) {
 	tracker := m.ConnectionOpened(role, target)
 	start := time.Now()
-	var stats relay.BridgeStats
+	var result relay.BridgeResult
 	var err error
 	defer func() {
-		tracker.Done(time.Since(start).Seconds(), stats.TCPToWS, stats.WSToTCP, err)
+		tracker.Done(time.Since(start).Seconds(), result.Stats.TCPToWS, result.Stats.WSToTCP, err)
 	}()
-	stats, err = relay.Bridge(ctx, ws, rwc)
-	return stats, err
+	result, err = relay.Bridge(ctx, ws, rwc)
+	return result, err
 }
 
 // InstrumentedDial wraps relay.DialWithRetry with duration and error metrics.
