@@ -115,12 +115,17 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	defer func() { _ = ws.CloseNow() }()
 
 	// Send envelope and check response.
-	if err := sendEnvelopeAndCheck(ctx, ws, target, bridgeID); err != nil {
+	listenerID, err := sendEnvelopeAndCheck(ctx, ws, target, bridgeID)
+	if err != nil {
+		// logRejection already emits a contextual WARN with target,
+		// code, and listener_id; do not log "socks5 failed" on top
+		// of it (the doubled WARN obscures rather than clarifies).
+		logRejection(logger, target, listenerID, err)
 		_ = socks5.SendReply(conn, socks5RepForError(err), nil)
 		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
-		logger.Warn("socks5 failed", "error", err)
 		return err
 	}
+	logAccept(logger, target, listenerID)
 
 	// Tell the SOCKS5 client we're connected.
 	tcpAddr, _ := conn.LocalAddr().(*net.TCPAddr)

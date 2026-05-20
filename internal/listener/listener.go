@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/philsphicas/aztunnel/internal/idgen"
 	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/protocol"
 	"github.com/philsphicas/aztunnel/internal/relay"
@@ -32,10 +33,27 @@ type Config struct {
 	TCPKeepAlive   time.Duration
 	Logger         *slog.Logger
 	Metrics        *metrics.Metrics // optional; nil disables metrics
+
+	// ListenerID is the per-listener-process correlation identifier
+	// stamped onto every ConnectResponse this listener sends. Callers
+	// should leave this empty; ListenAndServe mints a fresh value at
+	// startup. Tests that drive handleConnection directly may set it
+	// to a known string for deterministic assertions.
+	ListenerID string
 }
 
-// ListenAndServe starts the relay-listener. It blocks until ctx is cancelled.
-func ListenAndServe(ctx context.Context, cfg Config) error {
+// applyDefaults fills in zero-valued config fields with their
+// runtime defaults and mints a ListenerID if the caller didn't
+// provide one. Both ListenAndServe and tests that drive
+// handleConnection directly call this so production and test traffic
+// walk the same startup path.
+//
+// applyDefaults also wraps the Logger so every subsequent log line
+// emitted by the listener (including those from the relay control
+// loop) automatically carries the listener_id attribute. Operators
+// reading sender logs can grep the listener log on the same
+// listener_id to confirm which listener answered.
+func applyDefaults(cfg *Config) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -45,6 +63,15 @@ func ListenAndServe(ctx context.Context, cfg Config) error {
 	if cfg.TCPKeepAlive == 0 {
 		cfg.TCPKeepAlive = 30 * time.Second
 	}
+	if cfg.ListenerID == "" {
+		cfg.ListenerID = idgen.NewListenerID()
+	}
+	cfg.Logger = cfg.Logger.With("listener_id", cfg.ListenerID)
+}
+
+// ListenAndServe starts the relay-listener. It blocks until ctx is cancelled.
+func ListenAndServe(ctx context.Context, cfg Config) error {
+	applyDefaults(&cfg)
 
 	if len(cfg.AllowList) == 0 {
 		cfg.Logger.Warn("no allowlist configured, all targets will be permitted")
@@ -83,18 +110,18 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	var env protocol.ConnectEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		logger.Warn("invalid envelope", "error", err)
-		_ = sendResponse(ctx, ws, false, "invalid envelope")
+		_ = sendResponse(ctx, ws, cfg, false, "invalid envelope")
 		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
 	if env.Version != protocol.CurrentVersion {
 		logger.Warn("unsupported protocol version", "version", env.Version)
-		_ = sendResponse(ctx, ws, false, "unsupported protocol version")
+		_ = sendResponse(ctx, ws, cfg, false, "unsupported protocol version")
 		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
 	if env.Target == "" {
-		_ = sendResponse(ctx, ws, false, "missing target")
+		_ = sendResponse(ctx, ws, cfg, false, "missing target")
 		cfg.Metrics.ConnectionError("listener", metrics.ReasonEnvelopeError)
 		return
 	}
@@ -112,7 +139,7 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	// Check allowlist.
 	if len(cfg.AllowList) > 0 && !isAllowed(env.Target, cfg.AllowList) {
 		logger.Warn("target not allowed", "target", env.Target)
-		_ = sendResponse(ctx, ws, false, "target not allowed")
+		_ = sendResponse(ctx, ws, cfg, false, "target not allowed")
 		cfg.Metrics.ConnectionError("listener", metrics.ReasonAllowlistRejected)
 		return
 	}
@@ -127,7 +154,7 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	cfg.Metrics.ObserveDialDuration("listener", time.Since(dialStart).Seconds())
 	if err != nil {
 		logger.Warn("dial target failed", "target", env.Target, "error", err)
-		_ = sendResponseWithCode(ctx, ws, false, "connection failed", classifyDialError(err))
+		_ = sendResponseWithCode(ctx, ws, cfg, false, "connection failed", classifyDialError(err))
 		cfg.Metrics.ConnectionError("listener", metrics.DialReason(err, metrics.ReasonDialFailed))
 		return
 	}
@@ -137,7 +164,7 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	relay.SetTCPKeepAlive(conn, cfg.TCPKeepAlive)
 
 	// Send success response.
-	if err := sendResponse(ctx, ws, true, ""); err != nil {
+	if err := sendResponse(ctx, ws, cfg, true, ""); err != nil {
 		logger.Warn("failed to send response", "error", err)
 		return
 	}
@@ -149,19 +176,20 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	}
 }
 
-func sendResponse(ctx context.Context, ws *websocket.Conn, ok bool, errMsg string) error {
-	return sendResponseWithCode(ctx, ws, ok, errMsg, "")
+func sendResponse(ctx context.Context, ws *websocket.Conn, cfg Config, ok bool, errMsg string) error {
+	return sendResponseWithCode(ctx, ws, cfg, ok, errMsg, "")
 }
 
 // sendResponseWithCode is the variant of sendResponse that includes a
 // machine-readable code so the sender can map listener-side dial
 // failures onto client-visible status (e.g. SOCKS5 REP bytes).
-func sendResponseWithCode(ctx context.Context, ws *websocket.Conn, ok bool, errMsg, code string) error {
+func sendResponseWithCode(ctx context.Context, ws *websocket.Conn, cfg Config, ok bool, errMsg, code string) error {
 	resp := protocol.ConnectResponse{
-		Version: protocol.CurrentVersion,
-		OK:      ok,
-		Error:   errMsg,
-		Code:    code,
+		Version:    protocol.CurrentVersion,
+		OK:         ok,
+		Error:      errMsg,
+		Code:       code,
+		ListenerID: cfg.ListenerID,
 	}
 	data, _ := json.Marshal(resp) // simple struct, cannot fail
 	return ws.Write(ctx, websocket.MessageText, data)

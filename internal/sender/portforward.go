@@ -100,11 +100,16 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	defer func() { _ = ws.CloseNow() }()
 
 	// Send envelope and read response.
-	if err := sendEnvelopeAndCheck(ctx, ws, target, bridgeID); err != nil {
+	listenerID, err := sendEnvelopeAndCheck(ctx, ws, target, bridgeID)
+	if err != nil {
+		// logRejection already emits a contextual WARN with target,
+		// code, and listener_id; do not log "forward failed" on top
+		// of it (the doubled WARN obscures rather than clarifies).
+		logRejection(logger, target, listenerID, err)
 		cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
-		logger.Warn("forward failed", "error", err)
 		return err
 	}
+	logAccept(logger, target, listenerID)
 
 	// Bridge data.
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
@@ -125,7 +130,12 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 // bridgeID is the sender-minted correlation ID for this bridge; it is
 // propagated to the listener via ConnectEnvelope.BridgeID so logs on
 // both ends carry the same value.
-func sendEnvelopeAndCheck(ctx context.Context, ws *websocket.Conn, target, bridgeID string) error {
+//
+// The returned listenerID is the value from ConnectResponse.ListenerID:
+// non-empty for current-version listeners (success or rejection), empty
+// for pre-listener_id listeners or for failures that occur before any
+// response was read (write/read/parse errors).
+func sendEnvelopeAndCheck(ctx context.Context, ws *websocket.Conn, target, bridgeID string) (string, error) {
 	env := protocol.ConnectEnvelope{
 		Version:  protocol.CurrentVersion,
 		Target:   target,
@@ -133,29 +143,33 @@ func sendEnvelopeAndCheck(ctx context.Context, ws *websocket.Conn, target, bridg
 	}
 	data, _ := json.Marshal(env) // simple struct, cannot fail
 	if err := ws.Write(ctx, websocket.MessageText, data); err != nil {
-		return fmt.Errorf("send envelope: %w", err)
+		return "", fmt.Errorf("send envelope: %w", err)
 	}
 
 	_, respData, err := ws.Read(ctx)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		return "", fmt.Errorf("read response: %w", err)
 	}
 	var resp protocol.ConnectResponse
 	if err := json.Unmarshal(respData, &resp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
+		return "", fmt.Errorf("parse response: %w", err)
 	}
 	if !resp.OK {
-		return &connectRejected{Message: resp.Error, Code: resp.Code}
+		return resp.ListenerID, &connectRejected{Message: resp.Error, Code: resp.Code, ListenerID: resp.ListenerID}
 	}
-	return nil
+	return resp.ListenerID, nil
 }
 
 // connectRejected is returned from sendEnvelopeAndCheck when the
 // listener answers with OK=false. It carries the wire-level Code so
-// the SOCKS5 sender can map dial classifications back to REP bytes.
+// the SOCKS5 sender can map dial classifications back to REP bytes,
+// and the listener_id so operators correlating the rejection back to
+// a specific listener instance see the same identifier the listener
+// emitted.
 type connectRejected struct {
-	Message string
-	Code    string
+	Message    string
+	Code       string
+	ListenerID string
 }
 
 func (e *connectRejected) Error() string {
@@ -163,6 +177,51 @@ func (e *connectRejected) Error() string {
 		return fmt.Sprintf("connection rejected (%s): %s", e.Code, e.Message)
 	}
 	return fmt.Sprintf("connection rejected: %s", e.Message)
+}
+
+// logAccept emits a structured Info on a successful listener accept.
+// Centralised alongside logRejection so all three sender entry points
+// share the same log shape. listener_id is omitted when empty so
+// pre-listener_id listeners (mixed-version traffic) don't show as
+// `listener_id=""`.
+func logAccept(logger *slog.Logger, target, listenerID string) {
+	attrs := []any{"target", target}
+	if listenerID != "" {
+		attrs = append(attrs, "listener_id", listenerID)
+	}
+	logger.Info("listener accepted connection", attrs...)
+}
+
+// logRejection emits a structured Warn for a sendEnvelopeAndCheck
+// failure. Centralised so all three sender entry points share the
+// same log shape.
+//
+// The message and attributes branch on whether the error is a
+// listener-side rejection (the listener answered with OK=false) or a
+// pre-response transport/parse failure. Mixing the two under a single
+// "listener refused connection" message would be operationally
+// misleading — a write/read error happens before the listener has a
+// chance to accept or refuse anything. Empty listener_id and empty
+// code attributes are omitted so older listeners (no listener_id) and
+// rejections without a classification don't show as `…=""` in logs.
+func logRejection(logger *slog.Logger, target, listenerID string, err error) {
+	var ce *connectRejected
+	if errors.As(err, &ce) {
+		attrs := []any{"target", target, "error", err}
+		if ce.ListenerID != "" {
+			attrs = append(attrs, "listener_id", ce.ListenerID)
+		}
+		if ce.Code != "" {
+			attrs = append(attrs, "code", ce.Code)
+		}
+		logger.Warn("listener refused connection", attrs...)
+		return
+	}
+	attrs := []any{"target", target, "error", err}
+	if listenerID != "" {
+		attrs = append(attrs, "listener_id", listenerID)
+	}
+	logger.Warn("envelope exchange failed", attrs...)
 }
 
 // stdioConn adapts stdin/stdout to net.Conn for use with Bridge.

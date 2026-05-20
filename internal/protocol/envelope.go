@@ -46,6 +46,13 @@ type ConnectResponse struct {
 	// (generic failure). Optional and backward-compatible: senders and
 	// listeners pinned to earlier versions will ignore it.
 	Code string `json:"code,omitempty"`
+
+	// ListenerID is a listener-minted opaque identifier for the
+	// listener process. Stable for the lifetime of one listener
+	// process; changes on restart. Senders log it on receipt;
+	// mixed-version senders ignore the field. Format is unspecified
+	// (currently 16 base32 chars from [A-Z2-7]; do not parse).
+	ListenerID string `json:"listener_id,omitempty"`
 }
 
 // CurrentVersion is the current protocol version.

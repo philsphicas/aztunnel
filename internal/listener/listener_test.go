@@ -1,12 +1,23 @@
 package listener
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
+	"github.com/philsphicas/aztunnel/internal/metrics"
 	"github.com/philsphicas/aztunnel/internal/protocol"
 )
 
@@ -140,4 +151,329 @@ func TestClassifyDialError_OtherErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- listener_id tests ---
+
+// TestApplyDefaults_MintsListenerID asserts a Config with empty
+// ListenerID gets a non-empty value populated by applyDefaults — the
+// production startup path mints exactly once per process and stamps
+// every response with that value.
+func TestApplyDefaults_MintsListenerID(t *testing.T) {
+	cfg := Config{}
+	applyDefaults(&cfg)
+	if cfg.ListenerID == "" {
+		t.Fatal("applyDefaults did not mint a ListenerID")
+	}
+}
+
+// TestApplyDefaults_MintsDistinctIDs is the cross-instance invariant:
+// two listener configs prepared independently must end up with
+// different IDs, otherwise restart-driven failure modes are
+// indistinguishable from "the same listener keeps misbehaving".
+func TestApplyDefaults_MintsDistinctIDs(t *testing.T) {
+	a, b := Config{}, Config{}
+	applyDefaults(&a)
+	applyDefaults(&b)
+	if a.ListenerID == b.ListenerID {
+		t.Fatalf("two listener configs got the same ID: %q", a.ListenerID)
+	}
+}
+
+// TestApplyDefaults_RespectsCallerProvidedID ensures tests (and any
+// future caller that wants deterministic IDs) can pre-populate the
+// field and have applyDefaults leave it alone. The doc comment on
+// Config.ListenerID is the contract; this test enforces it.
+func TestApplyDefaults_RespectsCallerProvidedID(t *testing.T) {
+	cfg := Config{ListenerID: "fixed-id-for-test"}
+	applyDefaults(&cfg)
+	if cfg.ListenerID != "fixed-id-for-test" {
+		t.Fatalf("applyDefaults overwrote caller ID: got %q", cfg.ListenerID)
+	}
+}
+
+// TestApplyDefaults_LoggerCarriesListenerID asserts every subsequent
+// log line emitted via cfg.Logger automatically carries the
+// listener_id attribute. Operators correlating sender-side
+// observations against listener-side logs rely on this; without it,
+// the listener_id would have to be threaded through every log call
+// site manually (error-prone).
+func TestApplyDefaults_LoggerCarriesListenerID(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := Config{
+		ListenerID: "tag-me-please",
+		Logger:     slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	}
+	applyDefaults(&cfg)
+	cfg.Logger.Info("anything")
+	if !strings.Contains(buf.String(), "listener_id=tag-me-please") {
+		t.Fatalf("log line missing listener_id attribute:\n  %s", buf.String())
+	}
+}
+
+// TestHandleConnection_ResponseCarriesListenerID drives the full
+// handleConnection path with an in-memory ws pair and asserts the
+// success-path response carries the configured ListenerID. This is
+// the smallest end-to-end check that wiring through sendResponse →
+// sendResponseWithCode actually populates the field on the wire.
+func TestHandleConnection_ResponseCarriesListenerID(t *testing.T) {
+	// Start a one-shot target the listener will dial.
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("target listen: %v", err)
+	}
+	defer target.Close() //nolint:errcheck // best-effort cleanup
+	go func() {
+		c, err := target.Accept()
+		if err != nil {
+			return
+		}
+		_ = c.Close()
+	}()
+
+	cfg := Config{
+		AllowList:      []string{target.Addr().String()},
+		ConnectTimeout: 5 * time.Second,
+		TCPKeepAlive:   5 * time.Second,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Metrics:        metrics.New(),
+		ListenerID:     "stable-test-id-1",
+	}
+
+	resp := driveOneHandshake(t, cfg, target.Addr().String())
+	if !resp.OK {
+		t.Fatalf("expected OK response, got error=%q code=%q", resp.Error, resp.Code)
+	}
+	if resp.ListenerID != "stable-test-id-1" {
+		t.Errorf("response listener_id = %q, want %q", resp.ListenerID, "stable-test-id-1")
+	}
+}
+
+// TestHandleConnection_StableAcrossRequests drives 10 sequential
+// handshakes through the same Config and asserts every response
+// carries the same listener_id. Two listener_id values inside a
+// single instance's lifetime would indicate a regression where the
+// mint happens per-request instead of per-instance.
+func TestHandleConnection_StableAcrossRequests(t *testing.T) {
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("target listen: %v", err)
+	}
+	defer target.Close() //nolint:errcheck // best-effort cleanup
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			c, err := target.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+
+	cfg := Config{
+		AllowList:      []string{target.Addr().String()},
+		ConnectTimeout: 5 * time.Second,
+		TCPKeepAlive:   5 * time.Second,
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Metrics:        metrics.New(),
+		ListenerID:     "stable-test-id-2",
+	}
+
+	for i := 0; i < 10; i++ {
+		resp := driveOneHandshake(t, cfg, target.Addr().String())
+		if resp.ListenerID != "stable-test-id-2" {
+			t.Fatalf("iteration %d: listener_id = %q, want %q", i, resp.ListenerID, "stable-test-id-2")
+		}
+	}
+}
+
+// TestHandleConnection_FailurePathsCarryListenerID covers every
+// sendResponse / sendResponseWithCode call site in handleConnection:
+// invalid envelope, unsupported version, missing target, allowlist
+// rejection, dial failure. Each must carry the listener_id so a
+// rejected sender still sees which listener instance rejected it.
+func TestHandleConnection_FailurePathsCarryListenerID(t *testing.T) {
+	const listenerID = "stable-test-id-3"
+
+	// Address that the OS will RST on connect — used for the dial-
+	// failure case. Bind+immediate-close gives us a port that is
+	// (typically) free in the seconds that follow.
+	refused := func(t *testing.T) string {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close()
+		return addr
+	}
+
+	tests := []struct {
+		name    string
+		cfg     Config
+		send    func(ctx context.Context, ws *websocket.Conn) error
+		wantOK  bool
+		wantErr string
+	}{
+		{
+			name: "invalid-envelope",
+			cfg: Config{
+				ConnectTimeout: 5 * time.Second,
+				TCPKeepAlive:   5 * time.Second,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Metrics:        metrics.New(),
+				ListenerID:     listenerID,
+			},
+			send: func(ctx context.Context, ws *websocket.Conn) error {
+				return ws.Write(ctx, websocket.MessageText, []byte("not json"))
+			},
+			wantOK:  false,
+			wantErr: "invalid envelope",
+		},
+		{
+			name: "unsupported-version",
+			cfg: Config{
+				ConnectTimeout: 5 * time.Second,
+				TCPKeepAlive:   5 * time.Second,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Metrics:        metrics.New(),
+				ListenerID:     listenerID,
+			},
+			send: func(ctx context.Context, ws *websocket.Conn) error {
+				data, _ := json.Marshal(protocol.ConnectEnvelope{Version: 999, Target: "x:1"})
+				return ws.Write(ctx, websocket.MessageText, data)
+			},
+			wantOK:  false,
+			wantErr: "unsupported protocol version",
+		},
+		{
+			name: "missing-target",
+			cfg: Config{
+				ConnectTimeout: 5 * time.Second,
+				TCPKeepAlive:   5 * time.Second,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Metrics:        metrics.New(),
+				ListenerID:     listenerID,
+			},
+			send: func(ctx context.Context, ws *websocket.Conn) error {
+				data, _ := json.Marshal(protocol.ConnectEnvelope{Version: protocol.CurrentVersion})
+				return ws.Write(ctx, websocket.MessageText, data)
+			},
+			wantOK:  false,
+			wantErr: "missing target",
+		},
+		{
+			name: "allowlist-rejected",
+			cfg: Config{
+				AllowList:      []string{"10.255.255.255:1"},
+				ConnectTimeout: 5 * time.Second,
+				TCPKeepAlive:   5 * time.Second,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Metrics:        metrics.New(),
+				ListenerID:     listenerID,
+			},
+			send: func(ctx context.Context, ws *websocket.Conn) error {
+				data, _ := json.Marshal(protocol.ConnectEnvelope{Version: protocol.CurrentVersion, Target: "127.0.0.1:1"})
+				return ws.Write(ctx, websocket.MessageText, data)
+			},
+			wantOK:  false,
+			wantErr: "target not allowed",
+		},
+		{
+			name: "dial-failure",
+			cfg: Config{
+				ConnectTimeout: 2 * time.Second,
+				TCPKeepAlive:   5 * time.Second,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Metrics:        metrics.New(),
+				ListenerID:     listenerID,
+			},
+			send: func(ctx context.Context, ws *websocket.Conn) error {
+				addr := refused(t)
+				data, _ := json.Marshal(protocol.ConnectEnvelope{Version: protocol.CurrentVersion, Target: addr})
+				return ws.Write(ctx, websocket.MessageText, data)
+			},
+			wantOK:  false,
+			wantErr: "connection failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := driveCustomHandshake(t, tt.cfg, tt.send)
+			if resp.OK != tt.wantOK {
+				t.Errorf("ok = %v, want %v", resp.OK, tt.wantOK)
+			}
+			if !strings.Contains(resp.Error, tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", resp.Error, tt.wantErr)
+			}
+			if resp.ListenerID != listenerID {
+				t.Errorf("listener_id = %q, want %q", resp.ListenerID, listenerID)
+			}
+		})
+	}
+}
+
+// driveOneHandshake stands up an httptest WebSocket server that
+// forwards the accepted connection to handleConnection(cfg), then
+// dials it, sends a valid ConnectEnvelope for target, and returns
+// the parsed response. The full success path runs end-to-end.
+func driveOneHandshake(t *testing.T, cfg Config, target string) protocol.ConnectResponse {
+	t.Helper()
+	return driveCustomHandshake(t, cfg, func(ctx context.Context, ws *websocket.Conn) error {
+		data, _ := json.Marshal(protocol.ConnectEnvelope{Version: protocol.CurrentVersion, Target: target})
+		return ws.Write(ctx, websocket.MessageText, data)
+	})
+}
+
+// driveCustomHandshake is the underlying driver for handshakes
+// against a real handleConnection. send is the client-side step that
+// writes whatever envelope the test wants to exercise.
+//
+// The helper calls applyDefaults so tests walk the same startup path
+// as production (ConnectTimeout/TCPKeepAlive defaulting, logger
+// wrapping with listener_id). Tests that need a deterministic
+// listener_id should pre-populate cfg.ListenerID; applyDefaults
+// leaves a non-empty value untouched.
+func driveCustomHandshake(t *testing.T, cfg Config, send func(ctx context.Context, ws *websocket.Conn) error) protocol.ConnectResponse {
+	t.Helper()
+	applyDefaults(&cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		// handleConnection takes ownership of the ws and closes
+		// internal state on return.
+		handleConnection(r.Context(), ws, cfg)
+	}))
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer ws.CloseNow() //nolint:errcheck // best-effort cleanup
+
+	if err := send(ctx, ws); err != nil {
+		t.Fatalf("send envelope: %v", err)
+	}
+
+	_, data, err := ws.Read(ctx)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var resp protocol.ConnectResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	return resp
 }

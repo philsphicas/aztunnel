@@ -53,6 +53,53 @@ func TestNewBridgeID_NotEmpty(t *testing.T) {
 	}
 }
 
+// TestNewListenerID_Format mirrors TestNewBridgeID_Format for the
+// per-listener-process id. The format is a public contract because
+// log scrapers grep for listener_id=<value> across listener stderr;
+// any drift here breaks operator queries.
+func TestNewListenerID_Format(t *testing.T) {
+	const want = 16
+	for i := 0; i < 32; i++ {
+		id := NewListenerID()
+		if len(id) != want {
+			t.Fatalf("NewListenerID() len = %d, want %d (id=%q)", len(id), want, id)
+		}
+		for j, c := range id {
+			ok := (c >= 'A' && c <= 'Z') || (c >= '2' && c <= '7')
+			if !ok {
+				t.Fatalf("NewListenerID() id=%q: invalid char %q at %d", id, c, j)
+			}
+		}
+	}
+}
+
+// TestNewListenerID_NoCollisions defends the entropy claim for
+// listener ids. 10_000 distinct mints in a row would be statistically
+// impossible if the RNG plumbing were broken (e.g. silently returning
+// a fixed value), so this catches that regression rather than a
+// real-world collision (which is astronomically unlikely).
+func TestNewListenerID_NoCollisions(t *testing.T) {
+	const n = 10_000
+	seen := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		id := NewListenerID()
+		if _, dup := seen[id]; dup {
+			t.Fatalf("collision after %d IDs: %q", i+1, id)
+		}
+		seen[id] = struct{}{}
+	}
+}
+
+// TestNewListenerID_NotEmpty defends against the zero-value
+// regression. A listener that emitted listener_id="" would be
+// indistinguishable from a mixed-version sender talking to an
+// upgraded listener, defeating the whole point of the field.
+func TestNewListenerID_NotEmpty(t *testing.T) {
+	if NewListenerID() == "" {
+		t.Fatal("NewListenerID() returned empty string")
+	}
+}
+
 // TestNewControlSessionID_Format mirrors TestNewBridgeID_Format for
 // the per-control-loop id. The format is a public contract because
 // log scrapers grep for control_session_id=<value> across listener
@@ -89,13 +136,19 @@ func TestNewControlSessionID_NoCollisions(t *testing.T) {
 	}
 }
 
-// TestControlSessionID_DistinctFromBridgeID asserts the two
-// constructors mint independent values even though they share an
-// internal helper. A regression that collapsed them onto one source
-// (e.g. a memoised global) would defeat correlation by introducing
-// matching ids across unrelated log scopes.
-func TestControlSessionID_DistinctFromBridgeID(t *testing.T) {
+// TestIDs_DistinctConstructors asserts the three constructors mint
+// independent values even though they share an internal helper. A
+// regression that collapsed them onto one source (e.g. a memoised
+// global) would defeat correlation by introducing matching ids
+// across unrelated log scopes.
+func TestIDs_DistinctConstructors(t *testing.T) {
 	if NewBridgeID() == NewControlSessionID() {
-		t.Fatalf("expected distinct ids from independent constructors")
+		t.Fatalf("expected distinct ids from independent constructors (bridge vs control-session)")
+	}
+	if NewBridgeID() == NewListenerID() {
+		t.Fatalf("expected distinct ids from independent constructors (bridge vs listener)")
+	}
+	if NewListenerID() == NewControlSessionID() {
+		t.Fatalf("expected distinct ids from independent constructors (listener vs control-session)")
 	}
 }
