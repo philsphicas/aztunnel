@@ -72,7 +72,7 @@ func TestPortForwardBasic(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -113,7 +113,7 @@ func TestSOCKS5Basic(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "socks5-proxy listening", 15*time.Second)
 
 			conn := dialSOCKS5(t, senderAddr, echo.Addr())
@@ -147,7 +147,7 @@ func TestConnectStdio(t *testing.T) {
 				"--allow", echo.Addr(),
 				"--log-level", "debug",
 			)
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 
 			// Run connect mode as a subprocess with piped stdin/stdout.
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -307,7 +307,7 @@ func TestSASKeyAuth(t *testing.T) {
 		"--log-level", "debug",
 	)
 
-	waitForLog(t, listener, "control channel connected", 30*time.Second)
+	waitForLog(t, listener, "control_started", 30*time.Second)
 	senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 	conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -348,7 +348,7 @@ func TestAllowlistAllow(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -389,7 +389,7 @@ func TestAllowlistDeny(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "socks5-proxy listening", 15*time.Second)
 
 			// This should fail because the echo server is on 127.0.0.1, not 192.0.2.x.
@@ -425,7 +425,7 @@ func TestMaxConnections(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
@@ -505,7 +505,7 @@ func TestSmallPayload(t *testing.T) {
 			)
 			sender := startPortForwardSender(t, env, auth, echo.Addr())
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -545,7 +545,7 @@ func TestLargePayload(t *testing.T) {
 			)
 			sender := startPortForwardSender(t, env, auth, echo.Addr())
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			conn, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -699,7 +699,7 @@ func TestConcurrentSameTarget(t *testing.T) {
 			)
 			sender := startPortForwardSender(t, env, auth, echo.Addr())
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			const numConns = 50
@@ -769,7 +769,7 @@ func TestConcurrentDistinctTargets(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "socks5-proxy listening", 15*time.Second)
 
 			var wg sync.WaitGroup
@@ -868,7 +868,7 @@ func TestMetricsConnectionCount(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 			senderMetrics := sender.MetricsAddr(t, 15*time.Second)
@@ -922,7 +922,7 @@ func TestMetricsErrorReason(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "socks5-proxy listening", 15*time.Second)
 
@@ -958,7 +958,7 @@ func TestMetricsDialDuration(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 			senderMetrics := sender.MetricsAddr(t, 15*time.Second)
 
@@ -1030,7 +1030,7 @@ func TestSenderRetriesUntilListenerReady(t *testing.T) {
 				"--allow", echo.Addr(),
 				"--log-level", "debug",
 			)
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 
 			// The sender should eventually connect.
 			if _, ok := connectLogs.waitFor("connected", 15*time.Second); !ok {
@@ -1072,7 +1072,7 @@ func TestPortForwardRecoveryAfterListenerRestart(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
 			// Verify traffic works.
@@ -1104,7 +1104,7 @@ func TestPortForwardRecoveryAfterListenerRestart(t *testing.T) {
 				"--allow", echo.Addr(),
 				"--log-level", "debug",
 			)
-			waitForLog(t, listener2, "control channel connected", 30*time.Second)
+			waitForLog(t, listener2, "control_started", 30*time.Second)
 
 			// Traffic should work again.
 			conn2, err := net.DialTimeout("tcp", senderAddr, 10*time.Second)
@@ -1452,7 +1452,7 @@ func TestPortForwardClosedPort(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
@@ -1499,7 +1499,7 @@ func TestSOCKS5ClosedPort(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "socks5-proxy listening", 15*time.Second)
 
 			// SOCKS5 handshake to the closed port.
@@ -1536,7 +1536,7 @@ func TestPortForwardUnreachable(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 

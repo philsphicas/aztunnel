@@ -48,7 +48,7 @@ func (b *azureBackend) Name() string { return "azure-" + b.authName }
 
 // Setup brings up the requested topology (NumListeners listeners and
 // max(NumSenders,1) senders), waits until every listener has logged
-// "control channel connected" and every sender has logged its bind
+// "control_started" and every sender has logged its bind
 // address, then attaches metrics-scrape closures and returns the
 // Tunnel handle. All subprocesses are torn down via the existing
 // t.Cleanup wiring inside startAztunnelWithSAS.
@@ -89,7 +89,7 @@ func (b *azureBackend) Setup(t testing.TB, opts relayparity.SetupOptions) *relay
 	spawnListener := func(t testing.TB) *relayparity.Listener {
 		t.Helper()
 		lst := startListener(t, env, auth, listenerArgs...)
-		waitForLog(t, lst, "control channel connected", 30*time.Second)
+		waitForLog(t, lst, "control_started", 30*time.Second)
 		metricsAddr := lst.MetricsAddr(t, 15*time.Second)
 		return &relayparity.Listener{
 			Addr:             metricsAddr,

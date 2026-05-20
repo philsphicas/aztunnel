@@ -40,7 +40,7 @@ func TestTokenFetchMetric_Azure(t *testing.T) {
 				"--metrics-addr", "127.0.0.1:0",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 			senderMetrics := sender.MetricsAddr(t, 15*time.Second)
 

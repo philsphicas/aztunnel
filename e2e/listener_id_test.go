@@ -52,7 +52,7 @@ func TestListenerID_PropagatesAndChangesOnRestart(t *testing.T) {
 				"--metrics-addr", "127.0.0.1:0",
 				"--log-level", "debug",
 			)
-			lineA := waitForLog(t, listenerA, "control channel connected", 30*time.Second)
+			lineA := waitForLog(t, listenerA, "control_started", 30*time.Second)
 			idA := extractListenerID(t, lineA)
 
 			sender := startPortForwardSender(t, env, auth, echo.Addr(),
@@ -81,7 +81,7 @@ func TestListenerID_PropagatesAndChangesOnRestart(t *testing.T) {
 				"--metrics-addr", "127.0.0.1:0",
 				"--log-level", "debug",
 			)
-			lineB := waitForLog(t, listenerB, "control channel connected", 30*time.Second)
+			lineB := waitForLog(t, listenerB, "control_started", 30*time.Second)
 			idB := extractListenerID(t, lineB)
 			if idB == idA {
 				t.Fatalf("listener B minted the same ID %q as listener A; mint-per-instance broken", idB)

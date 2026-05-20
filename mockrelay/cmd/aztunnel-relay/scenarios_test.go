@@ -43,7 +43,7 @@ func TestSubprocess_SOCKS5(t *testing.T) {
 	const entity = "scenario-socks5"
 
 	listener := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener, "control channel connected", 10*time.Second)
+	waitForLog(t, listener, "control_started", 10*time.Second)
 
 	socksBind := fmt.Sprintf("127.0.0.1:%d", pickFreePort(t))
 	_ = startSOCKS5Sender(t, ctx, rp.relayURL, entity, socksBind)
@@ -79,7 +79,7 @@ func TestSubprocess_ConnectStdio(t *testing.T) {
 	const entity = "scenario-connect"
 
 	listener := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener, "control channel connected", 10*time.Second)
+	waitForLog(t, listener, "control_started", 10*time.Second)
 
 	_, stdin, stdout := startConnectSender(t, ctx, rp.relayURL, entity, echoAddr)
 
@@ -112,7 +112,7 @@ func TestSubprocess_ConcurrentSameTarget(t *testing.T) {
 	const entity = "scenario-concurrent"
 
 	listener := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener, "control channel connected", 10*time.Second)
+	waitForLog(t, listener, "control_started", 10*time.Second)
 
 	pfBind := fmt.Sprintf("127.0.0.1:%d", pickFreePort(t))
 	_ = startPortForwardSender(t, ctx, rp.relayURL, entity, pfBind, echoAddr)
@@ -169,7 +169,7 @@ func TestSubprocess_MediumPayload(t *testing.T) {
 	const entity = "scenario-medium"
 
 	listener := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener, "control channel connected", 10*time.Second)
+	waitForLog(t, listener, "control_started", 10*time.Second)
 
 	pfBind := fmt.Sprintf("127.0.0.1:%d", pickFreePort(t))
 	_ = startPortForwardSender(t, ctx, rp.relayURL, entity, pfBind, echoAddr)
@@ -221,7 +221,7 @@ func TestSubprocess_BulkTransfer(t *testing.T) {
 	const entity = "scenario-bulk"
 
 	listener := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener, "control channel connected", 10*time.Second)
+	waitForLog(t, listener, "control_started", 10*time.Second)
 
 	pfBind := fmt.Sprintf("127.0.0.1:%d", pickFreePort(t))
 	_ = startPortForwardSender(t, ctx, rp.relayURL, entity, pfBind, echoAddr)
@@ -306,7 +306,7 @@ func TestSubprocess_SenderRetriesUntilListener(t *testing.T) {
 
 	// NOW start the listener.
 	listener := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener, "control channel connected", 10*time.Second)
+	waitForLog(t, listener, "control_started", 10*time.Second)
 
 	// The sender should reconnect on its next retry. Verify data flows.
 	want := []byte("after retry\n")
@@ -336,7 +336,7 @@ func TestSubprocess_ListenerRestartRecovery(t *testing.T) {
 	const entity = "scenario-restart"
 
 	listener1 := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener1, "control channel connected", 10*time.Second)
+	waitForLog(t, listener1, "control_started", 10*time.Second)
 
 	pfBind := fmt.Sprintf("127.0.0.1:%d", pickFreePort(t))
 	_ = startPortForwardSender(t, ctx, rp.relayURL, entity, pfBind, echoAddr)
@@ -356,7 +356,7 @@ func TestSubprocess_ListenerRestartRecovery(t *testing.T) {
 	// Start listener2. The sender's port-forward keeps its bind alive;
 	// new TCP connections trigger fresh rendezvous attempts.
 	listener2 := startListener(t, ctx, rp.relayURL, entity, "--allow", echoAddr)
-	waitForLog(t, listener2, "control channel connected", 10*time.Second)
+	waitForLog(t, listener2, "control_started", 10*time.Second)
 
 	// New connections should round-trip. The sender retries with backoff
 	// if listener2's registration races with the dial.

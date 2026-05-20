@@ -55,7 +55,7 @@ func TestMultiListenerPortForwardSmoke(t *testing.T) {
 					"--metrics-addr", "127.0.0.1:0",
 					"--log-level", "debug",
 				)
-				waitForLog(t, listeners[i], "control channel connected", 30*time.Second)
+				waitForLog(t, listeners[i], "control_started", 30*time.Second)
 				listenerMetricsAddrs[i] = listeners[i].MetricsAddr(t, 15*time.Second)
 			}
 

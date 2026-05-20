@@ -226,14 +226,13 @@ func waitForListenerCorrelations(t *testing.T, snapshot func() string, min int, 
 var controlSessionIDRe = regexp.MustCompile(`control_session_id=([A-Z2-7]+)`)
 
 // ScenarioControlSessionID_OnConnectedLine asserts that the
-// listener's "control channel connected" log line carries a
-// non-empty control_session_id field, and that the field is stable
-// across the per-session lifecycle (the "control loop started" line
-// minted at runControlLoop entry must share the same id). Both lines
-// are produced inside relay.runControlLoop, so this scenario is the
-// cross-backend gate proving that the per-session logger binding
-// propagates to the canonical lifecycle lines — the same lines
-// every other parity scenario waits for during topology setup.
+// listener's control_started log line carries a non-empty
+// control_session_id field. control_started fires once per
+// control-loop attempt, immediately after the dial succeeds and at
+// the same operational milestone the parity test harness blocks on
+// during Setup. The id on this line is the same id every other
+// per-session log record (renew_*, accept_*, control_ended) carries
+// across the rest of the loop.
 //
 // Cross-backend: identical on mock and Azure because the binding
 // happens listener-side before any data crosses the relay.
@@ -252,27 +251,12 @@ func ScenarioControlSessionID_OnConnectedLine(t *testing.T, b Backend) {
 
 	lst := tun.Listeners[0]
 
-	// Backend.Setup blocks until "control channel connected" has
-	// been logged, so a short poll on lst.Logs is sufficient — keep
-	// a small grace window for pipe-flushing on subprocess backends.
-	connectedLine := waitForLogLineContaining(t, lst.Logs, 5*time.Second, "control channel connected")
-	m := controlSessionIDRe.FindStringSubmatch(connectedLine)
-	if m == nil {
-		t.Fatalf("`control channel connected` line missing control_session_id field:\n%s", connectedLine)
-	}
-	sessionID := m[1]
-
-	// Anchor the "control loop started" lookup on the same
-	// session id we just observed on the connected line. A
-	// listener that retried after an earlier failure (e.g.
-	// transient dial error) will have multiple started/ended
-	// pairs in the buffer; matching on the id pins this assertion
-	// to the lifecycle of the connected session rather than to
-	// whatever attempt happened to be logged first.
-	startedNeedle := "control_session_id=" + sessionID
-	startedLine := waitForLogLineContaining(t, lst.Logs, 2*time.Second, "control loop started", startedNeedle)
+	// Backend.Setup blocks until control_started has been logged,
+	// so a short poll on lst.Logs is sufficient — keep a small
+	// grace window for pipe-flushing on subprocess backends.
+	startedLine := waitForLogLineContaining(t, lst.Logs, 5*time.Second, "control_started")
 	if !controlSessionIDRe.MatchString(startedLine) {
-		t.Fatalf("`control loop started` line missing control_session_id field:\n%s", startedLine)
+		t.Fatalf("control_started line missing control_session_id field:\n%s", startedLine)
 	}
 }
 
