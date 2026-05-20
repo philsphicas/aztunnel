@@ -25,6 +25,7 @@ func RunObservabilitySuite(t *testing.T, b Backend) {
 		run  func(*testing.T, Backend)
 	}{
 		{"BridgeID_Correlation", ScenarioBridgeID_Correlation},
+		{"ControlSessionID_OnConnectedLine", ScenarioControlSessionID_OnConnectedLine},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -214,4 +215,102 @@ func waitForListenerCorrelations(t *testing.T, snapshot func() string, min int, 
 		time.Sleep(50 * time.Millisecond)
 	}
 	return logs
+}
+
+// controlSessionIDRe matches a control_session_id=VALUE token in
+// slog TextHandler output. Uses the same [A-Z2-7] charset as
+// bridgeIDRe — both ids are minted through idgen, which encodes
+// base32 NoPadding so neither needs slog-quoting.
+var controlSessionIDRe = regexp.MustCompile(`control_session_id=([A-Z2-7]+)`)
+
+// ScenarioControlSessionID_OnConnectedLine asserts that the
+// listener's "control channel connected" log line carries a
+// non-empty control_session_id field, and that the field is stable
+// across the per-session lifecycle (the "control loop started" line
+// minted at runControlLoop entry must share the same id). Both lines
+// are produced inside relay.runControlLoop, so this scenario is the
+// cross-backend gate proving that the per-session logger binding
+// propagates to the canonical lifecycle lines — the same lines
+// every other parity scenario waits for during topology setup.
+//
+// Cross-backend: identical on mock and Azure because the binding
+// happens listener-side before any data crosses the relay.
+func ScenarioControlSessionID_OnConnectedLine(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+	requireLogs(t, tun)
+
+	lst := tun.Listeners[0]
+
+	// Backend.Setup blocks until "control channel connected" has
+	// been logged, so a short poll on lst.Logs is sufficient — keep
+	// a small grace window for pipe-flushing on subprocess backends.
+	connectedLine := waitForLogLineContaining(t, lst.Logs, 5*time.Second, "control channel connected")
+	m := controlSessionIDRe.FindStringSubmatch(connectedLine)
+	if m == nil {
+		t.Fatalf("`control channel connected` line missing control_session_id field:\n%s", connectedLine)
+	}
+	sessionID := m[1]
+
+	// Anchor the "control loop started" lookup on the same
+	// session id we just observed on the connected line. A
+	// listener that retried after an earlier failure (e.g.
+	// transient dial error) will have multiple started/ended
+	// pairs in the buffer; matching on the id pins this assertion
+	// to the lifecycle of the connected session rather than to
+	// whatever attempt happened to be logged first.
+	startedNeedle := "control_session_id=" + sessionID
+	startedLine := waitForLogLineContaining(t, lst.Logs, 2*time.Second, "control loop started", startedNeedle)
+	if !controlSessionIDRe.MatchString(startedLine) {
+		t.Fatalf("`control loop started` line missing control_session_id field:\n%s", startedLine)
+	}
+}
+
+// waitForLogLineContaining returns the first newline-delimited line
+// from logs() that contains every needle in needles, polling at 50ms
+// until timeout. Variadic needles let callers anchor a search to
+// both a message and a correlation id, which is how the scenarios
+// here distinguish the lifecycle line of one session from another.
+// Failing the test rather than returning a sentinel keeps the
+// scenario's stack trace pointing at the missing line.
+func waitForLogLineContaining(t *testing.T, logs func() string, timeout time.Duration, needles ...string) string {
+	t.Helper()
+	if len(needles) == 0 {
+		t.Fatal("waitForLogLineContaining requires at least one needle")
+		return ""
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, line := range strings.Split(logs(), "\n") {
+			if containsAll(line, needles) {
+				return line
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %v waiting for log line containing %v\n--- logs ---\n%s",
+				timeout, needles, logs())
+			return ""
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// containsAll reports whether s contains every needle. Defined
+// inline (instead of using slices.ContainsFunc + strings.Contains)
+// to keep the helper readable in its single call site.
+func containsAll(s string, needles []string) bool {
+	for _, n := range needles {
+		if !strings.Contains(s, n) {
+			return false
+		}
+	}
+	return true
 }
