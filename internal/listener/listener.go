@@ -44,6 +44,12 @@ type Config struct {
 	// dialContext optionally overrides target dialing. When nil,
 	// handleConnection uses a net.Dialer honouring ConnectTimeout.
 	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
+	// RenewInterval is how often the listener renews its SAS/Entra
+	// token over the control channel. Zero selects the relay
+	// package default (45m). Set a short value in tests that want to
+	// exercise a real renew round-trip within an assertion budget.
+	RenewInterval time.Duration
 }
 
 // applyDefaults fills in zero-valued config fields with their
@@ -88,6 +94,7 @@ func ListenAndServe(ctx context.Context, cfg Config) error {
 		Options:        cfg.ClientOptions,
 		MaxConnections: cfg.MaxConnections,
 		Logger:         cfg.Logger,
+		RenewInterval:  cfg.RenewInterval,
 		Handler: func(ctx context.Context, ws *websocket.Conn) {
 			handleConnection(ctx, ws, cfg)
 		},

@@ -53,8 +53,8 @@ type Backend interface {
 	// Setup must block until the topology is ready: every sender's
 	// bind address is accepting connections and every requested
 	// listener has its control channel attached to the relay (for
-	// subprocess backends, the "control channel connected" log; for
-	// the in-process backend, the aztunnel_control_channel_connected
+	// subprocess backends, the control_started log; for the
+	// in-process backend, the aztunnel_control_channel_connected
 	// gauge). Scenarios assume the tunnel is fully connected on
 	// return.
 	Setup(t testing.TB, opts SetupOptions) *Tunnel

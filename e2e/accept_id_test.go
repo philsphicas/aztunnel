@@ -50,7 +50,7 @@ func TestAcceptID_Saturation(t *testing.T) {
 				"--log-level", "debug",
 			)
 
-			waitForLog(t, listener, "control channel connected", 30*time.Second)
+			waitForLog(t, listener, "control_started", 30*time.Second)
 			listenerMetrics := listener.MetricsAddr(t, 15*time.Second)
 			senderAddr := waitForLogAddr(t, sender, "port-forward listening", 15*time.Second)
 
@@ -95,7 +95,7 @@ func TestAcceptID_Saturation(t *testing.T) {
 			// the log line for the drop event we will then parse.
 			waitForMetric(t, listenerMetrics, "aztunnel_active_connections",
 				func(v float64) bool { return v >= maxConns }, 30*time.Second)
-			if _, ok := listener.logs.waitFor("accept dropped", 30*time.Second); !ok {
+			if _, ok := listener.logs.waitFor("accept_dropped", 30*time.Second); !ok {
 				t.Fatalf("listener never logged 'accept dropped' (waited 30s; have %d clients open)", len(openConns))
 			}
 
@@ -183,7 +183,7 @@ func classifyAcceptLines(lines []string) map[string]bool {
 		switch {
 		case strings.Contains(ln, "accept acquired"):
 			kinds["acquired"] = true
-		case strings.Contains(ln, "accept dropped"):
+		case strings.Contains(ln, "accept_dropped"):
 			kinds["dropped"] = true
 		case strings.Contains(ln, "accept released"):
 			kinds["released"] = true

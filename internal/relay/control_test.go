@@ -74,6 +74,14 @@ type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
+// renewOnceWrap calls renewOnce with a fresh tokenMintedAt and
+// discards the returned new-mint time so the existing tests that
+// only assert on the error/side-effects stay readable.
+func renewOnceWrap(ctx context.Context, ws *websocket.Conn, resURI string, tp TokenProvider, logger *slog.Logger) error {
+	_, err := renewOnce(ctx, ws, resURI, tp, logger, time.Now())
+	return err
+}
+
 // ---------- TestHandleAccept ----------
 
 func TestHandleAccept(t *testing.T) {
@@ -105,10 +113,7 @@ func TestHandleAccept(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := handleAccept(ctx, "wss://"+testEndpoint(rendezvousSrv), cfg, discardLogger())
-		if err != nil {
-			t.Fatalf("handleAccept returned error: %v", err)
-		}
+		handleAccept(ctx, "wss://"+testEndpoint(rendezvousSrv), cfg, discardLogger())
 
 		select {
 		case <-handlerCalled:
@@ -118,10 +123,11 @@ func TestHandleAccept(t *testing.T) {
 		}
 	})
 
-	t.Run("returns error on dial failure", func(t *testing.T) {
+	t.Run("emits accept_dropped on dial failure", func(t *testing.T) {
+		logger, rec := captureLogger()
 		cfg := ControlConfig{
 			DialTimeout: 1 * time.Second,
-			Logger:      discardLogger(),
+			Logger:      logger,
 			Handler: func(ctx context.Context, ws *websocket.Conn) {
 				t.Fatal("handler should not be called")
 			},
@@ -130,12 +136,21 @@ func TestHandleAccept(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := handleAccept(ctx, "ws://127.0.0.1:1", cfg, discardLogger())
-		if err == nil {
-			t.Fatal("expected error for bad address")
+		handleAccept(ctx, "ws://127.0.0.1:1", cfg, logger)
+
+		records := rec.records(t)
+		var dropped map[string]any
+		for _, r := range records {
+			if r["msg"] == EventAcceptDropped {
+				dropped = r
+				break
+			}
 		}
-		if !strings.Contains(err.Error(), "dial rendezvous") {
-			t.Errorf("unexpected error: %v", err)
+		if dropped == nil {
+			t.Fatalf("missing %s event in records: %v", EventAcceptDropped, records)
+		}
+		if dropped["reason"] != AcceptDroppedDialFailed {
+			t.Errorf("accept_dropped.reason = %v, want %q", dropped["reason"], AcceptDroppedDialFailed)
 		}
 	})
 }
@@ -180,7 +195,7 @@ func TestRenewOnce(t *testing.T) {
 
 		tp := &mockTokenProvider{token: "renewed-token-123"}
 
-		err = renewOnce(ctx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger())
+		_, err = renewOnce(ctx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger(), time.Now())
 		if err != nil {
 			t.Fatalf("renewOnce returned error: %v", err)
 		}
@@ -243,7 +258,7 @@ func TestRenewOnce(t *testing.T) {
 			},
 		}
 
-		err = renewOnce(ctx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger())
+		err = renewOnceWrap(ctx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger())
 		if err != nil {
 			t.Fatalf("renewOnce returned error: %v", err)
 		}
@@ -288,7 +303,7 @@ func TestRenewOnce(t *testing.T) {
 
 		tp := &mockTokenProvider{err: fmt.Errorf("permanent failure")}
 
-		err = renewOnce(ctx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger())
+		err = renewOnceWrap(ctx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger())
 		if err == nil {
 			t.Fatal("expected error after max retries")
 		}
@@ -318,17 +333,24 @@ func TestRenewOnce(t *testing.T) {
 		}
 		defer ws.CloseNow()
 
-		// Read the close frame so the connection knows it's closed.
 		ws.Read(ctx)
 
 		tp := &mockTokenProvider{token: "some-token"}
 
-		err = renewOnce(ctx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger())
+		logger, rec := captureLogger()
+		_, err = renewOnce(ctx, ws, "https://test.servicebus.windows.net/hc", tp, logger, time.Now())
 		if err == nil {
 			t.Fatal("expected error on write failure")
 		}
 		if tp.getCalls() != 1 {
 			t.Errorf("GetToken called %d times, want 1 (no retry on write failure)", tp.getCalls())
+		}
+		// Operator-visible signal: code=connection_lost on the
+		// terminal renew_failed event when ws.Write fails because
+		// the peer dropped the control channel.
+		if !hasRecord(t, rec.records(t), EventRenewFailed, "code", RenewFailedConnectionLost) {
+			t.Errorf("missing %s with code=%s in records:\n%s",
+				EventRenewFailed, RenewFailedConnectionLost, string(rec.buf))
 		}
 	})
 }
@@ -382,7 +404,7 @@ func TestPingLoop(t *testing.T) {
 			pingLoop(loopCtx, ws, discardLogger(), func() {
 				close(cancelCalled)
 				loopCancel()
-			})
+			}, &loopState{})
 		}()
 
 		select {
@@ -425,7 +447,7 @@ func TestPingLoop(t *testing.T) {
 			defer close(done)
 			pingLoop(loopCtx, ws, discardLogger(), func() {
 				t.Error("cancel should not be called on context cancel")
-			})
+			}, &loopState{})
 		}()
 
 		loopCancel()
@@ -445,8 +467,9 @@ func TestRenewLoop(t *testing.T) {
 	useInsecureTransport(t)
 
 	t.Run("exits on context cancel", func(t *testing.T) {
-		// renewLoop uses renewInterval (45min) for its ticker, so we can't
-		// easily trigger a tick in a test. Instead we verify that it exits
+		// The renew ticker is 45m by default, so we can't easily
+		// trigger a tick in a test that wants to exercise the
+		// context-cancel exit path. Instead we verify that it exits
 		// promptly when the context is cancelled.
 		srv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ws, err := websocket.Accept(w, r, nil)
@@ -481,7 +504,7 @@ func TestRenewLoop(t *testing.T) {
 			renewLoop(loopCtx, ws, "https://test.servicebus.windows.net/hc", tp, discardLogger(), func() {
 				close(cancelCalled)
 				loopCancel()
-			})
+			}, &loopState{}, defaultRenewInterval)
 		}()
 
 		// Cancel the context; renewLoop should exit via <-ctx.Done().
@@ -1038,9 +1061,8 @@ func drivenControlLoop(t *testing.T, logger *slog.Logger) {
 //
 //   - every record carries a non-empty control_session_id;
 //   - every record carries the SAME control_session_id;
-//   - the canonical lifecycle lines ("control loop started",
-//     "control channel connected", "control loop ended") are all
-//     present and tagged.
+//   - the canonical lifecycle events (control_started, control_ended)
+//     are both present and tagged.
 //
 // This is the per-session invariant operators rely on to mechanically
 // separate one control-loop run from the next.
@@ -1051,8 +1073,8 @@ func TestControlSessionID_StableWithinLoop(t *testing.T) {
 	drivenControlLoop(t, logger)
 
 	records := rec.records(t)
-	if len(records) < 3 {
-		t.Fatalf("expected at least 3 log records (started + connected + ended), got %d: %s", len(records), string(rec.buf))
+	if len(records) < 2 {
+		t.Fatalf("expected at least 2 log records (started + ended), got %d: %s", len(records), string(rec.buf))
 	}
 
 	var sessionID string
@@ -1069,7 +1091,7 @@ func TestControlSessionID_StableWithinLoop(t *testing.T) {
 		}
 	}
 
-	wantMsgs := []string{"control loop started", "control channel connected", "control loop ended"}
+	wantMsgs := []string{EventControlStarted, EventControlEnded}
 	for _, want := range wantMsgs {
 		found := false
 		for _, r := range records {
@@ -1118,6 +1140,214 @@ func extractSessionID(t *testing.T, rec *logRecorder) string {
 	}
 	t.Fatalf("no control_session_id in captured records: %s", string(rec.buf))
 	return ""
+}
+
+// TestControl_HappyPathEvents drives one runControlLoop end-to-end
+// against a stub relay that:
+//
+//   - accepts the listener's dial;
+//   - allows one full renew round-trip (RenewInterval is short);
+//   - waits for the test to gate it on having observed renew_ok in
+//     the captured records;
+//   - delivers one accept frame;
+//   - then closes the control WebSocket so the loop exits.
+//
+// The test asserts the operator-visible event sequence in order:
+//
+//	control_started → renew_attempted → renew_ok →
+//	accept_attempted → accept_ok → control_ended.
+//
+// Gating the accept-frame send on a captured renew_ok closes the
+// cross-goroutine race between the renewLoop logging renew_ok after
+// ws.Write returns and the read-loop logging accept_attempted after
+// ws.Read returns: both writes happen on different goroutines and
+// the events have no implicit happens-before relationship otherwise.
+//
+// This is the single happy-path contract every operator query
+// ("give me the lifecycle of this listener") relies on.
+func TestControl_HappyPathEvents(t *testing.T) {
+	useInsecureTransport(t)
+
+	rendezvousSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+		for {
+			if _, _, err := ws.Read(r.Context()); err != nil {
+				return
+			}
+		}
+	}))
+	rendezvousAddr := "wss://" + testEndpoint(rendezvousSrv)
+
+	// sendAccept gates the stub relay's accept-frame write on the
+	// test goroutine having observed renew_ok in the recorded log;
+	// handlerDone fires when the listener's accept handler runs.
+	sendAccept := make(chan struct{})
+	handlerDone := make(chan struct{}, 1)
+
+	controlSrv := tlsServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.CloseNow()
+
+		// Drain renewToken frames from the listener; the test
+		// observes renew_ok via the log recorder, not the wire.
+		readDone := make(chan struct{})
+		go func() {
+			defer close(readDone)
+			for {
+				if _, _, err := ws.Read(r.Context()); err != nil {
+					return
+				}
+			}
+		}()
+
+		select {
+		case <-sendAccept:
+		case <-time.After(5 * time.Second):
+			ws.Close(websocket.StatusInternalError, "test timeout waiting for accept gate")
+			<-readDone
+			return
+		}
+
+		accept := map[string]interface{}{
+			"accept": map[string]interface{}{
+				"address": rendezvousAddr,
+				"id":      "session-id-test",
+			},
+		}
+		data, _ := json.Marshal(accept)
+		if err := ws.Write(r.Context(), websocket.MessageText, data); err != nil {
+			<-readDone
+			return
+		}
+
+		select {
+		case <-handlerDone:
+		case <-time.After(3 * time.Second):
+		}
+		ws.Close(websocket.StatusNormalClosure, "done")
+		<-readDone
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	logger, rec := captureLogger()
+
+	cfg := ControlConfig{
+		Endpoint:      testEndpoint(controlSrv),
+		EntityPath:    "test-entity",
+		TokenProvider: &mockTokenProvider{token: "test-token"},
+		Handler: func(ctx context.Context, ws *websocket.Conn) {
+			select {
+			case handlerDone <- struct{}{}:
+			default:
+			}
+		},
+		DialTimeout:   2 * time.Second,
+		Logger:        logger,
+		RenewInterval: 50 * time.Millisecond,
+	}
+
+	loopDone := make(chan error, 1)
+	go func() {
+		_, err := runControlLoop(ctx, cfg)
+		loopDone <- err
+	}()
+
+	if !waitForRecord(t, rec, EventRenewOK, 5*time.Second) {
+		t.Fatalf("renew_ok never appeared in records:\n%s", string(rec.buf))
+	}
+	close(sendAccept)
+
+	select {
+	case err := <-loopDone:
+		if err == nil {
+			t.Fatal("expected error from runControlLoop when server closes")
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("runControlLoop did not return within budget")
+	}
+
+	records := rec.records(t)
+	wantOrder := []string{
+		EventControlStarted,
+		EventRenewAttempted,
+		EventRenewOK,
+		EventAcceptAttempted,
+		EventAcceptOK,
+		EventControlEnded,
+	}
+	assertEventOrder(t, records, wantOrder)
+}
+
+// waitForRecord polls rec at 10ms until a record with msg=want is
+// observed OR timeout elapses. Returns true on hit.
+func waitForRecord(t *testing.T, rec *logRecorder, want string, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		for _, r := range rec.records(t) {
+			if msg, _ := r["msg"].(string); msg == want {
+				return true
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// assertEventOrder asserts that each event in want appears at least
+// once in records and that the first occurrence of want[i] strictly
+// precedes the first occurrence of want[i+1]. Other events between
+// adjacent want entries are allowed: the contract is "this happened
+// in this order", not "no other events fired".
+func assertEventOrder(t *testing.T, records []map[string]any, want []string) {
+	t.Helper()
+	idx := -1
+	cursor := 0
+	for _, target := range want {
+		found := -1
+		for i := cursor; i < len(records); i++ {
+			if msg, _ := records[i]["msg"].(string); msg == target {
+				found = i
+				break
+			}
+		}
+		if found < 0 {
+			var msgs []string
+			for _, r := range records {
+				if msg, _ := r["msg"].(string); msg != "" {
+					msgs = append(msgs, msg)
+				}
+			}
+			t.Fatalf("missing event %q after position %d; observed sequence:\n%s",
+				target, idx, strings.Join(msgs, "\n"))
+		}
+		idx = found
+		cursor = found + 1
+	}
+}
+
+// hasRecord reports whether records contains a record whose msg is
+// event and whose attr key carries the given value.
+func hasRecord(t *testing.T, records []map[string]any, event, key, value string) bool {
+	t.Helper()
+	for _, r := range records {
+		if msg, _ := r["msg"].(string); msg != event {
+			continue
+		}
+		if v, _ := r[key].(string); v == value {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- TestAcceptID ----------
@@ -1423,7 +1653,7 @@ func TestAcceptID_PresentOnDrop(t *testing.T) {
 
 		// Wait for the drop to be logged before closing so the test
 		// can observe it on the capture store deterministically.
-		if _, ok := store.waitForRecord("accept dropped", 5*time.Second); !ok {
+		if _, ok := store.waitForRecord(EventAcceptDropped, 5*time.Second); !ok {
 			ws.Close(websocket.StatusNormalClosure, "drop never logged")
 			return
 		}
@@ -1467,7 +1697,7 @@ func TestAcceptID_PresentOnDrop(t *testing.T) {
 		<-loopErrCh
 		t.Fatalf("never observed 'accept acquired'")
 	}
-	if _, ok := store.waitForRecord("accept dropped", 10*time.Second); !ok {
+	if _, ok := store.waitForRecord(EventAcceptDropped, 10*time.Second); !ok {
 		cancel()
 		<-loopErrCh
 		t.Fatalf("never observed 'accept dropped' (records=%v)", store.snapshot())
@@ -1478,7 +1708,7 @@ func TestAcceptID_PresentOnDrop(t *testing.T) {
 	}
 
 	acquired := store.filterByMsg("accept acquired")
-	dropped := store.filterByMsg("accept dropped")
+	dropped := store.filterByMsg(EventAcceptDropped)
 	if len(acquired) == 0 {
 		t.Fatalf("no 'accept acquired' record captured (have %d records total)", len(store.snapshot()))
 	}
