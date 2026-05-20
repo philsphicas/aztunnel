@@ -40,6 +40,10 @@ type Config struct {
 	// startup. Tests that drive handleConnection directly may set it
 	// to a known string for deterministic assertions.
 	ListenerID string
+
+	// dialContext optionally overrides target dialing. When nil,
+	// handleConnection uses a net.Dialer honouring ConnectTimeout.
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // applyDefaults fills in zero-valued config fields with their
@@ -149,16 +153,21 @@ func handleConnection(ctx context.Context, ws *websocket.Conn, cfg Config) {
 	}
 
 	// Dial the target.
-	dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
+	dial := cfg.dialContext
+	if dial == nil {
+		dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
+		dial = dialer.DialContext
+	}
 	dialCtx, cancel := context.WithTimeout(ctx, cfg.ConnectTimeout)
 	defer cancel()
 
 	dialStart := time.Now()
-	conn, err := dialer.DialContext(dialCtx, "tcp", env.Target)
+	conn, err := dial(dialCtx, "tcp", env.Target)
 	cfg.Metrics.ObserveDialDuration("listener", time.Since(dialStart).Seconds())
 	if err != nil {
-		logger.Warn("dial target failed", "target", env.Target, "error", err)
-		_ = sendResponseWithCode(ctx, ws, cfg, false, "connection failed", classifyDialError(err))
+		code := classifyDialError(err)
+		logger.Warn("dial target failed", "target", env.Target, "error", err, "code", code)
+		_ = sendResponseWithCode(ctx, ws, cfg, false, "connection failed", code)
 		cfg.Metrics.ConnectionError("listener", metrics.DialReason(err, metrics.ReasonDialFailed))
 		return
 	}

@@ -27,6 +27,7 @@ func RunObservabilitySuite(t *testing.T, b Backend) {
 		{"BridgeID_Correlation", ScenarioBridgeID_Correlation},
 		{"ControlSessionID_OnConnectedLine", ScenarioControlSessionID_OnConnectedLine},
 		{"SenderLogsCode_OnConnectFailure", ScenarioSenderLogsCode_OnConnectFailure},
+		{"ListenerDialFailureLog_CarriesCode", ScenarioListenerDialFailureLog_CarriesCode},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -358,4 +359,75 @@ func ScenarioSenderLogsCode_OnConnectFailure(t *testing.T, b Backend) {
 		"target="+refused,
 		"code=connection_refused",
 	)
+}
+
+// ScenarioListenerDialFailureLog_CarriesCode asserts that the
+// listener's "dial target failed" slog line carries the same
+// machine-readable classification (code=...) the listener already
+// returns in its ConnectResponse. Operators triaging a dispatcher
+// trace can read this code straight from the log without round-
+// tripping through the metric surface or a packet capture.
+//
+// Two sub-cases share one tunnel:
+//
+//   - Refused: 127.0.0.1:<closed-port> always classifies to the
+//     exact code=connection_refused on every backend.
+//   - Unreachable: 192.0.2.1:9 (RFC 5737 TEST-NET-1) classifies to
+//     one of code=timeout / code=host_unreachable /
+//     code=network_unreachable depending on whether the host sees
+//     ICMP-unreachable before ConnectTimeout fires; all three are
+//     valid wirings of the field.
+func ScenarioListenerDialFailureLog_CarriesCode(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	refused := refusedAddr(t)
+	const unreachable = "192.0.2.1:9"
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModeSOCKS5,
+		AllowedTargets: []string{refused, unreachable},
+		ConnectTimeout: 4 * time.Second,
+	})
+	requireLogs(t, tun)
+
+	t.Run("Refused", func(t *testing.T) {
+		_, err := DialSOCKS5(tun.SenderAddr, refused, 15*time.Second)
+		var sErr *SOCKS5Error
+		if !errors.As(err, &sErr) {
+			t.Fatalf("socks5 dial refused: expected SOCKS5Error, got %T: %v", err, err)
+		}
+		if sErr.Rep != 0x05 {
+			t.Fatalf("socks5 REP for refused = %#x, want 0x05", sErr.Rep)
+		}
+
+		// waitForLogLineContaining is the assertion: it fails the test
+		// unless a single line contains all three needles.
+		waitForLogLineContaining(t, tun.Listeners[0].Logs, 10*time.Second,
+			`msg="dial target failed"`, "target="+refused, "code=connection_refused")
+	})
+
+	t.Run("Unreachable", func(t *testing.T) {
+		_, err := DialSOCKS5(tun.SenderAddr, unreachable, 30*time.Second)
+		var sErr *SOCKS5Error
+		if !errors.As(err, &sErr) {
+			t.Fatalf("socks5 dial unreachable: expected SOCKS5Error, got %T: %v", err, err)
+		}
+
+		line := waitForLogLineContaining(t, tun.Listeners[0].Logs, 10*time.Second,
+			`msg="dial target failed"`, "target="+unreachable)
+
+		accepted := []string{"code=timeout", "code=host_unreachable", "code=network_unreachable"}
+		ok := false
+		for _, want := range accepted {
+			if strings.Contains(line, want) {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			t.Fatalf("listener dial-failure log for unreachable carried no accepted code (want one of %v):\n%s",
+				accepted, line)
+		}
+	})
 }
