@@ -4,19 +4,23 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+
 	"github.com/philsphicas/aztunnel/e2e/azrelay"
 )
 
 // relayProvider is the process-scoped factory used by
-// requireDedicatedHyco to hand out fresh per-test hyco pairs. nil
-// when E2E_RELAY_NAME is unset, in which case every helper that
-// requires Azure routes to t.Skip via requireProvider.
+// requireDedicatedHyco to hand out fresh per-test hyco pairs.
+// requireProvider handles the nil case defensively, but TestMain
+// exits non-zero before tests run if config cannot be resolved.
 //
 // Lifecycle: constructed once at TestMain entry, no explicit
 // teardown. The Provider holds only an *armrelay.HybridConnectionsClient
@@ -28,7 +32,7 @@ var relayProvider *azrelay.Provider
 
 // runRules holds the two permanent namespace-scoped SAS authorization
 // rules (Listen-only + Send-only) provisioned out-of-band by
-// `e2e-infra setup`. The keys are read once at TestMain startup and
+// `make e2e-setup`. The keys are read once at TestMain startup and
 // shared by every PairToken's Result. There is no per-run teardown —
 // the rules outlive every test invocation.
 var runRules *azrelay.RunRules
@@ -39,17 +43,24 @@ var runRules *azrelay.RunRules
 // stuck control plane hang the suite.
 const runRuleAcquireTimeout = 90 * time.Second
 
+const noConfigMessage = "==> e2e: no configuration found.\n" +
+	"    Run `make e2e-setup` to provision a per-developer Azure Relay namespace,\n" +
+	"    or `make e2e-attach RESOURCE_GROUP=<rg>` to record a pre-existing one."
+
 // TestMain constructs the process-scoped relay Provider so every
 // test can call requireDedicatedHyco to provision its own private
 // hyco pair. There is no shared pre-provisioned pair — each test
 // owns its hyco lifetime end-to-end, which lets the suite run with
 // t.Parallel().
 //
-// Required env vars:
+// Config resolution order:
 //
-//   - E2E_RELAY_NAME            Azure Relay namespace name
-//   - E2E_RESOURCE_GROUP        Resource group containing the namespace
-//   - AZURE_SUBSCRIPTION_ID     Subscription ID for ARM API calls
+//  1. AZURE_SUBSCRIPTION_ID + E2E_RESOURCE_GROUP env vars are both set:
+//     use env vars (CI / explicit override), with E2E_RELAY_NAME read
+//     from env as well.
+//  2. Else read e2e/.local.json from the package cwd (`./.local.json`).
+//  3. Else fail with a directive error that points to `make e2e-setup`
+//     or `make e2e-attach`.
 //
 // Optional env var:
 //
@@ -57,11 +68,6 @@ const runRuleAcquireTimeout = 90 * time.Second
 //     across all t.Parallel test goroutines (default 4). Raise only
 //     when CI data shows headroom under the namespace-level 429
 //     envelope.
-//
-// If E2E_RELAY_NAME is unset, the Provider is not constructed and
-// every test falls through to t.Skip via requireProvider. This
-// preserves the historic ergonomics for contributors running
-// `go test` without an Azure account.
 func TestMain(m *testing.M) {
 	os.Exit(testMain(m))
 }
@@ -80,34 +86,64 @@ func testMain(m *testing.M) int {
 		fatal("pre-build aztunnel: %v", err)
 	}
 
-	if os.Getenv("E2E_RELAY_NAME") == "" {
-		fmt.Fprintln(os.Stderr, "==> e2e: E2E_RELAY_NAME is unset — TestMain will not construct a Provider")
-		fmt.Fprintln(os.Stderr, "==> e2e: every Azure-dependent test will be SKIPPED (CLI-only tests still run). Run `eval \"$(make e2e-infra-env)\"` first, or set E2E_RELAY_NAME explicitly.")
-		// drainBenchLease is a no-op when no benchmark could lease;
-		// no Provider was constructed so leaseSharedHyco cannot have
-		// run. No need to defer it on this skip path.
-		return m.Run()
+	resolved, err := resolveTestConfig(os.LookupEnv, ".")
+	if err != nil {
+		if errors.Is(err, errNoConfig) {
+			fatal("%s", noConfigMessage)
+		}
+		fatal("%v", err)
+	}
+	if resolved.RelayName == "" {
+		fatal("e2e config is missing relayName; set E2E_RELAY_NAME for env-based config or re-run `make e2e-setup`")
 	}
 
-	sub := os.Getenv("AZURE_SUBSCRIPTION_ID")
-	rg := os.Getenv("E2E_RESOURCE_GROUP")
-	if sub == "" || rg == "" {
-		fatal("E2E_RELAY_NAME is set but AZURE_SUBSCRIPTION_ID and/or E2E_RESOURCE_GROUP are missing\n" +
-			"  set AZURE_SUBSCRIPTION_ID and E2E_RESOURCE_GROUP, or unset E2E_RELAY_NAME to skip e2e tests")
+	if resolved.Source == "local-config" {
+		currentOID := func(ctx context.Context) (string, error) {
+			cred, err := azidentity.NewDefaultAzureCredential(nil)
+			if err != nil {
+				return "", fmt.Errorf("default azure credential: %w", err)
+			}
+			tk, err := cred.GetToken(ctx, policy.TokenRequestOptions{
+				Scopes: []string{"https://management.azure.com/.default"},
+			})
+			if err != nil {
+				return "", fmt.Errorf("acquire ARM token: %w", err)
+			}
+			oid, err := parseOIDFromJWT(tk.Token)
+			if err != nil {
+				return "", fmt.Errorf("parse oid from ARM token: %w", err)
+			}
+			return oid, nil
+		}
+		identityCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err = checkIdentityDrift(identityCtx, resolved.Local, currentOID)
+		cancel()
+		if err != nil {
+			fatal("%v", err)
+		}
+		if resolved.Local != nil && resolved.Local.SASOnly {
+			if _, isSet := os.LookupEnv("E2E_AUTH"); !isSet {
+				if err := os.Setenv("E2E_AUTH", "sas"); err != nil {
+					fatal("set E2E_AUTH=sas: %v", err)
+				}
+				fmt.Fprintln(os.Stderr, "==> e2e: SAS-only mode per e2e/.local.json. Entra subtests will skip.")
+				fmt.Fprintln(os.Stderr, "    After someone grants you the Azure Relay role, run `make e2e-attach RESOURCE_GROUP=… RELAY_NAME=…` to refresh.")
+			}
+		}
 	}
 
 	conc := readConcurrencyEnv()
 
 	cfg := azrelay.Config{
-		SubscriptionID: sub,
-		ResourceGroup:  rg,
-		Namespace:      os.Getenv("E2E_RELAY_NAME"),
+		SubscriptionID: resolved.Subscription,
+		ResourceGroup:  resolved.ResourceGroup,
+		Namespace:      resolved.RelayName,
 		Concurrency:    conc,
 	}
 
 	// Acquire the namespace SAS rule keys. The rules
 	// (e2e-listener with Listen, e2e-sender with Send) are permanent
-	// fixtures of the namespace provisioned once by `e2e-infra setup`;
+	// fixtures of the namespace provisioned once by `make e2e-setup`;
 	// AcquireRunRules only reads their ListKeys output and never
 	// creates or deletes rules. Hyco provisioning never mutates
 	// authorization rules either. Failures here are fatal — without
@@ -140,7 +176,7 @@ func testMain(m *testing.M) int {
 	}
 	relayProvider = p
 	fmt.Fprintf(os.Stderr, "==> e2e: relay Provider ready (namespace=%s/%s, concurrency=%d)\n",
-		rg, os.Getenv("E2E_RELAY_NAME"), conc)
+		resolved.ResourceGroup, resolved.RelayName, conc)
 
 	return m.Run()
 }

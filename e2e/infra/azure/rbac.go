@@ -20,6 +20,14 @@ import (
 // hyco create/delete, auth-rule create, ListKeys, Listen, and Send.
 const azureRelayOwnerRoleDefID = "2787bf04-f1f5-4bfe-8383-c8a24483ee38"
 
+// ErrAuthorizationFailed is returned by GrantOwnerSelf (and the
+// underlying grantOwner) when the caller lacks
+// Microsoft.Authorization/roleAssignments/write at the scope. SetupCmd
+// downgrades this to the documented SAS-only fallback path; other
+// callers (`make e2e-grant ASSIGNEE=…`, the CI subcommand) propagate
+// it as a hard failure.
+var ErrAuthorizationFailed = errors.New("caller lacks role-assignment write permission")
+
 // GrantOwnerSelf grants Azure Relay Owner to the signed-in user at
 // namespace scope.
 func (p *Provisioner) GrantOwnerSelf(ctx context.Context) error {
@@ -106,10 +114,25 @@ func (p *Provisioner) grantOwner(ctx context.Context, oid string, pt armauthoriz
 			fmt.Fprintln(os.Stderr, "    ✓ already assigned")
 			return nil
 		}
+		if isAuthorizationFailed(err) {
+			return fmt.Errorf("%w: %v", ErrAuthorizationFailed, err)
+		}
 		return fmt.Errorf("create role assignment: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "    ✓ granted")
 	return nil
+}
+
+// isAuthorizationFailed reports whether err is the well-known
+// "caller is missing Microsoft.Authorization/roleAssignments/write"
+// ARM response. Returned to allow `make e2e-setup` to fall back to
+// SAS-only mode without failing.
+func isAuthorizationFailed(err error) bool {
+	var respErr *azcore.ResponseError
+	if !errors.As(err, &respErr) {
+		return false
+	}
+	return respErr.ErrorCode == "AuthorizationFailed"
 }
 
 // isRoleAlreadyAssigned returns true if the error from a role-assignment

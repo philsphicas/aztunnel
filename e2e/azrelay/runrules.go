@@ -14,7 +14,7 @@ import (
 // PermanentListenerRuleName is the well-known name of the Listen-only
 // namespace SAS authorization rule that every e2e test invocation reads
 // (never creates) at startup. Provisioned once per namespace by
-// e2e/infra/azure.Provisioner.EnsureRunRules (via `e2e-infra setup`).
+// e2e/infra/azure.Provisioner.EnsureRunRules (via `make e2e-setup`).
 const PermanentListenerRuleName = "e2e-listener"
 
 // PermanentSenderRuleName is the well-known name of the Send-only
@@ -35,7 +35,7 @@ const readKeyMaxWait = 30 * time.Second
 // creates.
 //
 // The rules are permanent fixtures of the namespace (provisioned by
-// `e2e-infra setup` once, never deleted by tests). AcquireRunRules
+// `make e2e-setup` once, never deleted by tests). AcquireRunRules
 // reads their primary keys via ListKeys; it does NOT create or delete
 // rules. This keeps the e2e-owned authorization-rule count constant
 // at two regardless of how many parallel CI jobs target the
@@ -60,9 +60,9 @@ type RunRules struct {
 // PermanentSenderRuleName) and returns a populated *RunRules.
 //
 // The rules must already exist in cfg.Namespace — provision them once
-// with `e2e-infra setup`. If either rule is missing, AcquireRunRules
+// with `make e2e-setup`. If either rule is missing, AcquireRunRules
 // returns an error whose message names the missing rule and points to
-// `e2e-infra setup`.
+// `make e2e-setup`.
 //
 // cfg.RunRules is ignored by this function (the returned *RunRules is
 // what the caller would set on cfg.RunRules before constructing a
@@ -105,14 +105,14 @@ func AcquireRunRules(ctx context.Context, cfg Config) (*RunRules, error) {
 }
 
 // Teardown is a no-op: RunRules is read-only and the permanent rules
-// are owned by `e2e-infra setup`, surviving past every test invocation.
+// are owned by `make e2e-setup`, surviving past every test invocation.
 // The method exists so callers can `defer rr.Teardown()` symmetrically
 // with other resource handles.
 func (r *RunRules) Teardown(ctx context.Context) error { return nil }
 
 // readPermanentKey fetches the primary key for the named permanent
 // rule, retrying briefly on transient ARM errors. A 404 is surfaced
-// with a hint pointing at `e2e-infra setup` — the most common cause is
+// with a hint pointing at `make e2e-setup` — the most common cause is
 // running tests against a namespace that has not been provisioned yet.
 func readPermanentKey(ctx context.Context, ns *armrelay.NamespacesClient, cfg Config, name string) (string, error) {
 	deadline := time.Now().Add(readKeyMaxWait)
@@ -127,7 +127,7 @@ func readPermanentKey(ctx context.Context, ns *armrelay.NamespacesClient, cfg Co
 		}
 		lastErr = err
 		if isNotFound(err) {
-			return "", fmt.Errorf("permanent SAS rule %q (or its parent namespace %s/%s) not found — run `e2e-infra setup` to provision (or `e2e-infra ci` for CI setup): %w",
+			return "", fmt.Errorf("permanent SAS rule %q (or its parent namespace %s/%s) not found — run `make e2e-setup` to provision (or `make e2e-ci` for CI setup): %w",
 				name, cfg.ResourceGroup, cfg.Namespace, err)
 		}
 		if !isTransient(err) {

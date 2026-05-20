@@ -3,15 +3,12 @@
 // Package e2e contains end-to-end tests for aztunnel that run against a real
 // Azure Relay. Tests are gated behind the "e2e" build tag and require:
 //
-//   - E2E_RELAY_NAME: Azure Relay namespace name
-//   - E2E_RESOURCE_GROUP: resource group containing the namespace
-//   - AZURE_SUBSCRIPTION_ID: subscription ID for ARM API calls
+//   - E2E_RELAY_NAME, E2E_RESOURCE_GROUP, AZURE_SUBSCRIPTION_ID:
+//     supplied either by CI env vars or by e2e/.local.json from
+//     `make e2e-setup` / `make e2e-attach`
 //   - Valid Azure credentials (az login, managed identity, OIDC, etc.)
 //
-// Run `eval "$(make e2e-infra-env)"` to export all three from the
-// resource group provisioned by `make e2e-infra-setup`; the
-// `e2e-infra env` tool resolves AZURE_SUBSCRIPTION_ID from the
-// Azure CLI default if not already exported.
+// Local setup flow: `az login`, `make e2e-setup`, then `make e2e`.
 //
 // Each test provisions its own pair of ephemeral hybrid connections —
 // e2e-entra-<hex> for Entra ID auth and e2e-sas-<hex> for SAS key auth —

@@ -125,7 +125,7 @@ func DefaultClientOptions() *arm.ClientOptions {
 // key info from p.cfg.RunRules. Teardown deletes both hycos; the
 // permanent run-scoped rules live on past every PairToken and are
 // not torn down by tests at all (they are provisioned once by
-// `e2e-infra setup` and outlive every test invocation).
+// `make e2e-setup` and outlive every test invocation).
 //
 // Provision blocks if the concurrency semaphore is full. The block
 // honours ctx.Done so callers (typically t.Cleanup-registered)

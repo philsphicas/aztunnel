@@ -11,7 +11,7 @@ import (
 
 func TestPermanentRuleNamesAreStable(t *testing.T) {
 	// Pin the permanent rule names against accidental rename. The
-	// names are baked into operational tooling (`e2e-infra setup`
+	// names are baked into operational tooling (`make e2e-setup`
 	// provisions them; `az relay namespace authorization-rule …`
 	// is how maintainers manage them out-of-band), so changing
 	// them silently would orphan the existing rules and break
@@ -94,7 +94,7 @@ func TestValidateForRunRules_MirrorsValidate(t *testing.T) {
 
 func TestTeardownIsNoOp(t *testing.T) {
 	// RunRules.Teardown is a no-op because the permanent rules are
-	// owned by `e2e-infra setup`. Pin that contract so a future
+	// owned by `make e2e-setup`. Pin that contract so a future
 	// refactor doesn't silently reintroduce delete-on-teardown —
 	// which would race every other in-flight CI run sharing the
 	// namespace.

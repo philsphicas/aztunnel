@@ -54,7 +54,7 @@ func (p *Provisioner) EnsureRunRules(ctx context.Context) error {
 // not-found from the GET is treated as "create"; any other error is
 // returned. The upsert path is wrapped in RetryOnAuthRuleConflict
 // to absorb Azure Relay's per-scope 40901 throttle, which can fire
-// when two parallel `e2e-infra setup` invocations race against each
+// when two parallel `make e2e-setup` invocations race against each
 // other or when listener and sender upserts land back-to-back on a
 // fresh namespace.
 func (p *Provisioner) ensureOneRunRule(ctx context.Context, namespace, name string, right armrelay.AccessRights) error {
