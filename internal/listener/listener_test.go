@@ -477,3 +477,139 @@ func driveCustomHandshake(t *testing.T, cfg Config, send func(ctx context.Contex
 	}
 	return resp
 }
+
+// runDialFailureHandler drives one handleConnection invocation against
+// an in-process WebSocket pair, returning the captured slog output
+// after the handler has fully returned. The injected dial stub is the
+// seam these tests use to provoke specific dial outcomes without
+// touching the real network.
+//
+// Synchronisation contract: the test closes the client side, the
+// handler returns, the handler-side goroutine signals `done`, and
+// only then does this helper read the slog buffer — so the log
+// snapshot is happens-before-stable when callers grep it.
+func runDialFailureHandler(t *testing.T, target string,
+	dial func(ctx context.Context, network, addr string) (net.Conn, error),
+) string {
+	t.Helper()
+
+	var logBuf bytes.Buffer
+	cfg := Config{
+		ConnectTimeout: 5 * time.Second,
+		Logger:         slog.New(slog.NewTextHandler(&logBuf, nil)),
+		Metrics:        metrics.New(),
+		dialContext:    dial,
+	}
+
+	done := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("server accept: %v", err)
+			return
+		}
+		defer ws.CloseNow() //nolint:errcheck // best-effort cleanup
+		handleConnection(r.Context(), ws, cfg)
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	ws, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer ws.CloseNow() //nolint:errcheck // best-effort cleanup
+
+	env := protocol.ConnectEnvelope{
+		Version:  protocol.CurrentVersion,
+		Target:   target,
+		BridgeID: "TESTBRIDGE2P25Z",
+	}
+	envBytes, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	if err := ws.Write(ctx, websocket.MessageText, envBytes); err != nil {
+		t.Fatalf("write envelope: %v", err)
+	}
+
+	// Read the failure response so the handler has a clean exit path
+	// rather than being torn down mid-write by the client close.
+	if _, _, err := ws.Read(ctx); err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	_ = ws.Close(websocket.StatusNormalClosure, "done")
+
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("handler did not return within deadline: %v", ctx.Err())
+	}
+	return logBuf.String()
+}
+
+func TestListener_DialFailed_LogIncludesCode_Refused(t *testing.T) {
+	stub := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+	}
+	logs := runDialFailureHandler(t, "127.0.0.1:9", stub)
+
+	assertDialFailureLog(t, logs, "127.0.0.1:9", protocol.CodeConnectionRefused)
+}
+
+func TestListener_DialFailed_LogIncludesCode_Timeout(t *testing.T) {
+	stub := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: network, Err: context.DeadlineExceeded}
+	}
+	logs := runDialFailureHandler(t, "192.0.2.1:9", stub)
+
+	assertDialFailureLog(t, logs, "192.0.2.1:9", protocol.CodeTimeout)
+}
+
+func TestListener_DialFailed_LogIncludesCode_Unclassified(t *testing.T) {
+	stub := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, errors.New("synthetic failure")
+	}
+	logs := runDialFailureHandler(t, "10.0.0.1:22", stub)
+
+	// Empty code means the classifier did not match; slog renders it
+	// as code="" so operators see explicit evidence rather than a
+	// silently absent attribute.
+	assertDialFailureLog(t, logs, "10.0.0.1:22", "")
+}
+
+// assertDialFailureLog requires the captured listener output to
+// contain at least one "dial target failed" line for the given target,
+// and that the first such line carries the expected code attribute
+// (rendered as code=VALUE for non-empty values and code="" for the
+// unclassified case). Each test drives exactly one failed dial through
+// runDialFailureHandler, so the helper does not need to enforce
+// single-match uniqueness explicitly.
+func assertDialFailureLog(t *testing.T, logs, target, code string) {
+	t.Helper()
+	var hit string
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, `msg="dial target failed"`) {
+			continue
+		}
+		if !strings.Contains(line, "target="+target) {
+			continue
+		}
+		hit = line
+		break
+	}
+	if hit == "" {
+		t.Fatalf("no 'dial target failed' line for target=%s in logs:\n%s", target, logs)
+	}
+	want := `code=` + code
+	if code == "" {
+		want = `code=""`
+	}
+	if !strings.Contains(hit, want) {
+		t.Fatalf("dial-failure log missing %q:\n%s", want, hit)
+	}
+}
