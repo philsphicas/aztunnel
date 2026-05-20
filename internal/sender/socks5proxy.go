@@ -134,7 +134,11 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	// Bridge data.
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
 	if bridgeErr != nil {
-		logger.Warn("socks5 failed", "error", bridgeErr)
+		attrs := []any{"error", bridgeErr}
+		if code, ok := relay.WSCloseCode(bridgeErr); ok {
+			attrs = append(attrs, "close_code", code)
+		}
+		logger.Warn("socks5 failed", attrs...)
 	}
 	return bridgeErr
 }

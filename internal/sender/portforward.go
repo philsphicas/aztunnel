@@ -114,7 +114,11 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	// Bridge data.
 	_, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
 	if bridgeErr != nil {
-		logger.Warn("forward failed", "error", bridgeErr)
+		attrs := []any{"error", bridgeErr}
+		if code, ok := relay.WSCloseCode(bridgeErr); ok {
+			attrs = append(attrs, "close_code", code)
+		}
+		logger.Warn("forward failed", attrs...)
 	}
 	return bridgeErr
 }
@@ -220,6 +224,9 @@ func logRejection(logger *slog.Logger, target, listenerID string, err error) {
 	attrs := []any{"target", target, "error", err}
 	if listenerID != "" {
 		attrs = append(attrs, "listener_id", listenerID)
+	}
+	if code, ok := relay.WSCloseCode(err); ok {
+		attrs = append(attrs, "close_code", code)
 	}
 	logger.Warn("envelope exchange failed", attrs...)
 }

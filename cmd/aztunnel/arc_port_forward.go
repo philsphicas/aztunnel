@@ -121,7 +121,11 @@ func (p *ArcPortForwardCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 
 			_, bridgeErr := m.TrackedBridge(ctx, ws, conn, "sender", target)
 			if bridgeErr != nil {
-				logger.Debug("bridge ended", "error", bridgeErr)
+				attrs := []any{"error", bridgeErr}
+				if code, ok := relay.WSCloseCode(bridgeErr); ok {
+					attrs = append(attrs, "close_code", code)
+				}
+				logger.Debug("bridge ended", attrs...)
 			}
 		}()
 	}

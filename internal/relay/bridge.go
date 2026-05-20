@@ -115,6 +115,28 @@ func ignoreNormalClose(err error) error {
 	return err
 }
 
+// WSCloseCode extracts the WebSocket close-status code from a Bridge
+// error when the error unwraps to a websocket.CloseError. Returns
+// (code, true) when it does, (0, false) for nil errors and for any
+// error that does not unwrap to a websocket.CloseError. The
+// websocket.CloseError set includes synthesised codes that the
+// library reports without an on-the-wire close frame (notably 1006
+// StatusAbnormalClosure when the connection drops). Use this on the
+// result of Bridge() to attach a structured close_code field to
+// bridge-end log lines so operators can distinguish remote-initiated
+// close from policy violation from relay server error without
+// parsing the error string.
+func WSCloseCode(err error) (int, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var closeErr websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return int(closeErr.Code), true
+	}
+	return 0, false
+}
+
 func ignoreEOF(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return nil
