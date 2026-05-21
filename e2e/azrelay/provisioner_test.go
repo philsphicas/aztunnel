@@ -177,6 +177,101 @@ func TestProvisionerHycoNamesUsesSuffix(t *testing.T) {
 	}
 }
 
+func TestProvisioner_HycoNamesPreProvision_SkipEntraElidesEntra(t *testing.T) {
+	// Before Provision runs, a Provisioner with cfg.SkipEntra=true
+	// should report ("", "e2e-sas-<suffix>") — matching the shape
+	// callers will see post-Provision and avoiding a synthetic entra
+	// name for a hyco that will never be created.
+	p := &Provisioner{
+		cfg:    Config{SkipEntra: true},
+		suffix: "0123456789ab",
+	}
+	entra, sas := p.HycoNames()
+	if entra != "" {
+		t.Errorf("entra = %q, want empty (SkipEntra elides pre-Provision)", entra)
+	}
+	if sas != "e2e-sas-0123456789ab" {
+		t.Errorf("sas = %q", sas)
+	}
+}
+
+func TestProvisioner_HycoNamesPostProvision_SkipEntra(t *testing.T) {
+	p := &Provisioner{
+		suffix: "0123456789ab",
+		result: &Result{
+			EntraHycoName: "",
+			SASHycoName:   "e2e-sas-0123456789ab",
+		},
+	}
+	entra, sas := p.HycoNames()
+	if entra != "" {
+		t.Errorf("entra name = %q, want empty (SkipEntra mode)", entra)
+	}
+	if sas != "e2e-sas-0123456789ab" {
+		t.Errorf("sas name = %q", sas)
+	}
+	if !HycoNamePattern.MatchString(sas) {
+		t.Errorf("sas name %q does not satisfy HycoNamePattern", sas)
+	}
+}
+
+func TestProvisioner_HycoNamesPostProvision_BothModes(t *testing.T) {
+	// Both Provisioners share the same suffix; the Result is what
+	// distinguishes them. Asserts "Result wins over suffix" so a
+	// SkipEntra-mode Result with empty EntraHycoName surfaces empty
+	// and a populated Result surfaces the recorded names.
+	const suffix = "abcdef012345"
+	bothMode := &Provisioner{
+		suffix: suffix,
+		result: &Result{
+			EntraHycoName: "e2e-entra-" + suffix,
+			SASHycoName:   "e2e-sas-" + suffix,
+		},
+	}
+	skipMode := &Provisioner{
+		suffix: suffix,
+		result: &Result{
+			EntraHycoName: "",
+			SASHycoName:   "e2e-sas-" + suffix,
+		},
+	}
+
+	entra, sas := bothMode.HycoNames()
+	if entra != "e2e-entra-"+suffix || sas != "e2e-sas-"+suffix {
+		t.Errorf("bothMode.HycoNames = (%q, %q); want both populated", entra, sas)
+	}
+
+	entra, sas = skipMode.HycoNames()
+	if entra != "" || sas != "e2e-sas-"+suffix {
+		t.Errorf("skipMode.HycoNames = (%q, %q); want (\"\", %q)", entra, sas, "e2e-sas-"+suffix)
+	}
+}
+
+func TestResultEnvVars_EmptyEntraHycoName(t *testing.T) {
+	// SkipEntra mode leaves Result.EntraHycoName empty. EnvVars must
+	// still emit the E2E_ENTRA_HYCO_NAME key with an empty value so
+	// downstream consumers can reason about presence via
+	// `EntraHycoName != ""` without missing-key surprises.
+	r := &Result{
+		RelayName:       "my-relay",
+		EntraHycoName:   "",
+		SASHycoName:     "e2e-sas-0123456789ab",
+		ListenerKeyName: "listener",
+		ListenerKey:     "lk",
+		SenderKeyName:   "sender",
+		SenderKey:       "sk",
+	}
+	got := r.EnvVars()
+	if v, ok := got["E2E_ENTRA_HYCO_NAME"]; !ok {
+		t.Fatal("EnvVars missing E2E_ENTRA_HYCO_NAME key (must be present even when empty)")
+	} else if v != "" {
+		t.Errorf("EnvVars[E2E_ENTRA_HYCO_NAME] = %q, want empty", v)
+	}
+	if got["E2E_SAS_HYCO_NAME"] != "e2e-sas-0123456789ab" {
+		t.Errorf("EnvVars[E2E_SAS_HYCO_NAME] = %q, want %q", got["E2E_SAS_HYCO_NAME"], "e2e-sas-0123456789ab")
+	}
+}
+
 // fastAuthRuleRetry returns a retry config that runs the same number of
 // attempts as production but with near-zero delays so unit tests don't
 // pay the 500ms…8s backoff schedule. Behaviour-equivalent for the loop's

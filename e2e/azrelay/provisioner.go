@@ -90,6 +90,16 @@ type Config struct {
 	// the single-use Provisioner type (it serialises by construction).
 	Concurrency int
 
+	// SkipEntra suppresses creation of the Entra-auth hyco. When true,
+	// Provision creates only the SAS hyco and leaves
+	// Result.EntraHycoName empty; Teardown skips the Delete on the
+	// empty name. Used by the e2e test harness when running in
+	// SAS-only mode (no Azure Relay data-plane role assignment), where
+	// the entra hyco would be created and torn down only to never be
+	// used. Safe to leave false in CI and any other path that
+	// exercises both auth methods.
+	SkipEntra bool
+
 	// RunRules supplies the namespace-permanent SAS rules whose keys
 	// every PairToken Result stamps onto its ListenerKey/SenderKey
 	// fields. Required for NewProvider and Provisioner; AcquireRunRules
@@ -168,15 +178,17 @@ func New(cfg Config) (*Provisioner, error) {
 	return &Provisioner{cfg: cfg, hycos: hycos, suffix: suffix}, nil
 }
 
-// Provision creates the Entra and SAS hybrid connections and stamps the
-// namespace SAS rule key info from cfg.RunRules onto the returned
-// Result. If any step fails after a hyco has been created, Provision
-// attempts a best-effort teardown before returning the error so the
-// caller does not need to handle partial state.
+// Provision creates the SAS hybrid connection (and the entra hybrid
+// connection unless Config.SkipEntra is true, in which case
+// Result.EntraHycoName is left empty) and stamps the namespace SAS
+// rule key info from Config.RunRules onto the returned Result. If
+// any step fails after a hyco has been created, Provision attempts
+// a best-effort teardown before returning the error so the caller
+// does not need to handle partial state.
 //
 // Authorization rules are NOT created here — they live at namespace
 // scope and are provisioned once per `go test` invocation via
-// AcquireRunRules. cfg.RunRules must be non-nil.
+// AcquireRunRules. Config.RunRules must be non-nil.
 func (p *Provisioner) Provision(ctx context.Context) (*Result, error) {
 	if p.result != nil {
 		return nil, errors.New("provisioner already used")
@@ -185,18 +197,23 @@ func (p *Provisioner) Provision(ctx context.Context) (*Result, error) {
 		return nil, errors.New("azrelay.Config.RunRules is required (call AcquireRunRules first)")
 	}
 
-	entraName := "e2e-entra-" + p.suffix
 	sasName := "e2e-sas-" + p.suffix
-
-	if err := p.createHyco(ctx, entraName); err != nil {
-		// On error the hyco may or may not exist server-side (ARM PUTs
-		// can fail post-create). Best-effort delete covers the orphan
-		// case; the janitor will catch anything we miss.
-		p.bestEffortDelete(ctx, entraName)
-		return nil, fmt.Errorf("create %s: %w", entraName, err)
+	var entraName string
+	if !p.cfg.SkipEntra {
+		entraName = "e2e-entra-" + p.suffix
+		if err := p.createHyco(ctx, entraName); err != nil {
+			// On error the hyco may or may not exist server-side (ARM
+			// PUTs can fail post-create). Best-effort delete covers
+			// the orphan case; the janitor will catch anything we
+			// miss.
+			p.bestEffortDelete(ctx, entraName)
+			return nil, fmt.Errorf("create %s: %w", entraName, err)
+		}
 	}
 	if err := p.createHyco(ctx, sasName); err != nil {
-		p.bestEffortDelete(ctx, entraName)
+		if entraName != "" {
+			p.bestEffortDelete(ctx, entraName)
+		}
 		p.bestEffortDelete(ctx, sasName)
 		return nil, fmt.Errorf("create %s: %w", sasName, err)
 	}
@@ -235,8 +252,10 @@ func (p *Provisioner) Teardown(ctx context.Context) error {
 	defer cancel()
 
 	var errs []error
-	if _, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, p.result.EntraHycoName, nil); err != nil && !isNotFound(err) {
-		errs = append(errs, fmt.Errorf("delete %s: %w", p.result.EntraHycoName, err))
+	if p.result.EntraHycoName != "" {
+		if _, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, p.result.EntraHycoName, nil); err != nil && !isNotFound(err) {
+			errs = append(errs, fmt.Errorf("delete %s: %w", p.result.EntraHycoName, err))
+		}
 	}
 	if _, err := p.hycos.Delete(ctx, p.cfg.ResourceGroup, p.cfg.Namespace, p.result.SASHycoName, nil); err != nil && !isNotFound(err) {
 		errs = append(errs, fmt.Errorf("delete %s: %w", p.result.SASHycoName, err))
@@ -247,10 +266,22 @@ func (p *Provisioner) Teardown(ctx context.Context) error {
 	return nil
 }
 
-// HycoNames returns the (entra, sas) names this provisioner created, or
-// will create when Provision is called. Useful for log messages.
+// HycoNames returns the (entra, sas) names this provisioner holds.
+// After a successful Provision the names come from the recorded
+// Result, so a SkipEntra-mode Provisioner returns
+// ("", "e2e-sas-<suffix>"). Before Provision the names are
+// synthesised from the suffix, with the entra name elided to "" when
+// Config.SkipEntra is true so callers see the same shape they will
+// see post-Provision.
 func (p *Provisioner) HycoNames() (entra, sas string) {
-	return "e2e-entra-" + p.suffix, "e2e-sas-" + p.suffix
+	if p.result != nil {
+		return p.result.EntraHycoName, p.result.SASHycoName
+	}
+	sas = "e2e-sas-" + p.suffix
+	if !p.cfg.SkipEntra {
+		entra = "e2e-entra-" + p.suffix
+	}
+	return entra, sas
 }
 
 func (p *Provisioner) createHyco(ctx context.Context, name string) error {
