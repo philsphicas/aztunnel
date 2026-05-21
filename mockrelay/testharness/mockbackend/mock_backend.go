@@ -34,12 +34,51 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
+// DefaultRendezvousDelay is the per-accept delay the mock adds when
+// MockBackend.RendezvousDelay is zero. ~1 s approximates the
+// production Azure Relay control-plane rendezvous round-trip and
+// keeps Layer-1 timing thresholds aligned between the mock and
+// Azure backends.
+const DefaultRendezvousDelay = 1 * time.Second
+
+// NoRendezvousDelay is the sentinel callers assign to
+// MockBackend.RendezvousDelay to disable the per-accept delay
+// (in-process ~6 ms baseline). Any negative duration would work
+// because server.WithAcceptDelay clamps negatives to zero; this
+// constant gives the intent a name and keeps call sites readable:
+//
+//	b := mockbackend.MockBackend{RendezvousDelay: mockbackend.NoRendezvousDelay}
+const NoRendezvousDelay time.Duration = -1
+
 // MockBackend implements e2escenarios.Backend by standing up a mock
 // relay server + aztunnel listener(s) + aztunnel sender(s) all in the
 // same process. It is the fast, deterministic side of the mock-vs-
 // Azure conformance matrix and runs in the default
 // `go test ./mockrelay/...` job.
-type MockBackend struct{}
+type MockBackend struct {
+	// RendezvousDelay selects the per-accept delay the mock adds
+	// to approximate Azure Relay's ~950 ms control-plane rendezvous
+	// latency. The value is applied via server.WithAcceptDelay,
+	// which sleeps before completing the WebSocket upgrade on every
+	// accept (listener-rendezvous) dial for the lifetime of the
+	// test's Server.
+	//
+	//	0 (the zero value) → DefaultRendezvousDelay (~1 s). This is
+	//	                     the production-shaped default and what
+	//	                     MockBackend{} produces with no other
+	//	                     configuration.
+	//	negative           → no delay (the in-process ~6 ms baseline).
+	//	                     Use the exported NoRendezvousDelay
+	//	                     sentinel at call sites for readability.
+	//	positive           → that value, used directly.
+	//
+	// The default is on so e2e timing thresholds calibrated against
+	// Azure also fire against the mock. The negative-as-disabled
+	// convention mirrors server.WithAcceptDelay, which already
+	// clamps negative durations to zero — there is no ambiguity at
+	// the wire level.
+	RendezvousDelay time.Duration
+}
 
 // Name returns the backend identifier (always "mock"). The harness
 // does not embed it in sub-test paths — MockBackend has no axes,
@@ -67,7 +106,7 @@ func (m *MockBackend) Cell(values map[string]string) e2escenarios.Backend {
 // until every listener's control channel is attached and every sender
 // bind is accepting TCP. All goroutines, the mock HTTP server, and
 // the sender binds are released via t.Cleanup.
-func (*MockBackend) Setup(t testing.TB, opts e2escenarios.SetupOptions) *e2escenarios.Tunnel {
+func (b *MockBackend) Setup(t testing.TB, opts e2escenarios.SetupOptions) *e2escenarios.Tunnel {
 	t.Helper()
 	if opts.NumListeners < 1 {
 		t.Fatalf("NumListeners must be >= 1, got %d", opts.NumListeners)
@@ -82,7 +121,11 @@ func (*MockBackend) Setup(t testing.TB, opts e2escenarios.SetupOptions) *e2escen
 		numSenders = 1
 	}
 
-	host, clientOpts := startMockRelay(t)
+	delay := b.RendezvousDelay
+	if delay == 0 {
+		delay = DefaultRendezvousDelay
+	}
+	host, clientOpts := startMockRelay(t, delay)
 	// Cleanup ordering: startMockRelay's own t.Cleanup registers
 	// srv.Close. Register cancel+wg.Wait AFTER it so LIFO teardown
 	// runs cancel first → drains the listener / sender goroutines
@@ -274,17 +317,32 @@ func (*MockBackend) Setup(t testing.TB, opts e2escenarios.SetupOptions) *e2escen
 // plus a ClientOptions whose TLSConfig skips verification of the test
 // certificate.
 //
-// RendezvousTimeout is deliberately short so MaxConn back-pressure
-// scenarios — which intentionally provoke listeners to drop accept
-// messages and rely on the rendezvous timing out — fail-fast on each
-// retry instead of waiting the default. 1s is plenty for in-process
-// rendezvous round-trips.
-func startMockRelay(t testing.TB) (host string, opts relay.ClientOptions) {
+// rendezvousDelay is applied via server.WithAcceptDelay; it sleeps
+// before completing the WebSocket upgrade on every accept-side dial
+// for the lifetime of the Server. Pass DefaultRendezvousDelay (or
+// the value resolved from MockBackend.RendezvousDelay) for normal
+// e2e runs; pass NoRendezvousDelay for benchmark paths that need
+// synchronous rendezvous. Negative values are clamped to zero by
+// server.WithAcceptDelay.
+//
+// RendezvousTimeout is sized to the configured delay plus a 1 s
+// in-process round-trip margin. The margin alone is enough for the
+// opt-out path (the WebSocket upgrade completes in single-digit
+// milliseconds); adding the delay keeps the timeout above the
+// minimum walltime a successful accept can take. MaxConn back-
+// pressure scenarios still fail-fast on dropped accepts: each retry
+// pays one timeout, which scales linearly with the delay but stays
+// well under the scenarios' overall convergence windows.
+func startMockRelay(t testing.TB, rendezvousDelay time.Duration) (host string, opts relay.ClientOptions) {
 	t.Helper()
-	rs, err := server.NewServer(server.Config{
+	timeoutDelay := rendezvousDelay
+	if timeoutDelay < 0 {
+		timeoutDelay = 0
+	}
+	rs, err := server.NewServerForTesting(server.Config{
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RendezvousTimeout: 1 * time.Second,
-	})
+		RendezvousTimeout: timeoutDelay + 1*time.Second,
+	}, server.WithAcceptDelay(rendezvousDelay))
 	if err != nil {
 		t.Fatalf("new mock relay: %v", err)
 	}
