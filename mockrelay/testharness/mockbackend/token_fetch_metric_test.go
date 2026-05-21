@@ -55,7 +55,7 @@ func (e *erroringTokenProvider) GetToken(context.Context, string) (string, error
 // (e2e/token_fetch_metric_test.go) covers the result=ok path against
 // real Entra/SAS providers.
 func TestTokenFetchMetric_MockRelay(t *testing.T) {
-	host, clientOpts := startMockRelay(t)
+	host, clientOpts := startMockRelay(t, DefaultRendezvousDelay)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
