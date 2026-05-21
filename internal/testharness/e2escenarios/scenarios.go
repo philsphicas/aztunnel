@@ -14,16 +14,16 @@ import (
 )
 
 // RunAllScenarios runs every scenario suite (Core, Topology,
-// Reliability, Observability) against b. It enumerates b.Axes()
-// exactly once and runs all four suites inside each cell, so the
+// Reliability, Observability, Performance) against b. It enumerates
+// b.Axes() exactly once and runs all suites inside each cell, so the
 // auth dimension (or any future axis) appears once in the rendered
-// sub-test path even though four suites run inside it.
+// sub-test path even though every suite runs inside it.
 //
 // Call this from test entry points (TestE2E_Azure, TestE2E_Mock)
 // rather than calling the individual Run*Scenarios in sequence —
-// independent forEachCell calls would render the axis layer four
-// times and Go would disambiguate the second-fourth instances with
-// #01/#02/#03 suffixes.
+// independent forEachCell calls would render the axis layer once per
+// suite and Go would disambiguate the second-and-later instances with
+// #01/#02/... suffixes.
 func RunAllScenarios(t *testing.T, b Backend) {
 	t.Helper()
 	forEachCell(t, b.Axes(), func(t *testing.T, cell map[string]string) {
@@ -32,6 +32,7 @@ func RunAllScenarios(t *testing.T, b Backend) {
 		RunTopologyScenarios(t, cellBackend)
 		RunReliabilityScenarios(t, cellBackend)
 		RunObservabilityScenarios(t, cellBackend)
+		RunPerformanceScenarios(t, cellBackend)
 	})
 }
 

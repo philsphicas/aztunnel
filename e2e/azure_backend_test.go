@@ -114,6 +114,20 @@ func (b *azureBackend) Cell(values map[string]string) e2escenarios.Backend {
 	return &azureBackend{authName: auth, acquireEnv: b.acquireEnv}
 }
 
+// ConnectLatencyThreshold returns the per-backend connect-latency
+// ceiling for the Performance suite. Azure pays the real Azure
+// Relay control-plane rendezvous round-trip (~950 ms typical),
+// listener-side target dial, plus the bridged echo round-trip;
+// 3 s is generous to absorb cloud variance without masking the
+// Azure-class regressions (which we expect to be on the order of
+// seconds, not hundreds of ms).
+//
+// Returns 3 s regardless of authName: both Entra and SAS hit the
+// same control-plane rendezvous path.
+func (*azureBackend) ConnectLatencyThreshold() time.Duration {
+	return 3 * time.Second
+}
+
 // Setup brings up the requested topology (NumListeners listeners and
 // max(NumSenders,1) senders), waits until every listener has logged
 // "control_started" and every sender has logged its bind

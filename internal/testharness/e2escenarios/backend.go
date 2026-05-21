@@ -82,6 +82,26 @@ type Backend interface {
 	// no testing.TB to fail on cleanly).
 	Cell(values map[string]string) Backend
 
+	// ConnectLatencyThreshold is the per-backend ceiling for a single
+	// fresh-connection round-trip (Dial → 1-byte write → 1-byte echo
+	// read → Close). The Performance suite's serial-connect scenarios
+	// assert each iteration completes inside this budget.
+	//
+	// The threshold is read on the cell-pinned backend (after Cell()),
+	// so implementations may vary it per axis value (e.g. tighter for
+	// SAS than for Entra) when data justifies the differentiation.
+	// Both backends currently return a single value regardless of cell.
+	//
+	// "Connect latency" is interpreted broadly: the budget covers
+	// every wall-clock cost the harness pays from `net.Dial` (or the
+	// SOCKS5 CONNECT handshake) through a successful `conn.Close()` of
+	// the verified 1-byte round-trip. That includes the SOCKS5
+	// handshake on the SOCKS5 variant, the listener-side rendezvous,
+	// the target dial, the echo round-trip, and the socket close. A
+	// backend that wanted to split those costs into separate budgets
+	// would need a richer interface.
+	ConnectLatencyThreshold() time.Duration
+
 	// Setup brings up a relay topology described by opts and returns a
 	// Tunnel handle the scenario can drive. All resources (goroutines,
 	// subprocesses, listeners, sockets) are registered for cleanup on
