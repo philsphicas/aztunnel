@@ -59,6 +59,12 @@ func RunTopologyScenarios(t *testing.T, b Backend) {
 			}
 		})
 	}
+
+	// Single-cell scenarios that don't fit the N×M cell matrix run
+	// directly here.
+	t.Run("ListenerRestart_Recovers", func(t *testing.T) {
+		ScenarioListenerRestart_Recovers(t, b)
+	})
 }
 
 // scenarioNMEcho drives K parallel TCP echo flows distributed round-
@@ -793,4 +799,51 @@ func (f *longFlow) Close() {
 		_ = f.conn.Close()
 		f.conn = nil
 	}
+}
+
+// ScenarioListenerRestart_Recovers: bring up one listener and one
+// port-forward sender, drive a round-trip through them, stop the
+// listener, attach a fresh listener on the same hyco, drive another
+// round-trip through the same sender bind. Asserts the sender
+// reattaches and bridges to the new listener within a bounded
+// budget. Subsumes the legacy TestPortForwardRecoveryAfterListenerRestart.
+func ScenarioListenerRestart_Recovers(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	// Pre-restart round-trip.
+	if err := runEchoOnce(tun.SenderAddr, "before-restart\n", 15*time.Second); err != nil {
+		t.Fatalf("pre-restart echo: %v", err)
+	}
+
+	// Stop the listener and attach a fresh one.
+	tun.Listeners[0].Stop()
+	if tun.AddListener == nil {
+		t.Fatalf("backend does not support hot-attach (Tunnel.AddListener is nil)")
+	}
+	_ = tun.AddListener(t)
+
+	// Post-restart round-trip. Bounded retry: Azure Relay may
+	// briefly retain stale routing state for the killed listener;
+	// the sender's next dial may fail before the new listener's
+	// control channel is fully registered. Retry with backoff.
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := runEchoOnce(tun.SenderAddr, "after-restart\n", 5*time.Second); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("post-restart echo never succeeded within 20s: %v", lastErr)
 }

@@ -3,7 +3,12 @@
 package azure
 
 import (
+	"context"
+	"io"
+	"net"
+	"os/exec"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,16 +149,29 @@ func (*azureBackend) ConnectLatencyThreshold() time.Duration {
 // listener's keep-alives.
 func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenarios.Tunnel {
 	t.Helper()
-	if opts.NumListeners < 1 {
-		t.Fatalf("NumListeners must be >= 1, got %d", opts.NumListeners)
+	if opts.NumListeners < 0 {
+		t.Fatalf("NumListeners must be >= 0, got %d", opts.NumListeners)
+	}
+	switch opts.SenderMode {
+	case scenarios.ModePortForward, scenarios.ModeSOCKS5, scenarios.ModeConnect:
+	default:
+		t.Fatalf("unknown SenderMode %v", opts.SenderMode)
 	}
 	numSenders := opts.NumSenders
 	if numSenders < 1 {
 		numSenders = 1
 	}
+	// ModeConnect spawns senders on demand via Tunnel.OpenConnect.
+	// No persistent sender subprocess at Setup time.
+	if opts.SenderMode == scenarios.ModeConnect {
+		numSenders = 0
+	}
 
 	env := b.acquireEnv(t)
 	auth := authFromEnv(t, env, b.authName)
+	if opts.OverrideHycoName != "" {
+		auth.hyco = opts.OverrideHycoName
+	}
 
 	// Azure backend runs at debug log level so observability
 	// scenarios can assert on Debug-level lifecycle lines
@@ -205,26 +223,27 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 		case scenarios.ModeSOCKS5:
 			proc = startSOCKS5Sender(t, env, auth, senderArgs...)
 			logMsg = "socks5-proxy listening"
-		default:
-			t.Fatalf("unknown SenderMode %v", opts.SenderMode)
 		}
 		bindAddr := waitForLogAddr(t, proc, logMsg, 15*time.Second)
 		metricsAddr := proc.MetricsAddr(t, 15*time.Second)
 		senderAddrs = append(senderAddrs, bindAddr)
 		senders = append(senders, &scenarios.Sender{
-			Addr:      bindAddr,
-			Completed: scrapeCounter(metricsAddr, "aztunnel_connections_total"),
-			Active:    scrapeGauge(metricsAddr, "aztunnel_active_connections"),
-			Stop:      func() { proc.Stop(t) },
-			Logs:      func() string { return proc.logs.String() },
+			Addr:                bindAddr,
+			Completed:           scrapeCounter(metricsAddr, "aztunnel_connections_total"),
+			Active:              scrapeGauge(metricsAddr, "aztunnel_active_connections"),
+			DialDurationSamples: scrapeHistogramCount(metricsAddr, "aztunnel_dial_duration_seconds"),
+			Stop:                func() { proc.Stop(t) },
+			Logs:                func() string { return proc.logs.String() },
 		})
 	}
 
 	tun := &scenarios.Tunnel{
-		SenderAddr:  senderAddrs[0],
 		SenderAddrs: senderAddrs,
 		Senders:     senders,
 		Listeners:   listeners,
+	}
+	if len(senderAddrs) > 0 {
+		tun.SenderAddr = senderAddrs[0]
 	}
 	tun.AddListener = func(t *testing.T) *scenarios.Listener {
 		t.Helper()
@@ -232,7 +251,342 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 		tun.Listeners = append(tun.Listeners, l)
 		return l
 	}
+	if opts.SenderMode == scenarios.ModeConnect {
+		tun.SetOpenConnect(makeAzureOpenConnect(env, auth))
+		tun.SetSSHProxyCommand(makeAzureSSHProxyCommand(t, env, auth))
+	}
 	return tun
+}
+
+// makeAzureSSHProxyCommand returns a closure that constructs the
+// ssh ProxyCommand argv + env entries for ssh-driven connect
+// scenarios. The closure captures the env and auth resolved during
+// Setup so the ssh-spawned subprocess uses the SAME hyco
+// coordinates as the listener.
+func makeAzureSSHProxyCommand(t testing.TB, env *relayEnv, auth authConfig) func(target string) ([]string, []string) {
+	t.Helper()
+	binary := aztunnelBinary(t)
+	return func(target string) ([]string, []string) {
+		argv := []string{
+			binary,
+			"relay-sender", "connect", target,
+			"--relay", env.relayName,
+			"--hyco", auth.hyco,
+			"--log-level", "debug",
+		}
+		extraEnv := []string{"AZTUNNEL_RELAY_NAME=" + env.relayName}
+		if auth.senderSAS != nil {
+			extraEnv = append(extraEnv,
+				"AZTUNNEL_KEY_NAME="+auth.senderSAS.keyName,
+				"AZTUNNEL_KEY="+auth.senderSAS.key,
+			)
+		}
+		return argv, extraEnv
+	}
+}
+
+// makeAzureOpenConnect returns the Tunnel.OpenConnect closure for the
+// Azure backend. Each call launches a fresh `aztunnel relay-sender
+// connect <target>` subprocess, piping stdin/stdout/stderr. Closing
+// the returned ConnectClient kills the subprocess.
+func makeAzureOpenConnect(env *relayEnv, auth authConfig) func(t testing.TB, target string) scenarios.ConnectClient {
+	return func(t testing.TB, target string) scenarios.ConnectClient {
+		t.Helper()
+		binary := aztunnelBinary(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cmd := exec.CommandContext(ctx, binary,
+			"relay-sender", "connect", target,
+			"--relay", env.relayName,
+			"--hyco", auth.hyco,
+			"--log-level", "debug",
+		)
+		setAztunnelEnv(cmd, env, auth.senderSAS)
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			cancel()
+			t.Fatalf("stdin pipe: %v", err)
+		}
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			cancel()
+			t.Fatalf("stdout pipe: %v", err)
+		}
+		logs := &logBuffer{}
+		cmd.Stderr = logs
+		if err := cmd.Start(); err != nil {
+			cancel()
+			t.Fatalf("start connect: %v", err)
+		}
+		cc := &azureConnectClient{cmd: cmd, stdin: stdin, stdout: stdout, logs: logs, cancel: cancel}
+		t.Cleanup(func() { _ = cc.Close() })
+		return cc
+	}
+}
+
+// azureConnectClient is the Azure backend's scenarios.ConnectClient
+// implementation. Bridges stdio of the relay-sender connect
+// subprocess; Logs is the captured stderr; Wait blocks on cmd.Wait;
+// Close kills the subprocess (idempotent).
+type azureConnectClient struct {
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	logs     *logBuffer
+	cancel   context.CancelFunc
+	closeOne sync.Once
+	waitErr  error
+	waitDone chan struct{}
+	waitOnce sync.Once
+}
+
+func (c *azureConnectClient) Read(p []byte) (int, error)  { return c.stdout.Read(p) }
+func (c *azureConnectClient) Write(p []byte) (int, error) { return c.stdin.Write(p) }
+func (c *azureConnectClient) Logs() string                { return c.logs.String() }
+
+func (c *azureConnectClient) Wait(ctx context.Context) error {
+	c.waitOnce.Do(func() {
+		c.waitDone = make(chan struct{})
+		go func() {
+			c.waitErr = c.cmd.Wait()
+			close(c.waitDone)
+		}()
+	})
+	select {
+	case <-c.waitDone:
+		return c.waitErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *azureConnectClient) Close() error {
+	c.closeOne.Do(func() {
+		// Close the stdio pipes first so any caller blocked in
+		// Read/Write returns immediately, and so the subprocess
+		// sees EOF on its stdin.
+		_ = c.stdin.Close()
+		_ = c.stdout.Close()
+		c.cancel()
+		if c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+		// Kick off Wait if not already running, then block on it
+		// so the subprocess is reaped and its file descriptors
+		// released before Close returns. AssertNoLeaks (goroutine
+		// + FD deltas) runs in scenario t.Cleanup and would
+		// false-positive if the Wait goroutine outlives Close.
+		c.waitOnce.Do(func() {
+			c.waitDone = make(chan struct{})
+			go func() {
+				c.waitErr = c.cmd.Wait()
+				close(c.waitDone)
+			}()
+		})
+		// Bounded wait for reap. cmd.Process.Kill is SIGKILL on
+		// Unix; the process should exit within seconds. The 3 s
+		// budget keeps Close from blocking test cleanup forever
+		// on a stuck child.
+		select {
+		case <-c.waitDone:
+		case <-time.After(3 * time.Second):
+		}
+	})
+	return nil
+}
+
+// SetupExpectingFailure brings up the Azure topology with the auth
+// overrides applied. Listener-side overrides wait for the listener's
+// "control channel disconnected" log; sender-side overrides start
+// the sender and either wait for "relay dial failed" or trigger it
+// with one local TCP connect; ModeConnect overrides leave the
+// sender for the caller to spawn via Tunnel.OpenConnect.
+func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOptions) scenarios.FailureHandle {
+	t.Helper()
+	switch opts.SenderMode {
+	case scenarios.ModePortForward, scenarios.ModeSOCKS5, scenarios.ModeConnect:
+	default:
+		t.Fatalf("unknown SenderMode %v", opts.SenderMode)
+	}
+	if opts.OverrideListenerAuth == nil && opts.OverrideSenderAuth == nil && opts.OverrideHycoName == "" {
+		t.Fatalf("SetupExpectingFailure requires at least one override (ListenerAuth, SenderAuth, or HycoName)")
+	}
+
+	env := b.acquireEnv(t)
+	auth := authFromEnv(t, env, b.authName)
+	hyco := auth.hyco
+	if opts.OverrideHycoName != "" {
+		hyco = opts.OverrideHycoName
+	}
+
+	// Resolve listener / sender SAS credentials with overrides
+	// applied. Entra-token overrides are not yet wired; the
+	// scope-gated CrossClaim scenario uses ListenerAuth/SenderAuth
+	// directly.
+	listenerSAS := auth.listenerSAS
+	senderSAS := auth.senderSAS
+	if opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.BadSASKey != "" {
+		listenerSAS = &sasCredentials{
+			keyName: keyNameOr(auth.listenerSAS, env.sasListenerKeyName),
+			key:     opts.OverrideListenerAuth.BadSASKey,
+		}
+	}
+	if opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.BadSASKey != "" {
+		senderSAS = &sasCredentials{
+			keyName: keyNameOr(auth.senderSAS, env.sasSenderKeyName),
+			key:     opts.OverrideSenderAuth.BadSASKey,
+		}
+	}
+
+	listenerArgs := []string{
+		"relay-listener",
+		"--hyco", hyco,
+		"--relay", env.relayName,
+		"--log-level", "debug",
+	}
+	for _, target := range opts.AllowedTargets {
+		listenerArgs = append(listenerArgs, "--allow", target)
+	}
+
+	listenerLogs := func() string { return "" }
+	senderLogs := func() string { return "" }
+
+	// Listener-side failure: spin up listener, wait for the
+	// control-channel disconnect log line.
+	if opts.OverrideListenerAuth != nil || opts.OverrideHycoName != "" {
+		proc := startAztunnelWithSAS(t, env, listenerSAS, listenerArgs...)
+		listenerLogs = func() string { return proc.logs.String() }
+		waitForLog(t, proc, "control channel disconnected", 30*time.Second)
+		return &azureFailureHandle{listenerLogs: listenerLogs, senderLogs: senderLogs}
+	}
+
+	// Sender-side failure: bring up a healthy listener (if asked)
+	// then start the sender with bad creds and observe.
+	if opts.NumListeners > 0 {
+		lp := startListener(t, env, auth, "--metrics-addr", "127.0.0.1:0", "--log-level", "debug")
+		listenerLogs = func() string { return lp.logs.String() }
+		waitForLog(t, lp, "control_started", 30*time.Second)
+	}
+
+	if opts.SenderMode == scenarios.ModeConnect {
+		// Caller drives the failure via Tunnel.OpenConnect. Build
+		// a fake auth config that carries the overridden sender SAS.
+		failAuth := auth
+		failAuth.senderSAS = senderSAS
+		failAuth.hyco = hyco
+		return &azureFailureHandle{
+			listenerLogs: listenerLogs,
+			senderLogs:   senderLogs,
+			openConnect:  makeAzureOpenConnect(env, failAuth),
+		}
+	}
+
+	// Port-forward or SOCKS5: start sender with bad creds, dial
+	// locally to trigger the relay dial, wait for the failure log.
+	var proc *aztunnelProcess
+	switch opts.SenderMode {
+	case scenarios.ModePortForward:
+		target := opts.Target
+		if target == "" {
+			target = "127.0.0.1:9999"
+		}
+		proc = startAztunnelWithSAS(t, env, senderSAS,
+			"relay-sender", "port-forward", target,
+			"--relay", env.relayName,
+			"--hyco", hyco,
+			"--bind", "127.0.0.1:0",
+			"--log-level", "debug",
+		)
+	case scenarios.ModeSOCKS5:
+		proc = startAztunnelWithSAS(t, env, senderSAS,
+			"relay-sender", "socks5-proxy",
+			"--relay", env.relayName,
+			"--hyco", hyco,
+			"--bind", "127.0.0.1:0",
+			"--log-level", "debug",
+		)
+	}
+	senderLogs = func() string { return proc.logs.String() }
+
+	bindAddr := waitForLogAddr(t, proc, senderBindLogPrefix(opts.SenderMode), 15*time.Second)
+
+	conn, err := net.DialTimeout("tcp", bindAddr, 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial sender during SetupExpectingFailure: %v", err)
+	}
+	azureTriggerSenderRelayDial(conn, opts.SenderMode)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = io.ReadAll(conn)
+	_ = conn.Close()
+
+	waitForLog(t, proc, "relay dial failed", 30*time.Second)
+	return &azureFailureHandle{listenerLogs: listenerLogs, senderLogs: senderLogs}
+}
+
+// azureTriggerSenderRelayDial sends the minimal byte sequence each
+// sender mode requires to provoke its relay dial. Mirrors the
+// mock backend helper of the same shape; kept per-backend to
+// avoid pulling a helper into the scenarios package that only
+// failure-mode tests need.
+func azureTriggerSenderRelayDial(conn net.Conn, mode scenarios.SenderMode) {
+	switch mode {
+	case scenarios.ModeSOCKS5:
+		// SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth).
+		_, _ = conn.Write([]byte{0x05, 0x01, 0x00})
+		_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		drain := make([]byte, 2)
+		_, _ = io.ReadFull(conn, drain)
+		// CONNECT request: VER=5, CMD=1 (CONNECT), RSV=0,
+		// ATYP=1 (IPv4), DST=127.0.0.1, PORT=9999.
+		_, _ = conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x27, 0x0F})
+	default:
+		_, _ = conn.Write([]byte("trigger\n"))
+	}
+}
+
+// senderBindLogPrefix returns the "x listening" log substring that
+// each sender mode emits when its bind is ready.
+func senderBindLogPrefix(mode scenarios.SenderMode) string {
+	switch mode {
+	case scenarios.ModeSOCKS5:
+		return "socks5-proxy listening"
+	default:
+		return "port-forward listening"
+	}
+}
+
+// keyNameOr returns sas.keyName if sas is non-nil and has a
+// keyName, else fallback. Used when an override carries a bad
+// key value but not a key name.
+func keyNameOr(sas *sasCredentials, fallback string) string {
+	if sas != nil && sas.keyName != "" {
+		return sas.keyName
+	}
+	return fallback
+}
+
+// azureFailureHandle is the Azure backend's scenarios.FailureHandle
+// implementation. Logs accessors snapshot from logBuffer; Close is a
+// no-op because the parent t.Cleanup already kills + reaps every
+// subprocess.
+type azureFailureHandle struct {
+	listenerLogs func() string
+	senderLogs   func() string
+	openConnect  func(t testing.TB, target string) scenarios.ConnectClient
+}
+
+func (h *azureFailureHandle) ListenerLogs() string { return h.listenerLogs() }
+func (h *azureFailureHandle) SenderLogs() string   { return h.senderLogs() }
+func (h *azureFailureHandle) Close()               {}
+
+// OpenConnect lets ModeConnect failure scenarios drive a connect
+// invocation against this handle's overridden auth credentials.
+// Fatals if the handle was not built for a ModeConnect scenario.
+func (h *azureFailureHandle) OpenConnect(t testing.TB, target string) scenarios.ConnectClient {
+	t.Helper()
+	if h.openConnect == nil {
+		t.Fatalf("FailureHandle.OpenConnect called on a non-ModeConnect handle")
+	}
+	return h.openConnect(t, target)
 }
 
 // scrapeCounter returns a closure that scrapes /metrics on addr and
@@ -267,5 +621,17 @@ func scrapeConnectionErrors(addr string) func(reason string) int64 {
 		text := scrapeMetricsBest(addr)
 		return int64(sumMetricByLabel(text,
 			"aztunnel_connection_errors_total", "reason", reason))
+	}
+}
+
+// scrapeHistogramCount returns a closure that scrapes /metrics on
+// addr and returns the sum of <name>_count across every label
+// combination — i.e. the total number of observations recorded in
+// the histogram named `name`. Used by ScenarioMetrics_DialDuration
+// to confirm the dial path actually observed the histogram.
+func scrapeHistogramCount(addr, name string) func() uint64 {
+	return func() uint64 {
+		text := scrapeMetricsBest(addr)
+		return uint64(sumMetric(text, name+"_count"))
 	}
 }

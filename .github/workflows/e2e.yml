@@ -22,7 +22,7 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     environment: e2e-azure
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 

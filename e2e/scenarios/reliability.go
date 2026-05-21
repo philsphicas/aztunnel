@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,6 +36,17 @@ func RunReliabilityScenarios(t *testing.T, b Backend) {
 		{"ErrorPropagation_TargetHangs", ScenarioErrorPropagation_TargetHangs},
 		{"SlowConsumer_BackPressure", ScenarioSlowConsumer_BackPressure},
 		{"HalfClose_RequestResponse", ScenarioHalfClose_RequestResponse},
+		{"SenderRetriesUntilListenerReady", ScenarioSenderRetriesUntilListenerReady},
+		{"Connect_NoListener_ErrorsCleanly", ScenarioConnect_NoListener_ErrorsCleanly},
+		{"NoListener_RetriesUntilListenerAppears", ScenarioNoListener_RetriesUntilListenerAppears},
+		{"AuthRejection_BadHyco", ScenarioAuthRejection_BadHyco},
+		{"AuthRejection_BadListenerSAS", ScenarioAuthRejection_BadListenerSAS},
+		{"AuthRejection_BadSenderSAS", ScenarioAuthRejection_BadSenderSAS},
+		// CrossClaim coverage lives in TestAzureOnly_CrossClaim;
+		// mock has no per-key Listen/Send direction so a scenario
+		// row here would skip on every backend and add noise to
+		// the matrix without testing anything new.
+		{"Allowlist_Reject", ScenarioAllowlist_Reject},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -117,6 +129,15 @@ func ScenarioErrorPropagation_TargetRefused(t *testing.T, b Backend) {
 	if err := expectPortForwardFails(tunPF.SenderAddr, 15*time.Second); err != nil {
 		t.Errorf("port-forward to refused target: %v", err)
 	}
+
+	// Metric assertion: the listener must classify the refused dial
+	// into the `dial_failed` reason bucket. Subsumes the legacy
+	// TestPortForwardClosedPort. Use the second tunnel's listener
+	// (the port-forward leg above) because that's the leg that
+	// actually drove a dial to a refused target.
+	if got := waitForConnectionErrorReason(tunPF.Listeners[0], "dial_failed", 1, 15*time.Second); got < 1 {
+		t.Errorf("listener metric aztunnel_connection_errors_total{reason=\"dial_failed\"} = %d, want >= 1", got)
+	}
 }
 
 // ScenarioErrorPropagation_TargetUnreachable asserts that a SOCKS5
@@ -173,6 +194,24 @@ func ScenarioErrorPropagation_TargetUnreachable(t *testing.T, b Backend) {
 	if err := expectPortForwardFails(tunPF.SenderAddr, 20*time.Second); err != nil {
 		t.Errorf("port-forward to unreachable target: %v", err)
 	}
+
+	// Metric assertion: the listener must classify the unreachable
+	// dial into either `dial_timeout` (timeout-classified by the
+	// listener) or `dial_failed` (ICMP-host-unreachable surfaces as
+	// a fast failure on some platforms). Subsumes the legacy
+	// TestPortForwardUnreachable.
+	deadline := time.Now().Add(15 * time.Second)
+	var gotTimeout, gotFailed int64
+	for time.Now().Before(deadline) {
+		gotTimeout = tunPF.Listeners[0].ConnectionErrors("dial_timeout")
+		gotFailed = tunPF.Listeners[0].ConnectionErrors("dial_failed")
+		if gotTimeout+gotFailed >= 1 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Errorf("listener metric aztunnel_connection_errors_total{reason=dial_timeout|dial_failed}: dial_timeout=%d, dial_failed=%d; want sum >= 1",
+		gotTimeout, gotFailed)
 }
 
 // ScenarioErrorPropagation_TargetHangs verifies the bounded-deadline
@@ -812,4 +851,303 @@ func expectPortForwardFails(senderAddr string, timeout time.Duration) error {
 		return fmt.Errorf("expected error/EOF, got nil error and n=0")
 	}
 	return nil
+}
+
+// waitForConnectionErrorReason polls the listener's
+// ConnectionErrors closure until it reports want or more samples for
+// reason. Returns the last observed value (zero on timeout). Used by
+// reliability scenarios that need a deterministic wait for the
+// listener-side connection-error classification to propagate.
+func waitForConnectionErrorReason(lst *Listener, reason string, want int64, timeout time.Duration) int64 {
+	deadline := time.Now().Add(timeout)
+	var got int64
+	for time.Now().Before(deadline) {
+		got = lst.ConnectionErrors(reason)
+		if got >= want {
+			return got
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return got
+}
+
+// ScenarioSenderRetriesUntilListenerReady: open a connect-mode
+// sender first (no listener yet), assert the sender logs a retry,
+// then attach a listener and assert the sender connects and bridges
+// data through stdio. Subsumes the legacy
+// TestSenderRetriesUntilListenerReady.
+func ScenarioSenderRetriesUntilListenerReady(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   0,
+		SenderMode:     ModeConnect,
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	cc := tun.OpenConnect(t, echo.Addr())
+	defer cc.Close() //nolint:errcheck // best-effort cleanup
+
+	// Wait for at least one retry hint in the sender's logs. The
+	// production wording is "retrying" (Azure relay returns 404 with
+	// no listener) or "relay dial failed" with retry hint on the
+	// next attempt. Match either.
+	if !waitForLogSubstrAny(cc.Logs, []string{"retrying", "relay dial failed"}, 15*time.Second) {
+		t.Fatalf("sender never logged a retry within 15s\n--- logs ---\n%s", cc.Logs())
+	}
+
+	// Attach the listener.
+	if tun.AddListener == nil {
+		t.Fatalf("backend does not support hot-attach (Tunnel.AddListener is nil)")
+	}
+	_ = tun.AddListener(t)
+
+	// Sender should connect; assert a successful echo round-trip
+	// through stdio.
+	payload := []byte("retry-then-bridge\n")
+	if _, err := cc.Write(payload); err != nil {
+		t.Fatalf("write after listener: %v\n--- logs ---\n%s", err, cc.Logs())
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(cc, got); err != nil {
+		t.Fatalf("read after listener: %v\n--- logs ---\n%s", err, cc.Logs())
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo mismatch: got %q want %q", got, payload)
+	}
+}
+
+// ScenarioConnect_NoListener_ErrorsCleanly: connect-mode sender with
+// no listener attached and no plan to attach one. Sender must
+// either exit with an error OR log a clean "relay dial failed"
+// shape within a bounded budget, and the captured logs MUST NOT
+// contain the raw SAS key (token-redaction contract).
+//
+// "retrying" alone is not accepted as proof of clean failure
+// because a sender that retries forever without ever logging a
+// dial-failure line would satisfy it; the harness requires a
+// terminal dial-failure log so we know the sender's error path
+// actually fired.
+func ScenarioConnect_NoListener_ErrorsCleanly(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	tun := b.Setup(t, SetupOptions{
+		NumListeners: 0,
+		SenderMode:   ModeConnect,
+	})
+
+	cc := tun.OpenConnect(t, "127.0.0.1:9999")
+	defer cc.Close() //nolint:errcheck // best-effort cleanup
+
+	// Wait for the sender to exit OR to log "relay dial failed".
+	// Both backends emit that log line on each failed dial; on
+	// Azure the sender exits non-zero after the 401 (non-
+	// retryable); on mock it retries on 404 but every retry
+	// emits the log first.
+	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cc.Wait(waitCtx) }()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-waitDone:
+			goto checkLogs
+		default:
+		}
+		if strings.Contains(cc.Logs(), "relay dial failed") {
+			goto checkLogs
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("connect with no listener never produced a 'relay dial failed' log or sender exit within 30s\n--- logs ---\n%s", cc.Logs())
+
+checkLogs:
+	logs := cc.Logs()
+	stripped := strings.ReplaceAll(logs, "sb-hc-token=REDACTED", "")
+	if strings.Contains(stripped, "sb-hc-token=") {
+		t.Errorf("connect-no-listener logs contain a non-redacted sb-hc-token\n--- logs ---\n%s", logs)
+	}
+}
+
+// ScenarioNoListener_RetriesUntilListenerAppears: SOCKS5 variant
+// of the sender-retries scenario. The sender stays up across the
+// no-listener / listener-attached transition; we drive one SOCKS5
+// dial that fails (no listener), attach the listener, then drive a
+// second dial that succeeds.
+func ScenarioNoListener_RetriesUntilListenerAppears(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   0,
+		NumSenders:     1,
+		SenderMode:     ModeSOCKS5,
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	// First dial: no listener → sender's relay dial fails. We
+	// don't strictly require this dial to produce a specific
+	// error; we just trigger it so the sender exercises its retry
+	// path.
+	_, _ = dialSOCKS5WithRetry(tun.SenderAddr, echo.Addr(), 3*time.Second)
+
+	if tun.AddListener == nil {
+		t.Fatalf("backend does not support hot-attach (Tunnel.AddListener is nil)")
+	}
+	_ = tun.AddListener(t)
+
+	// Second dial: listener attached → SOCKS5 dial should succeed.
+	conn, err := dialSOCKS5WithRetry(tun.SenderAddr, echo.Addr(), 30*time.Second)
+	if err != nil {
+		t.Fatalf("post-attach SOCKS5 dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+
+	payload := []byte("after-attach\n")
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("echo mismatch: got %q want %q", got, payload)
+	}
+}
+
+// ScenarioAuthRejection_BadHyco: listener bound to a nonexistent
+// hyco name on Azure must log a control-channel failure. Skipped
+// on mock because the mock relay's hyco model is dynamic — every
+// name is treated as valid pre-listener-attach (which is the
+// "no-listener" path, covered by other scenarios + by
+// TestMockEmulates_NoListenerReturns404).
+func ScenarioAuthRejection_BadHyco(t *testing.T, b Backend) {
+	t.Helper()
+	if b.Name() != "azure" {
+		t.Skip("AuthRejection_BadHyco: mock relay's hyco model is dynamic; no nonexistent-hyco shape to provoke")
+	}
+	AssertNoLeaks(t)
+
+	h := b.SetupExpectingFailure(t, SetupOptions{
+		NumListeners:     1,
+		SenderMode:       ModePortForward,
+		OverrideHycoName: "nonexistent-hyco-xxxxx",
+	})
+	defer h.Close()
+	assertNoTokenLeak(t, h.ListenerLogs())
+}
+
+// ScenarioAuthRejection_BadListenerSAS: listener with an invalid
+// SAS key fails authentication. Both backends share the
+// "control channel disconnected" log shape; the mock's SAS
+// validation matches Azure's per mockrelay/server/auth_test.go.
+func ScenarioAuthRejection_BadListenerSAS(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	badKey := "dGhpcyBpcyBhIGJhZCBrZXk=" // base64("this is a bad key")
+	h := b.SetupExpectingFailure(t, SetupOptions{
+		NumListeners:         1,
+		SenderMode:           ModePortForward,
+		OverrideListenerAuth: &AuthOverride{BadSASKey: badKey},
+	})
+	defer h.Close()
+
+	logs := h.ListenerLogs()
+	assertNoTokenLeak(t, logs)
+	if strings.Contains(logs, badKey) {
+		t.Errorf("listener logs contain the bad SAS key value")
+	}
+}
+
+// ScenarioAuthRejection_BadSenderSAS: sender with an invalid SAS
+// key. Listener is healthy; the sender's relay dial fails on auth.
+// Both backends share the "relay dial failed" log shape.
+func ScenarioAuthRejection_BadSenderSAS(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	badKey := "dGhpcyBpcyBhIGJhZCBrZXk="
+	h := b.SetupExpectingFailure(t, SetupOptions{
+		NumListeners:       1,
+		SenderMode:         ModePortForward,
+		Target:             "127.0.0.1:9999",
+		AllowedTargets:     []string{"127.0.0.1:9999"},
+		OverrideSenderAuth: &AuthOverride{BadSASKey: badKey},
+	})
+	defer h.Close()
+
+	logs := h.SenderLogs()
+	assertNoTokenLeak(t, logs)
+	if strings.Contains(logs, badKey) {
+		t.Errorf("sender logs contain the bad SAS key value")
+	}
+}
+
+// ScenarioAllowlist_Reject: listener with an allowlist that
+// excludes the echo target; SOCKS5 dial to the non-allowed target
+// is rejected; the listener metric
+// aztunnel_connection_errors_total{reason="allowlist_rejected"}
+// increments. Subsumes the legacy TestAllowlistDeny +
+// TestMetricsErrorReason.
+func ScenarioAllowlist_Reject(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners: 1,
+		SenderMode:   ModeSOCKS5,
+		// 192.0.2.0/24 is TEST-NET-1; echo lives on 127.0.0.1.
+		AllowedTargets: []string{"192.0.2.0/24:*"},
+	})
+
+	// The SOCKS5 dial may return either a SOCKS5Error (proxy
+	// rejected with REP byte) or a connection-close error if the
+	// listener short-circuits the bridge. Both are valid
+	// rejections; what we assert is the metric counter on the
+	// listener side.
+	if _, err := dialSOCKS5WithRetry(tun.SenderAddr, echo.Addr(), 10*time.Second); err == nil {
+		t.Fatalf("expected SOCKS5 dial to non-allowed target to fail")
+	}
+
+	if got := waitForConnectionErrorReason(tun.Listeners[0], "allowlist_rejected", 1, 15*time.Second); got < 1 {
+		t.Errorf("listener metric aztunnel_connection_errors_total{reason=\"allowlist_rejected\"} = %d, want >= 1", got)
+	}
+}
+
+// waitForLogSubstrAny polls logs() until any of substrs appears or
+// timeout elapses.
+func waitForLogSubstrAny(logs func() string, substrs []string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		s := logs()
+		for _, n := range substrs {
+			if strings.Contains(s, n) {
+				return true
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// assertNoTokenLeak fails the test if output contains a raw
+// sb-hc-token (the redacted form sb-hc-token=REDACTED is fine).
+// Shared between the failure-mode scenarios so the redaction
+// contract is asserted consistently.
+func assertNoTokenLeak(t *testing.T, output string) {
+	t.Helper()
+	stripped := strings.ReplaceAll(output, "sb-hc-token=REDACTED", "")
+	if strings.Contains(stripped, "sb-hc-token=") {
+		t.Errorf("output contains raw sb-hc-token (not redacted)")
+	}
 }

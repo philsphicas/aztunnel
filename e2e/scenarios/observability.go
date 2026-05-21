@@ -3,8 +3,13 @@ package scenarios
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -30,6 +35,11 @@ func RunObservabilityScenarios(t *testing.T, b Backend) {
 		{"ListenerDialFailureLog_CarriesCode", ScenarioListenerDialFailureLog_CarriesCode},
 		{"BridgeCauseLogs", ScenarioBridgeCauseLogs},
 		{"BridgePerDirection_NormalClose", ScenarioBridgePerDirection_NormalClose},
+		{"Metrics_EndpointShape", ScenarioMetrics_EndpointShape},
+		{"Metrics_BothSidesConverge", ScenarioMetrics_BothSidesConverge},
+		{"Metrics_DialDuration", ScenarioMetrics_DialDuration},
+		{"ListenerID_PropagatesAndChangesOnRestart", ScenarioListenerID_PropagatesAndChangesOnRestart},
+		{"AcceptID_Saturation", ScenarioAcceptID_Saturation},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -260,6 +270,16 @@ func ScenarioControlSessionID_OnConnectedLine(t *testing.T, b Backend) {
 	if !controlSessionIDRe.MatchString(startedLine) {
 		t.Fatalf("control_started line missing control_session_id field:\n%s", startedLine)
 	}
+
+	// EXTEND: drive one round-trip and assert the accept_attempted
+	// and accept_ok log lines fire. Subsumes the legacy
+	// TestControl_Events_AzureSuccessPath, which used the same pair
+	// of substring matches against the listener log.
+	if err := runEchoOnce(tun.SenderAddr, "control-session-id-extend\n", 15*time.Second); err != nil {
+		t.Fatalf("echo to drive accept events: %v", err)
+	}
+	waitForLogLineContaining(t, lst.Logs, 10*time.Second, "accept_attempted")
+	waitForLogLineContaining(t, lst.Logs, 10*time.Second, "accept_ok")
 }
 
 // waitForLogLineContaining returns the first newline-delimited line
@@ -522,4 +542,455 @@ func ScenarioBridgePerDirection_NormalClose(t *testing.T, b Backend) {
 	if strings.Contains(senderLine, "tcp_to_ws_err=") || strings.Contains(senderLine, "ws_to_tcp_err=") {
 		t.Fatalf("sender bridge-end carries per-direction error on normal close:\n%s", senderLine)
 	}
+}
+
+// ScenarioMetrics_EndpointShape: scrape /metrics from a fresh
+// listener, assert HTTP 200 with the well-known aztunnel labels and
+// the Go runtime metrics. Subsumes the legacy TestMetricsEndpoint.
+//
+// Skipped on backends whose Listener handle does not expose an
+// HTTP-scrapable metrics address (in-process mock — uses the
+// per-handle counter closures instead). The scenario's intent is
+// the wire-level shape of the metrics endpoint, which only the
+// subprocess backends serve.
+func ScenarioMetrics_EndpointShape(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	addr := tun.Listeners[0].Addr
+	if addr == "" {
+		t.Skip("Metrics_EndpointShape: backend listener has no HTTP-scrapable metrics address")
+	}
+	body := scrapeMetricsHTTP(t, addr, 15*time.Second)
+	if !strings.Contains(body, "aztunnel_control_channel_connected") {
+		t.Errorf("metrics endpoint missing aztunnel_control_channel_connected\n--- body ---\n%s", body)
+	}
+	if !strings.Contains(body, "go_goroutines") {
+		t.Errorf("metrics endpoint missing go_goroutines\n--- body ---\n%s", body)
+	}
+}
+
+// ScenarioMetrics_BothSidesConverge: drive three round-trips through
+// one listener + one sender, then assert both sides report
+// aztunnel_connections_total >= 3 and aztunnel_active_connections
+// == 0 after the round-trips complete. Subsumes the legacy
+// TestMetricsConnectionCount. Uses the per-handle Completed /
+// Active closures so it runs against both subprocess and in-process
+// backends.
+func ScenarioMetrics_BothSidesConverge(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	for i := 0; i < 3; i++ {
+		if err := runEchoOnce(tun.SenderAddr, "metrics-converge\n", 15*time.Second); err != nil {
+			t.Fatalf("round-trip %d: %v", i, err)
+		}
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		ldone := tun.Listeners[0].Completed()
+		sdone := tun.Senders[0].Completed()
+		lactive := tun.Listeners[0].Active()
+		sactive := tun.Senders[0].Active()
+		if ldone >= 3 && sdone >= 3 && lactive == 0 && sactive == 0 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Errorf("metrics did not converge within 15s: listener completed=%d active=%d; sender completed=%d active=%d",
+		tun.Listeners[0].Completed(), tun.Listeners[0].Active(),
+		tun.Senders[0].Completed(), tun.Senders[0].Active())
+}
+
+// ScenarioMetrics_DialDuration: drive one round-trip and assert the
+// sender's aztunnel_dial_duration_seconds histogram observed at
+// least one sample. Subsumes the legacy TestMetricsDialDuration.
+// Uses the per-handle DialDurationSamples closure so it runs against
+// both subprocess (Azure scrapes via HTTP) and in-process (mock
+// reads the registry) backends.
+func ScenarioMetrics_DialDuration(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	if tun.Senders[0].DialDurationSamples == nil {
+		t.Skipf("Metrics_DialDuration: %s backend does not expose DialDurationSamples", b.Name())
+	}
+
+	if err := runEchoOnce(tun.SenderAddr, "dial-duration\n", 15*time.Second); err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+
+	// Poll the histogram until at least one sample is recorded.
+	// Subprocess backends pay one HTTP scrape per poll; in-process
+	// backends read the registry directly.
+	deadline := time.Now().Add(15 * time.Second)
+	var got uint64
+	for time.Now().Before(deadline) {
+		got = tun.Senders[0].DialDurationSamples()
+		if got >= 1 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Errorf("aztunnel_dial_duration_seconds histogram has %d samples after round-trip, want >= 1", got)
+}
+
+// ScenarioListenerID_PropagatesAndChangesOnRestart: assert the
+// listener_id slog attribute appears on sender-side accept logs
+// and changes after a listener restart. Subsumes the legacy
+// TestListenerID_PropagatesAndChangesOnRestart.
+func ScenarioListenerID_PropagatesAndChangesOnRestart(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+	requireLogs(t, tun)
+
+	lstA := tun.Listeners[0]
+	startedA := waitForLogLineContaining(t, lstA.Logs, 5*time.Second, "control_started")
+	idA := extractListenerID(t, startedA)
+
+	// Drive two flows; both must appear on the sender side with
+	// listener_id == idA.
+	if err := runEchoOnce(tun.SenderAddr, "flow-1\n", 15*time.Second); err != nil {
+		t.Fatalf("flow 1: %v", err)
+	}
+	if err := runEchoOnce(tun.SenderAddr, "flow-2\n", 15*time.Second); err != nil {
+		t.Fatalf("flow 2: %v", err)
+	}
+	obs := waitForNAcceptListenerIDs(t, tun.Senders[0].Logs, 2, 15*time.Second)
+	for i, id := range obs {
+		if id != idA {
+			t.Errorf("flow %d sender-side listener_id=%q, want %q (listener A)", i+1, id, idA)
+		}
+	}
+
+	// Restart listener.
+	lstA.Stop()
+	if tun.AddListener == nil {
+		t.Fatalf("backend does not support hot-attach")
+	}
+	lstB := tun.AddListener(t)
+	startedB := waitForLogLineContaining(t, lstB.Logs, 30*time.Second, "control_started")
+	idB := extractListenerID(t, startedB)
+	if idB == idA {
+		t.Fatalf("listener B minted the same id %q as listener A; mint-per-instance broken", idB)
+	}
+
+	// Drive flows until the sender observes idB. Azure may retain
+	// stale routing briefly; bound the attempt with a 60s budget.
+	baseline := countAcceptListenerIDs(tun.Senders[0].Logs())
+	deadline := time.Now().Add(60 * time.Second)
+	var lastObserved string
+	for time.Now().Before(deadline) {
+		_ = runEchoOnceBest(tun.SenderAddr, "probe\n", 10*time.Second)
+		ids := acceptListenerIDsSince(tun.Senders[0].Logs(), baseline)
+		if len(ids) > 0 {
+			lastObserved = ids[len(ids)-1]
+		}
+		for _, id := range ids {
+			if id == idB {
+				return
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("after restart: sender never observed listener_id=%q within budget (last observed %q, A=%q)", idB, lastObserved, idA)
+}
+
+// ScenarioAcceptID_Saturation: drive a listener with
+// MaxConnections=2 past its semaphore cap with 8 concurrent idle
+// clients, then parse listener stderr by accept_id and assert
+// every dropped accept has reason=semaphore_full, every acquired
+// accept has the full lifecycle, and dropped + lifecycle never
+// co-occur per accept_id. Subsumes the legacy
+// TestAcceptID_Saturation; uses 2/8 instead of 5/20 to keep
+// walltime tight on both backends.
+func ScenarioAcceptID_Saturation(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	echo := StartPlainEcho(t)
+	const (
+		maxConns  = 2
+		numClient = 8
+	)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		MaxConnections: maxConns,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+	requireLogs(t, tun)
+
+	lst := tun.Listeners[0]
+
+	// Open numClient connections in parallel; each holds idle.
+	var (
+		mu        sync.Mutex
+		openConns []net.Conn
+		wg        sync.WaitGroup
+	)
+	for i := 0; i < numClient; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			conn, err := net.DialTimeout("tcp", tun.SenderAddr, 15*time.Second)
+			if err != nil {
+				t.Errorf("client dial: %v", err)
+				return
+			}
+			mu.Lock()
+			openConns = append(openConns, conn)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range openConns {
+			_ = c.Close()
+		}
+	})
+
+	// Wait for the semaphore to saturate and for at least one
+	// drop to be logged.
+	if !waitForActiveAtLeast(lst.Active, int64(maxConns), 30*time.Second) {
+		t.Fatalf("listener never reached %d active connections within 30s", maxConns)
+	}
+	if !waitForLogSubstring(lst.Logs, "accept_dropped", 30*time.Second) {
+		t.Fatalf("listener never logged accept_dropped (waited 30s; %d clients open)", len(openConns))
+	}
+
+	groups := groupByAcceptID(lst.Logs())
+	if len(groups) == 0 {
+		t.Fatalf("no log lines carried accept_id\n--- listener log ---\n%s", lst.Logs())
+	}
+	var droppedIDs, acquiredIDs []string
+	var lifecycleSeen int
+	for id, lines := range groups {
+		kinds := classifyAcceptLines(lines)
+		if kinds["dropped"] {
+			droppedIDs = append(droppedIDs, id)
+			if !kinds["semaphore_full"] {
+				t.Errorf("accept_id %s: dropped without reason=semaphore_full\n  lines: %v", id, lines)
+			}
+			if kinds["acquired"] || kinds["dial_started"] || kinds["dial_complete"] || kinds["released"] {
+				t.Errorf("accept_id %s: dropped accept also has lifecycle events\n  lines: %v", id, lines)
+			}
+			continue
+		}
+		if kinds["acquired"] {
+			acquiredIDs = append(acquiredIDs, id)
+			if kinds["dial_started"] && kinds["dial_complete"] {
+				lifecycleSeen++
+			}
+		}
+	}
+	if len(acquiredIDs) < maxConns {
+		t.Errorf("only %d distinct acquired accept_ids observed; want >= %d (maxConns)\n  groups=%d",
+			len(acquiredIDs), maxConns, len(groups))
+	}
+	if len(droppedIDs) == 0 {
+		t.Errorf("no dropped accept_ids observed despite %d clients vs maxConns=%d", numClient, maxConns)
+	}
+	if lifecycleSeen == 0 {
+		t.Errorf("no acquired accept_id had a full lifecycle\n  acquired=%d dropped=%d", len(acquiredIDs), len(droppedIDs))
+	}
+}
+
+// scrapeMetricsHTTP fetches /metrics from addr with a bounded
+// timeout and returns the response body. Used by scenarios that
+// assert wire-level metrics output. Subprocess-backend only;
+// callers must check addr != "" before invoking.
+func scrapeMetricsHTTP(t *testing.T, addr string, timeout time.Duration) string {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://" + addr + "/metrics")
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("status %d", resp.StatusCode)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		return string(body)
+	}
+	t.Fatalf("scrape /metrics on %s: %v", addr, lastErr)
+	return ""
+}
+
+// listenerIDRe matches the listener_id slog attribute as rendered
+// by TextHandler (listener_id=VALUE terminated by whitespace).
+var listenerIDRe = regexp.MustCompile(`listener_id=([^\s]+)`)
+
+// extractListenerID pulls the listener_id token from a slog line.
+// Fails the test if absent.
+func extractListenerID(t testing.TB, line string) string {
+	t.Helper()
+	m := listenerIDRe.FindStringSubmatch(line)
+	if m == nil {
+		t.Fatalf("no listener_id in log line: %s", line)
+	}
+	return m[1]
+}
+
+// waitForNAcceptListenerIDs polls logs() until at least n
+// "listener accepted connection" lines exist, then returns the
+// listener_id values from the first n in order. Fails the test on
+// deadline.
+func waitForNAcceptListenerIDs(t testing.TB, logs func() string, n int, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ids := allAcceptListenerIDs(logs())
+		if len(ids) >= n {
+			return ids[:n]
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d \"listener accepted connection\" lines", n)
+	return nil
+}
+
+// allAcceptListenerIDs scans logs for "listener accepted
+// connection" lines and returns the listener_id value from each.
+func allAcceptListenerIDs(logs string) []string {
+	var ids []string
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, "listener accepted connection") {
+			continue
+		}
+		m := listenerIDRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		ids = append(ids, m[1])
+	}
+	return ids
+}
+
+// countAcceptListenerIDs returns the current count of accept lines.
+func countAcceptListenerIDs(logs string) int { return len(allAcceptListenerIDs(logs)) }
+
+// acceptListenerIDsSince returns ids appearing after the given
+// baseline index.
+func acceptListenerIDsSince(logs string, baseline int) []string {
+	ids := allAcceptListenerIDs(logs)
+	if baseline >= len(ids) {
+		return nil
+	}
+	return ids[baseline:]
+}
+
+// runEchoOnceBest is the same as runEchoOnce but swallows errors;
+// used by listener-id restart probes that tolerate transient
+// failures during relay state propagation.
+func runEchoOnceBest(addr, payload string, timeout time.Duration) error {
+	return runEchoOnce(addr, payload, timeout)
+}
+
+// acceptIDLineRe captures the accept_id slog attribute (16 base32
+// chars per idgen).
+var acceptIDLineRe = regexp.MustCompile(`accept_id=([A-Z2-7]{16})\b`)
+
+// groupByAcceptID scans every log line, extracts accept_id from any
+// line that has one, and returns a map keyed by accept_id with the
+// matching lines as values.
+func groupByAcceptID(raw string) map[string][]string {
+	out := make(map[string][]string)
+	for _, line := range strings.Split(raw, "\n") {
+		m := acceptIDLineRe.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		out[m[1]] = append(out[m[1]], line)
+	}
+	return out
+}
+
+// classifyAcceptLines flags which lifecycle events (and the
+// structured drop reason) appear across the lines for a single
+// accept_id.
+func classifyAcceptLines(lines []string) map[string]bool {
+	kinds := make(map[string]bool)
+	for _, ln := range lines {
+		switch {
+		case strings.Contains(ln, "accept acquired"):
+			kinds["acquired"] = true
+		case strings.Contains(ln, "accept_dropped"):
+			kinds["dropped"] = true
+		case strings.Contains(ln, "accept released"):
+			kinds["released"] = true
+		case strings.Contains(ln, "accept dial started"):
+			kinds["dial_started"] = true
+		case strings.Contains(ln, "accept dial complete"):
+			kinds["dial_complete"] = true
+		}
+		if strings.Contains(ln, "reason=semaphore_full") {
+			kinds["semaphore_full"] = true
+		}
+	}
+	return kinds
+}
+
+// waitForActiveAtLeast polls active() at 50 ms until it reports
+// want or more, or timeout elapses.
+func waitForActiveAtLeast(active func() int64, want int64, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if active() >= want {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// waitForLogSubstring polls logs() at 50 ms until substr appears.
+func waitForLogSubstring(logs func() string, substr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logs(), substr) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }

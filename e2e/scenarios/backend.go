@@ -17,6 +17,13 @@ const (
 	// SenderAddr speaks SOCKS5; each client connection chooses its own
 	// target via the SOCKS5 handshake.
 	ModeSOCKS5
+	// ModeConnect prepares the topology for stdio-style senders: no
+	// sender process is started at Setup time. Each call to
+	// Tunnel.OpenConnect launches a fresh sender (subprocess for
+	// Azure, in-process goroutine for the mock) bound to a target
+	// chosen by the caller, with stdin/stdout reachable through the
+	// returned ConnectClient.
+	ModeConnect
 )
 
 func (m SenderMode) String() string {
@@ -25,6 +32,8 @@ func (m SenderMode) String() string {
 		return "port-forward"
 	case ModeSOCKS5:
 		return "socks5"
+	case ModeConnect:
+		return "connect"
 	default:
 		return "unknown"
 	}
@@ -114,28 +123,78 @@ type Backend interface {
 	// in-process backend, the aztunnel_control_channel_connected
 	// gauge). Scenarios assume the tunnel is fully connected on
 	// return.
+	//
+	// NumListeners may be zero for scenarios that want to attach a
+	// listener later via Tunnel.AddListener (sender-retries, no-
+	// listener, etc.). With zero listeners the returned tunnel has
+	// an empty Listeners slice but a fully-configured sender (when
+	// SenderMode is not ModeConnect).
+	//
+	// For SenderMode==ModeConnect, no sender process is launched at
+	// Setup time. The returned tunnel exposes Tunnel.OpenConnect to
+	// spawn a fresh stdio-bridged sender per call. SenderAddr and
+	// SenderAddrs are empty on the returned tunnel in that case.
 	Setup(t testing.TB, opts SetupOptions) *Tunnel
+
+	// SetupExpectingFailure brings up the topology described by opts
+	// and EXPECTS something to fail per the trigger contract below.
+	// Fatals the test if nothing fails. Returns a FailureHandle whose
+	// log accessors expose the captured aztunnel log output for
+	// assertion. Trigger semantics per failure type:
+	//
+	//   - Listener-side failure (OverrideListenerAuth.BadSASKey, or
+	//     OverrideHycoName): SetupExpectingFailure starts the listener
+	//     and waits up to 30 s for the listener to log a control-
+	//     channel failure. Returns when the failure is observed. The
+	//     sender is NOT started.
+	//
+	//   - Sender-side failure (OverrideSenderAuth.BadSASKey, etc.):
+	//     SetupExpectingFailure starts the listener (if any) AND the
+	//     sender, and either waits for the sender to log a dial
+	//     failure OR (for port-forward sender) performs ONE client
+	//     dial against the SenderAddr to trigger the failure. Returns
+	//     when the failure is observed within 30 s.
+	//
+	//   - ModeConnect failure: SetupExpectingFailure starts the
+	//     listener (if any). The sender is NOT started at Setup time
+	//     — the test calls Tunnel.OpenConnect later, which invokes
+	//     connect with the overridden config and observes the
+	//     failure.
+	//
+	// All cases: SetupExpectingFailure ensures no orphan subprocesses
+	// outlive the test; FailureHandle.Close is a no-op for
+	// already-dead processes but is required by symmetry with
+	// Setup's t.Cleanup pattern. Assertions must be made on the
+	// aztunnel-side LOG SHAPE (e.g. "log line containing 'auth
+	// failed' AND not containing the redacted secret"), NOT on
+	// relay-side wire bytes — those can differ between Azure and the
+	// mock.
+	SetupExpectingFailure(t testing.TB, opts SetupOptions) FailureHandle
 }
 
 // SetupOptions configures the topology a backend should create.
 type SetupOptions struct {
 	// NumListeners is the count of listener processes/goroutines to
-	// start against the same entity. Must be >= 1.
+	// start against the same entity. Zero is allowed; scenarios that
+	// attach a listener later via Tunnel.AddListener (no-listener,
+	// sender-retries) start at zero. Negative values are rejected.
 	NumListeners int
 
 	// NumSenders is the count of sender processes/goroutines to start
 	// against the same entity. 0 or 1 means a single sender (current
 	// single-sender behaviour, for back-compat with the original four
 	// scenarios). 2+ means N senders; each gets its own free bind and
-	// is exposed via Tunnel.Senders / Tunnel.SenderAddrs.
+	// is exposed via Tunnel.Senders / Tunnel.SenderAddrs. Ignored for
+	// SenderMode==ModeConnect.
 	NumSenders int
 
-	// SenderMode picks port-forward vs SOCKS5.
+	// SenderMode picks port-forward, SOCKS5, or stdio-style connect.
 	SenderMode SenderMode
 
 	// Target is the dial target for port-forward mode. Ignored for
 	// SOCKS5 (clients choose their own target via the SOCKS5
-	// handshake).
+	// handshake) and for ModeConnect (each OpenConnect call passes
+	// its own target).
 	Target string
 
 	// AllowedTargets is the listener --allow value(s). Empty means
@@ -154,6 +213,65 @@ type SetupOptions struct {
 	// provoke dial failures use a shorter value so the test isn't
 	// dominated by the default 30 s wait.
 	ConnectTimeout time.Duration
+
+	// OverrideListenerAuth, if non-nil, replaces the listener's auth
+	// credentials before launch. Used by SetupExpectingFailure to
+	// provoke listener-side auth failures.
+	OverrideListenerAuth *AuthOverride
+
+	// OverrideSenderAuth, if non-nil, replaces the sender's auth
+	// credentials before launch. Used by SetupExpectingFailure to
+	// provoke sender-side auth failures.
+	OverrideSenderAuth *AuthOverride
+
+	// OverrideHycoName, if non-empty, replaces the hyco name on both
+	// listener and sender. Used to test "hyco not found" rejection
+	// on Azure (mock's hyco model is dynamic and treats any name as
+	// valid; scenarios that need this override should scope-gate
+	// themselves on mock).
+	OverrideHycoName string
+}
+
+// AuthOverride substitutes auth credentials when SetupExpectingFailure
+// brings up a topology that should fail authentication. Exactly one
+// field is set per use.
+type AuthOverride struct {
+	// BadSASKey, if non-empty, replaces the SAS key with a
+	// syntactically-valid-but-wrong value (typically a base64
+	// "this is a bad key" string). Both Azure and the mock reject
+	// the resulting SAS token.
+	BadSASKey string
+
+	// BadEntraToken, if non-empty, replaces the Entra token with
+	// a syntactically-valid-but-wrong value. Azure-only effect; the
+	// mock backend ignores it because the mock has no Entra
+	// validation path.
+	BadEntraToken string
+}
+
+// FailureHandle is returned by Backend.SetupExpectingFailure. It
+// exposes the captured aztunnel-side logs of the failing subprocess(es)
+// so the scenario can assert on aztunnel's error-shape contract (and
+// crucially, that the failed-auth secret never appears in the log).
+type FailureHandle interface {
+	// ListenerLogs returns the captured stderr of the listener
+	// subprocess (Azure) or the slog output buffer of the in-process
+	// listener (mock). Returns the empty string if no listener was
+	// started (sender-only failure modes).
+	ListenerLogs() string
+
+	// SenderLogs returns the captured stderr of the sender
+	// subprocess / the slog buffer of the in-process sender.
+	// Returns the empty string if no sender was started (listener-
+	// only failure modes or ModeConnect tests that have not yet
+	// invoked OpenConnect).
+	SenderLogs() string
+
+	// Close releases any per-handle resources. The t.Cleanup hooks
+	// registered by SetupExpectingFailure already perform teardown;
+	// Close is a no-op for already-dead processes but is required
+	// by symmetry with Setup's t.Cleanup pattern.
+	Close()
 }
 
 // Listener is a handle to a single listener in a Tunnel. Backends
@@ -225,6 +343,14 @@ type Sender struct {
 	// this sender.
 	Active func() int64
 
+	// DialDurationSamples returns the count of observations recorded
+	// in the aztunnel_dial_duration_seconds histogram on this
+	// sender's metrics surface. Used by ScenarioMetrics_DialDuration
+	// to confirm the dial path actually observed the histogram.
+	// Optional: backends that don't expose the histogram leave this
+	// nil and the scenario calls t.Skip.
+	DialDurationSamples func() uint64
+
 	// Stop drops this sender. Idempotent.
 	Stop func()
 
@@ -272,4 +398,73 @@ type Tunnel struct {
 	// May be nil for backends that haven't wired hot-add yet; the
 	// hot-add scenario calls t.Skip when it is.
 	AddListener func(t *testing.T) *Listener
+
+	// openConnect is set by Backend.Setup when SenderMode==ModeConnect.
+	// Nil otherwise. Use Tunnel.OpenConnect to invoke; the closure
+	// indirection lets backends populate it with subprocess (Azure)
+	// or in-process goroutine (mock) semantics without exposing the
+	// difference to scenarios.
+	openConnect func(t testing.TB, target string) ConnectClient
+
+	// sshProxyCommand is set by Backend.Setup for backends that can
+	// spawn a sender subprocess reachable from outside the test
+	// process (Azure). Nil otherwise. Use Tunnel.SSHProxyCommand to
+	// retrieve.
+	sshProxyCommand tunnelSSHProxyCommand
+}
+
+// OpenConnect launches a fresh stdio-bridged sender against target
+// through this tunnel and returns a ConnectClient bound to its
+// stdin/stdout/stderr. Each call produces a NEW sender (subprocess
+// for Azure, goroutine for mock); closing the returned ConnectClient
+// releases that sender. Fatals the test if the tunnel was not set up
+// with SenderMode==ModeConnect.
+func (tun *Tunnel) OpenConnect(t testing.TB, target string) ConnectClient {
+	t.Helper()
+	if tun.openConnect == nil {
+		t.Fatalf("Tunnel.OpenConnect called but SenderMode was not ModeConnect")
+	}
+	return tun.openConnect(t, target)
+}
+
+// SetOpenConnect is the backend-side setter for the openConnect
+// closure populated during Setup when SenderMode==ModeConnect. It is
+// exported only for backend implementations in sibling packages
+// (e2e/backends/{azure,mock}); scenarios should never call it.
+func (tun *Tunnel) SetOpenConnect(fn func(t testing.TB, target string) ConnectClient) {
+	tun.openConnect = fn
+}
+
+// SSHProxyCommand, when non-nil, returns the argv and env that
+// ssh's ProxyCommand should run to launch
+// `aztunnel relay-sender connect <target>` against this tunnel's
+// listener. The caller passes "%h:%p" (or any literal target) as
+// target; ssh substitutes %h/%p at invocation time.
+//
+// Populated by backends that support spawning a sender subprocess
+// reachable from outside the test process (Azure). Nil for backends
+// that don't (mock: in-process control channel is not reachable from
+// a fresh subprocess). Scenarios that need it (ScenarioSSH_ProxyCommand)
+// check for nil and skip with a clear reason.
+//
+// The closure shares the tunnel's already-acquired env so the
+// listener and the ssh-spawned subprocess use the SAME hyco
+// coordinates.
+type tunnelSSHProxyCommand func(target string) (argv []string, env []string)
+
+// sshProxyCommand stores the optional ssh-ProxyCommand builder.
+// Use Tunnel.SetSSHProxyCommand to populate.
+func (tun *Tunnel) SSHProxyCommand(target string) (argv []string, env []string, ok bool) {
+	if tun.sshProxyCommand == nil {
+		return nil, nil, false
+	}
+	argv, env = tun.sshProxyCommand(target)
+	return argv, env, true
+}
+
+// SetSSHProxyCommand is the backend-side setter for the optional
+// ssh-ProxyCommand builder. Backends populate it during Setup when
+// they can spawn a reachable sender subprocess.
+func (tun *Tunnel) SetSSHProxyCommand(fn func(target string) (argv []string, env []string)) {
+	tun.sshProxyCommand = fn
 }

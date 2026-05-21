@@ -122,17 +122,22 @@ func (*MockBackend) ConnectLatencyThreshold() time.Duration {
 // the sender binds are released via t.Cleanup.
 func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenarios.Tunnel {
 	t.Helper()
-	if opts.NumListeners < 1 {
-		t.Fatalf("NumListeners must be >= 1, got %d", opts.NumListeners)
+	if opts.NumListeners < 0 {
+		t.Fatalf("NumListeners must be >= 0, got %d", opts.NumListeners)
 	}
 	switch opts.SenderMode {
-	case scenarios.ModePortForward, scenarios.ModeSOCKS5:
+	case scenarios.ModePortForward, scenarios.ModeSOCKS5, scenarios.ModeConnect:
 	default:
 		t.Fatalf("unknown SenderMode %v", opts.SenderMode)
 	}
 	numSenders := opts.NumSenders
 	if numSenders < 1 {
 		numSenders = 1
+	}
+	// ModeConnect spawns senders on demand via Tunnel.OpenConnect.
+	// No persistent sender goroutine at Setup time.
+	if opts.SenderMode == scenarios.ModeConnect {
+		numSenders = 0
 	}
 
 	delay := b.RendezvousDelay
@@ -302,11 +307,12 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 		}
 
 		return &scenarios.Sender{
-			Addr:      addr.String(),
-			Completed: counterReader(m, "aztunnel_connections_total"),
-			Active:    gaugeReader(m, "aztunnel_active_connections"),
-			Stop:      stop,
-			Logs:      logs.String,
+			Addr:                addr.String(),
+			Completed:           counterReader(m, "aztunnel_connections_total"),
+			Active:              gaugeReader(m, "aztunnel_active_connections"),
+			DialDurationSamples: histogramSampleCount(m, "aztunnel_dial_duration_seconds"),
+			Stop:                stop,
+			Logs:                logs.String,
 		}
 	}
 
@@ -315,7 +321,9 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 		tun.Senders = append(tun.Senders, s)
 		tun.SenderAddrs = append(tun.SenderAddrs, s.Addr)
 	}
-	tun.SenderAddr = tun.SenderAddrs[0]
+	if len(tun.SenderAddrs) > 0 {
+		tun.SenderAddr = tun.SenderAddrs[0]
+	}
 	tun.AddListener = func(t *testing.T) *scenarios.Listener {
 		t.Helper()
 		l := startListener(t)
@@ -323,7 +331,387 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 		return l
 	}
 
+	if opts.SenderMode == scenarios.ModeConnect {
+		tun.SetOpenConnect(b.makeOpenConnect(ctx, &wg, host, entity, clientOpts, tokenProvider))
+	}
+
 	return tun
+}
+
+// makeOpenConnect returns the closure that Tunnel.OpenConnect calls
+// when SenderMode==ModeConnect. Each call spawns one in-process
+// sender.Connect goroutine with pipe-backed stdio. The returned
+// ConnectClient bridges the OTHER ends of those pipes; closing it
+// cancels the sender's context, closes both pipes, and drains the
+// goroutine via the parent wg.
+func (b *MockBackend) makeOpenConnect(
+	parentCtx context.Context,
+	wg *sync.WaitGroup,
+	host, entity string,
+	clientOpts relay.ClientOptions,
+	tokenProvider relay.TokenProvider,
+) func(t testing.TB, target string) scenarios.ConnectClient {
+	return func(t testing.TB, target string) scenarios.ConnectClient {
+		t.Helper()
+		// Two pipes: one for sender's stdin (test writes, sender
+		// reads), one for sender's stdout (sender writes, test reads).
+		stdinR, stdinW := io.Pipe()
+		stdoutR, stdoutW := io.Pipe()
+		logs := newCaptureBuffer()
+		senderLogger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		// Per-call cancel chained off the backend's parent ctx so
+		// teardown order (test cleanup) still works.
+		ctx, cancel := context.WithCancel(parentCtx)
+		done := make(chan struct{})
+		var exitErr error
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer close(done)
+			// sender.Connect dereferences cfg.Metrics.InstrumentedDial
+			// unconditionally despite the doc-comment claiming Metrics
+			// is optional. Pass a fresh metrics.New() per call.
+			exitErr = sender.Connect(ctx, sender.ConnectConfig{
+				Endpoint:      host,
+				EntityPath:    entity,
+				TokenProvider: tokenProvider,
+				ClientOptions: clientOpts,
+				Target:        target,
+				Stdin:         stdinR,
+				Stdout:        stdoutW,
+				Logger:        senderLogger,
+				Metrics:       metrics.New(),
+			})
+			// Close the stdout writer so Read on the other end
+			// returns EOF instead of blocking forever.
+			_ = stdoutW.Close()
+		}()
+
+		cc := &mockConnectClient{
+			stdinW:  stdinW,
+			stdoutR: stdoutR,
+			logs:    logs,
+			cancel:  cancel,
+			done:    done,
+			err:     func() error { return exitErr },
+		}
+		t.Cleanup(func() { _ = cc.Close() })
+		return cc
+	}
+}
+
+// mockConnectClient is the mock backend's scenarios.ConnectClient
+// implementation. Read drains the in-process sender's stdout pipe,
+// Write feeds its stdin pipe; Logs returns the sender's slog buffer;
+// Wait blocks on the sender goroutine; Close cancels and closes the
+// pipes (idempotent).
+type mockConnectClient struct {
+	stdinW   *io.PipeWriter
+	stdoutR  *io.PipeReader
+	logs     *captureBuffer
+	cancel   context.CancelFunc
+	done     chan struct{}
+	err      func() error
+	closeOne sync.Once
+}
+
+func (c *mockConnectClient) Read(p []byte) (int, error)  { return c.stdoutR.Read(p) }
+func (c *mockConnectClient) Write(p []byte) (int, error) { return c.stdinW.Write(p) }
+func (c *mockConnectClient) Logs() string                { return c.logs.String() }
+
+func (c *mockConnectClient) Wait(ctx context.Context) error {
+	select {
+	case <-c.done:
+		return c.err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *mockConnectClient) Close() error {
+	c.closeOne.Do(func() {
+		c.cancel()
+		_ = c.stdinW.Close()
+		_ = c.stdoutR.Close()
+		// Don't block on done here — the parent wg waits at backend
+		// teardown. Close is allowed to return before the goroutine
+		// fully exits.
+	})
+	return nil
+}
+
+// SetupExpectingFailure brings up the topology described by opts and
+// EXPECTS something to fail. Trigger semantics follow the Backend
+// contract: listener-side auth override → wait for listener to log
+// control-channel failure; sender-side auth override → start sender
+// and either wait for its failure log or perform one client dial to
+// trigger it; ModeConnect failure → no sender started, caller drives
+// via Tunnel.OpenConnect.
+//
+// On the mock backend the failure is reproduced by signing the auth
+// token with the override's BadSASKey, which the mock relay rejects
+// the same way Azure does (mockrelay/server/auth_test.go verifies
+// the parity).
+func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOptions) scenarios.FailureHandle {
+	t.Helper()
+	switch opts.SenderMode {
+	case scenarios.ModePortForward, scenarios.ModeSOCKS5, scenarios.ModeConnect:
+	default:
+		t.Fatalf("unknown SenderMode %v", opts.SenderMode)
+	}
+	if opts.OverrideListenerAuth == nil && opts.OverrideSenderAuth == nil && opts.OverrideHycoName == "" {
+		t.Fatalf("SetupExpectingFailure requires at least one override (ListenerAuth, SenderAuth, or HycoName)")
+	}
+
+	delay := b.RendezvousDelay
+	if delay == 0 {
+		delay = DefaultRendezvousDelay
+	}
+	host, clientOpts := startMockRelay(t, delay)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+
+	entity := mustEntityName(t)
+	listenerLogs := newCaptureBuffer()
+	senderLogs := newCaptureBuffer()
+
+	goodProvider := relay.TokenProvider(&relay.SASTokenProvider{
+		KeyName: server.DefaultSASKeyName,
+		Key:     server.DefaultSASKey,
+	})
+	listenerProvider := goodProvider
+	senderProvider := goodProvider
+	if opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.BadSASKey != "" {
+		listenerProvider = &relay.SASTokenProvider{
+			KeyName: server.DefaultSASKeyName,
+			Key:     opts.OverrideListenerAuth.BadSASKey,
+		}
+	}
+	if opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.BadSASKey != "" {
+		senderProvider = &relay.SASTokenProvider{
+			KeyName: server.DefaultSASKeyName,
+			Key:     opts.OverrideSenderAuth.BadSASKey,
+		}
+	}
+
+	// Listener-side failure path: spin up the listener with bad
+	// creds, wait for its control-channel failure log, return.
+	if opts.OverrideListenerAuth != nil {
+		listenerLogger := slog.New(slog.NewTextHandler(listenerLogs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		lctx, lcancel := context.WithCancel(ctx)
+		// Per-listener context is released via parent ctx; the
+		// explicit cancel handle exists only for the fast-fail
+		// branch below.
+		t.Cleanup(lcancel)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := listener.ListenAndServe(lctx, listener.Config{
+				Endpoint:      host,
+				EntityPath:    entity,
+				TokenProvider: listenerProvider,
+				ClientOptions: clientOpts,
+				AllowList:     opts.AllowedTargets,
+				Logger:        listenerLogger,
+				Metrics:       metrics.New(),
+			})
+			if err != nil && lctx.Err() == nil && ctx.Err() == nil {
+				listenerLogger.Debug("listener exited", "err", err)
+			}
+		}()
+		// Wait for a control-channel failure log line. The
+		// production wording is "control channel disconnected"
+		// (control loop teardown).
+		if !waitForLogString(listenerLogs.String, "control channel disconnected", 30*time.Second) {
+			lcancel()
+			t.Fatalf("listener never logged a control-channel failure within 30s\n--- logs ---\n%s", listenerLogs.String())
+		}
+		return &mockFailureHandle{
+			listenerLogs: listenerLogs.String,
+			senderLogs:   func() string { return "" },
+		}
+	}
+
+	// Sender-side failure path: bring up a healthy listener (or
+	// none, if ModeConnect's contract leaves the listener absent),
+	// then start the sender with bad creds and observe its
+	// failure.
+	if opts.NumListeners > 0 {
+		listenerLogger := slog.New(slog.NewTextHandler(listenerLogs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+		m := metrics.New()
+		lctx, lcancel := context.WithCancel(ctx)
+		t.Cleanup(lcancel)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := listener.ListenAndServe(lctx, listener.Config{
+				Endpoint:       host,
+				EntityPath:     entity,
+				TokenProvider:  listenerProvider,
+				ClientOptions:  clientOpts,
+				AllowList:      opts.AllowedTargets,
+				MaxConnections: opts.MaxConnections,
+				ConnectTimeout: opts.ConnectTimeout,
+				Logger:         listenerLogger,
+				Metrics:        m,
+			})
+			if err != nil && lctx.Err() == nil && ctx.Err() == nil {
+				listenerLogger.Debug("listener exited", "err", err)
+			}
+		}()
+		if !waitForGauge(m, "aztunnel_control_channel_connected", 1, 15*time.Second) {
+			t.Fatalf("listener never reported control_channel_connected during SetupExpectingFailure")
+		}
+	}
+
+	if opts.SenderMode == scenarios.ModeConnect {
+		// The test will drive the failure via Tunnel.OpenConnect.
+		return &mockFailureHandle{
+			listenerLogs: listenerLogs.String,
+			senderLogs:   senderLogs.String,
+			openConnect:  b.makeOpenConnect(ctx, &wg, host, entity, clientOpts, senderProvider),
+		}
+	}
+
+	senderLogger := slog.New(slog.NewTextHandler(senderLogs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	sctx, scancel := context.WithCancel(ctx)
+	t.Cleanup(scancel)
+	addrCh := make(chan net.Addr, 1)
+	ready := func(a net.Addr) {
+		select {
+		case addrCh <- a:
+		default:
+		}
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var err error
+		switch opts.SenderMode {
+		case scenarios.ModePortForward:
+			err = sender.PortForward(sctx, sender.PortForwardConfig{
+				Endpoint:      host,
+				EntityPath:    entity,
+				TokenProvider: senderProvider,
+				ClientOptions: clientOpts,
+				Target:        opts.Target,
+				BindAddress:   "127.0.0.1:0",
+				Logger:        senderLogger,
+				Metrics:       metrics.New(),
+				Ready:         ready,
+			})
+		case scenarios.ModeSOCKS5:
+			err = sender.SOCKS5Proxy(sctx, sender.SOCKS5Config{
+				Endpoint:      host,
+				EntityPath:    entity,
+				TokenProvider: senderProvider,
+				ClientOptions: clientOpts,
+				BindAddress:   "127.0.0.1:0",
+				Logger:        senderLogger,
+				Metrics:       metrics.New(),
+				Ready:         ready,
+			})
+		}
+		if err != nil && sctx.Err() == nil && ctx.Err() == nil {
+			senderLogger.Debug("sender exited", "err", err)
+		}
+	}()
+
+	// Wait for sender bind ready. The port-forward / SOCKS5 sender
+	// only dials the relay when a client connects; we trigger that
+	// dial with one local connect attempt.
+	var addr net.Addr
+	select {
+	case addr = <-addrCh:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("sender Ready callback never fired during SetupExpectingFailure")
+	}
+
+	conn, err := net.DialTimeout("tcp", addr.String(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("dial sender during SetupExpectingFailure: %v", err)
+	}
+	triggerSenderRelayDial(conn, opts.SenderMode)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = io.ReadAll(conn)
+	_ = conn.Close()
+
+	if !waitForLogString(senderLogs.String, "relay dial failed", 30*time.Second) {
+		t.Fatalf("sender never logged 'relay dial failed' within 30s\n--- logs ---\n%s", senderLogs.String())
+	}
+	return &mockFailureHandle{
+		listenerLogs: listenerLogs.String,
+		senderLogs:   senderLogs.String,
+	}
+}
+
+// triggerSenderRelayDial sends the minimal byte sequence each
+// sender mode requires to provoke its relay dial. PortForward
+// dials the relay on first client data; SOCKS5 requires the
+// SOCKS5 greeting + CONNECT request before it dials. ModeConnect
+// has no client-protocol layer here — the caller invokes
+// OpenConnect, which starts the sender and dials directly.
+func triggerSenderRelayDial(conn net.Conn, mode scenarios.SenderMode) {
+	switch mode {
+	case scenarios.ModeSOCKS5:
+		// SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth).
+		_, _ = conn.Write([]byte{0x05, 0x01, 0x00})
+		// Drain the server's method selection so the sender
+		// moves to the CONNECT phase.
+		_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		drain := make([]byte, 2)
+		_, _ = io.ReadFull(conn, drain)
+		// CONNECT request: VER=5, CMD=1 (CONNECT), RSV=0,
+		// ATYP=1 (IPv4), DST=127.0.0.1, PORT=9999.
+		_, _ = conn.Write([]byte{0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x27, 0x0F})
+	default:
+		_, _ = conn.Write([]byte("trigger\n"))
+	}
+}
+
+// mockFailureHandle is the mock backend's scenarios.FailureHandle
+// implementation. Logs accessors are snapshots; Close is a no-op
+// because the parent t.Cleanup already cancels and drains.
+type mockFailureHandle struct {
+	listenerLogs func() string
+	senderLogs   func() string
+	openConnect  func(t testing.TB, target string) scenarios.ConnectClient
+}
+
+func (h *mockFailureHandle) ListenerLogs() string { return h.listenerLogs() }
+func (h *mockFailureHandle) SenderLogs() string   { return h.senderLogs() }
+func (h *mockFailureHandle) Close()               {}
+
+// OpenConnect lets ModeConnect failure scenarios drive a connect
+// invocation against this handle's pre-configured (possibly faulty)
+// auth credentials. Returns nil if the handle was not built for a
+// ModeConnect scenario.
+func (h *mockFailureHandle) OpenConnect(t testing.TB, target string) scenarios.ConnectClient {
+	t.Helper()
+	if h.openConnect == nil {
+		t.Fatalf("FailureHandle.OpenConnect called on a non-ModeConnect handle")
+	}
+	return h.openConnect(t, target)
+}
+
+// waitForLogString polls logs() at 50 ms until the substring appears
+// or timeout elapses. Returns true on hit, false on deadline.
+func waitForLogString(logs func() string, substr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logs(), substr) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }
 
 // startMockRelay starts a server.Server backed by httptest.NewTLSServer
@@ -507,6 +895,31 @@ func gaugeValue(m *metrics.Metrics, name string) float64 {
 		}
 	}
 	return 0
+}
+
+// histogramSampleCount returns a closure that sums SampleCount
+// across every label combination of histogram `name` on m's
+// registry. Used by per-handle DialDurationSamples accessors that
+// need a single scalar "did this histogram observe anything" value.
+func histogramSampleCount(m *metrics.Metrics, name string) func() uint64 {
+	return func() uint64 {
+		families, err := m.Registry.Gather()
+		if err != nil {
+			return 0
+		}
+		var total uint64
+		for _, f := range families {
+			if f.GetName() != name {
+				continue
+			}
+			for _, sample := range f.GetMetric() {
+				if h := sample.GetHistogram(); h != nil {
+					total += h.GetSampleCount()
+				}
+			}
+		}
+		return total
+	}
 }
 
 // captureBuffer is a goroutine-safe io.Writer used as the destination
