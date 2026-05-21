@@ -102,6 +102,20 @@ func (m *MockBackend) Cell(values map[string]string) e2escenarios.Backend {
 	return m
 }
 
+// ConnectLatencyThreshold returns the per-backend connect-latency
+// ceiling for the Performance suite. The mock pays a configurable
+// rendezvous delay (DefaultRendezvousDelay is 1 s) plus the in-
+// process echo round-trip (single-digit ms); 3 s leaves comfortable
+// headroom for CI scheduling noise without masking regressions of
+// the order of seconds.
+//
+// The mock returns one value regardless of cell — MockBackend has
+// no axes, and the RendezvousDelay field affects timing but is not
+// itself an axis the harness enumerates over.
+func (*MockBackend) ConnectLatencyThreshold() time.Duration {
+	return 3 * time.Second
+}
+
 // Setup brings up the in-process topology described by opts and blocks
 // until every listener's control channel is attached and every sender
 // bind is accepting TCP. All goroutines, the mock HTTP server, and
