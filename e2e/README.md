@@ -1,136 +1,67 @@
 # End-to-End Tests
 
-These tests verify aztunnel against a real Azure Relay namespace. They run behind
-the `e2e` build tag, and each Azure-dependent test provisions its own ephemeral
-hyco pair (`e2e-entra-<hex>`, `e2e-sas-<hex>`) via `t.Cleanup`-scoped lifetimes,
-so parallel runs do not collide.
+Aztunnel's e2e suite has one shared library of backend-agnostic scenarios that
+runs against multiple backends.
 
-## Quick Start (local dev)
-
-```bash
-az login
-make e2e-setup
-make e2e
+```
+e2e/
+├── scenarios/        ← backend-agnostic scenarios (behavior tests)
+├── backends/
+│   ├── azure/        ← scenarios run against a real Azure Relay namespace
+│   └── mock/         ← scenarios run against the in-process mock relay
+├── azrelay/          ← per-test hyco provisioner used by the Azure backend
+└── infra/            ← `make e2e-setup` CLI (separate Go module)
 ```
 
-Maintainers who need CI identity + GitHub secret setup run:
+## Make targets
 
-```bash
-make e2e-ci
-```
+| Target           | Backend     | Setup required                | Use when                                   |
+| ---------------- | ----------- | ----------------------------- | ------------------------------------------ |
+| `make e2e-mock`  | mock        | none                          | local iteration; CI sanity gate            |
+| `make e2e-azure` | Azure Relay | `make e2e-setup` + `az login` | smoke against the real relay control plane |
+| `make e2e`       | both        | both                          | full local validation before opening a PR  |
 
-## Per-developer isolation
+`make e2e` runs both targets. They share no infra (mock is in-process; Azure
+provisions per-test hycos), so `make -j2 e2e` runs them in parallel and finishes
+in roughly the walltime of the slower backend.
 
-`make e2e-setup` defaults to `aztunnel-e2e-<alias>`, where `<alias>` is derived
-from your signed-in Azure user. This keeps local test infra isolated from CI and
-from other developers.
+## Adding tests
 
-- Override alias: `ALIAS=foo make e2e-setup`
-- Override RG directly: `RESOURCE_GROUP=my-rg make e2e-setup`
+Use the testing-discipline taxonomy below to pick where a new test lives.
 
-The setup command writes `e2e/.local.json`, which `make e2e` reads automatically.
-No `eval` flow and no shell-level env export are required.
+| Category              | Location                                | When to use                                                                                           | Naming                        |
+| --------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------- |
+| **Behavior scenario** | `e2e/scenarios/`                        | Test asserts aztunnel behavior given backend output. Backend-agnostic (uses the `Backend` interface). | `Scenario<Topic>_<Specifics>` |
+| **Mock emulation**    | `e2e/backends/mock/emulates_test.go`    | Test asserts the mock matches Azure's wire-level output. Mock-only by nature.                         | `TestMockEmulates_<Topic>`    |
+| **Mock feature**      | `e2e/backends/mock/features_test.go`    | Test asserts a mock-only knob (fault injection, timing override). No Azure equivalent.                | `TestMockFeature_<Topic>`     |
+| **Azure-only**        | `e2e/backends/azure/azure_only_test.go` | Behaviors unique to real Azure: Entra plumbing, real RBAC, soak tests.                                | `TestAzureOnly_<Topic>`       |
+| **Mock-server unit**  | `mockrelay/server/*_test.go`            | Mock relay's own protocol tests in isolation (no aztunnel import).                                    | `Test<Topic>`                 |
+| **CLI unit**          | `cmd/aztunnel/*_test.go` (no e2e tag)   | aztunnel CLI parsing / process-startup with no network.                                               | `TestCLI_<Topic>`             |
 
-## Join an existing setup
+Decision tree:
 
-If you already have access to an existing namespace (for example a teammate's or
-the shared CI RG), record it locally without provisioning:
+1. Does the test need to exercise aztunnel-relay wire behavior? **No** → CLI
+   unit or mock-server unit.
+2. Does it assert something only one backend can do? **Yes** → backend-specific
+   test in that backend's directory.
+3. Otherwise → behavior scenario in `e2e/scenarios/`. Default.
 
-```bash
-make e2e-attach RESOURCE_GROUP=aztunnel-e2e
-```
+When adding a mock emulation test, also check whether a paired behavior
+scenario exists for aztunnel's response to the same wire condition. If not,
+add one too — the scenario keeps the behavior covered against Azure.
 
-`RELAY_NAME=<ns>` is optional when the RG has exactly one namespace.
+## Backend-specific setup
 
-## Running tests
+See `e2e/backends/azure/README.md` for Azure (subscription, RG, `make e2e-setup`).
+See `e2e/backends/mock/README.md` for mock (no setup; runs anywhere Go runs).
 
-`make e2e` resolves config in this order:
+## Implementation pointers
 
-1. `AZURE_SUBSCRIPTION_ID` + `E2E_RESOURCE_GROUP` env vars (CI / explicit override)
-2. `e2e/.local.json` (local setup/attach flow)
-3. Fail with a directive error
-
-Optional toggles:
-
-| Variable                      | Description                                 |
-| ----------------------------- | ------------------------------------------- |
-| `E2E_AUTH`                    | `entra`, `sas`, or unset (both)             |
-| `E2E_PROVISIONER_CONCURRENCY` | In-flight provisioning cap (default 4)      |
-| `E2E_LARGE_TRANSFER`          | Set `1` to run the 100MB transfer test      |
-| `E2E_LONG_LIVED`              | Set `1` to run the >2 minute keepalive test |
-
-## Contributor-only fallback (`sasOnly`)
-
-If setup can provision infra but cannot create role assignments
-(`AuthorizationFailed` on `Microsoft.Authorization/roleAssignments/write`), setup
-completes and records `sasOnly: true` in `e2e/.local.json`.
-
-When `sasOnly` is set and `E2E_AUTH` is not explicitly set, `TestMain` forces
-`E2E_AUTH=sas`, so Entra subtests skip cleanly instead of timing out.
-
-After an owner grants access, re-record the local config without
-re-attempting the role assignment so `sasOnly` flips back to false:
-
-```bash
-make e2e-grant RESOURCE_GROUP=<their-rg> RELAY_NAME=<their-namespace> ASSIGNEE=<your-upn>
-make e2e-attach RESOURCE_GROUP=<their-rg> RELAY_NAME=<their-namespace>
-```
-
-## Status / troubleshooting
-
-Run this first when local e2e runs look wrong:
-
-```bash
-make e2e-status
-```
-
-It prints the resolved source/subscription/resource-group/namespace/sas-only mode
-and verifies permanent SAS-rule readability.
-
-## Cleanup
-
-`make e2e-clean` only deletes RGs that were created by `make e2e-setup`
-(validated via ownership tags). It will not delete unrelated or attached RGs.
-
-To forget an attached or stale local config without deleting infra:
-
-```bash
-rm e2e/.local.json
-```
-
-## CI environment overrides
-
-CI continues to inject config via workflow `env` blocks. The default shared RG
-stays `aztunnel-e2e`.
-
-| Variable                | Purpose                               |
-| ----------------------- | ------------------------------------- |
-| `AZURE_SUBSCRIPTION_ID` | Subscription for ARM calls            |
-| `E2E_RESOURCE_GROUP`    | Shared CI RG (default `aztunnel-e2e`) |
-| `E2E_RELAY_NAME`        | Relay namespace to target             |
-
-## Test matrix highlights
-
-- Functional: port-forward, SOCKS5, connect, SSH, allowlist, max-connections
-- Data integrity: small/large payloads, opt-in bulk + long-lived
-- Concurrency: same-target and distinct-target fanout
-- Metrics: endpoint, counters, error reasons, dial histograms
-- Multi-instance smoke: two listeners on one hyco with flow distribution logging
-
-<details>
-<summary>Implementation notes</summary>
-
-The implementation lives under `e2e/infra/cmd/e2e-infra`; Make targets are the
-stable user-facing surface.
-
-| Make target   | CLI subcommand                   |
-| ------------- | -------------------------------- |
-| `e2e-setup`   | `e2e-infra setup`                |
-| `e2e-attach`  | `e2e-infra attach`               |
-| `e2e-status`  | `e2e-infra status`               |
-| `e2e-clean`   | `e2e-infra clean`                |
-| `e2e-grant`   | `e2e-infra grant --assignee ...` |
-| `e2e-ci`      | `e2e-infra ci`                   |
-| `e2e-janitor` | `e2e-infra janitor`              |
-
-</details>
+- `e2e/scenarios/backend.go` defines the `Backend`, `Tunnel`, `Listener`,
+  `Sender`, and `SetupOptions` types every scenario writes against.
+- `e2e/scenarios/scenarios.go` is the entry point: `RunAllScenarios(t, b)` and
+  `RunAllBenchmarks(b, backend)` iterate every scenario across the backend's
+  `Axes()`.
+- `e2e/azrelay/` is the per-test hyco provisioner used by the Azure backend.
+  CI calls it from `azure_backend_test.go`; setup commands call it from
+  `e2e/infra/`.

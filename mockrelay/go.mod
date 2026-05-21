@@ -3,8 +3,10 @@
 // This module is intentionally separate from the parent aztunnel module
 // so that consumers of aztunnel-the-client don't pull in the relay code
 // or its dependencies, and so the relay can evolve independently. The
-// integration test in server/integration_test.go imports the parent
-// aztunnel module for end-to-end verification (one-way dependency).
+// SAS-token helper and aztunnel-relay CLI tests import the parent
+// aztunnel module for end-to-end verification (`server/auth_test.go`
+// imports `internal/relay`; `cmd/aztunnel-relay/helpers_test.go`
+// builds `cmd/aztunnel` as a subprocess).
 module github.com/philsphicas/aztunnel/mockrelay
 
 go 1.26.0

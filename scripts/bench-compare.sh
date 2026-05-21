@@ -113,10 +113,10 @@ run_bench() {
   case "$BACKEND" in
   mock)
     (
-      cd "$wt/mockrelay"
-      go test -run='^$' -bench="$BENCH" -benchmem \
+      cd "$wt"
+      go test -tags=e2e -run='^$' -bench="$BENCH" -benchmem \
         -count="$COUNT" -benchtime="$BENCHTIME" \
-        ./testharness/mockbackend/...
+        ./e2e/backends/mock/...
     ) | tee "$out"
     ;;
   azure)
@@ -124,7 +124,7 @@ run_bench() {
       cd "$wt"
       go test -tags=e2e -run='^$' -bench="$BENCH" -benchmem \
         -count="$COUNT" -benchtime="$BENCHTIME" -timeout=60m \
-        ./e2e/...
+        ./e2e/backends/azure/...
     ) | tee "$out"
     ;;
   esac

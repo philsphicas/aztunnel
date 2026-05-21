@@ -9,11 +9,22 @@ require (
 	github.com/KimMachineGun/automemlimit v0.7.5
 	github.com/alecthomas/kong v1.15.0
 	github.com/coder/websocket v1.8.14
+	github.com/philsphicas/aztunnel/mockrelay v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/willabides/kongplete v0.4.0
-	golang.org/x/crypto v0.51.0
 )
+
+// mockrelay is a sibling module in this repo. The workspace
+// (go.work) resolves the import for in-workspace builds; this
+// replace directive covers GOWORK=off / GOWORK=auto invocations
+// inside this repo. Downstream consumers of this module never
+// need to resolve mockrelay — it's imported only from test
+// packages (e2e/backends/mock/*_test.go) and the aztunnel main
+// binary doesn't depend on it. (Replace directives in non-main
+// modules are ignored by Go anyway, so consumers couldn't act on
+// this even if they tried.)
+replace github.com/philsphicas/aztunnel/mockrelay => ./mockrelay
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.12.0 // indirect
@@ -34,6 +45,7 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/riywo/loginshell v0.0.0-20200815045211-7d26008be1ab // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/text v0.37.0 // indirect

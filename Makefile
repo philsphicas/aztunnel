@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor vulncheck bench bench-compare help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor vulncheck bench bench-compare help
 
 .DEFAULT_GOAL := help
 
@@ -65,22 +65,30 @@ fmt-check: ## Check formatting (same as CI)
 
 # `go test` buffers each test binary's combined stdout+stderr until
 # that binary exits when multiple packages share one invocation,
-# so `-v` does NOT stream output across packages. The `./e2e/` run
-# is the slow one (~14-17 min on Azure); keep these as separate
-# invocations so each binary's output streams live. Both
-# invocations run unconditionally and the recipe exits with the
-# combined non-zero status if either fails — mirroring the
-# multi-package `go test` semantics so a failure in azrelay does
-# not mask one in ./e2e/ (see also the e2e-docker target's
+# so `-v` does NOT stream output across packages. The Azure run is
+# the slow one (~12-15 min); keep these as separate invocations so
+# each binary's output streams live. Each invocation runs
+# unconditionally and the recipe exits with the combined non-zero
+# status if any fails — mirroring the multi-package `go test`
+# semantics so a failure in azrelay does not mask one in
+# ./e2e/backends/azure/ (see also the e2e-docker target's
 # status-capture pattern). The 20 m per-invocation timeout is
-# generous against the ~14-17 min Azure run and is independent of
+# generous against the ~12-15 min Azure run and is independent of
 # the GHA job-level `timeout-minutes` (which is the binding
 # constraint on CI). See golang/go#24929.
-e2e: build ## Run end-to-end tests (configure once via `make e2e-setup`)
+e2e-mock: ## Run e2e scenarios against the in-process mock relay
+	go test -tags=e2e -timeout=20m -v ./e2e/backends/mock/...
+
+e2e-azure: build ## Run e2e scenarios against a real Azure Relay namespace (configure via `make e2e-setup`)
 	@status=0; \
 	go test -tags=e2e -timeout=20m -v ./e2e/azrelay/ || status=$$?; \
-	go test -tags=e2e -timeout=20m -v ./e2e/ || status=$$?; \
+	go test -tags=e2e -timeout=20m -v ./e2e/backends/azure/... || status=$$?; \
 	exit $$status
+
+# Run mock and Azure backends; safe to run with `make -j2` because
+# the two targets share no infra (mock runs entirely in-process,
+# Azure provisions per-test hycos). Serial invocation is also fine.
+e2e: e2e-mock e2e-azure ## Run e2e tests against both backends (parallel-safe under make -j)
 
 e2e-docker: ## Run container-to-container e2e tests
 	@status=0; \
@@ -121,9 +129,9 @@ vulncheck: ## Check Go dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
-	cd mockrelay && go test -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
+	go test -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
 		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
-		./testharness/mockbackend/...
+		./e2e/backends/mock/...
 
 bench-compare: ## Compare e2e benchmarks across two refs: BASE=<sha> [HEAD=<sha>]
 	@if [ -z "$(BASE)" ]; then \

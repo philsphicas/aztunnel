@@ -55,4 +55,4 @@ jobs:
           E2E_RELAY_NAME: ${{ vars.E2E_RELAY_NAME }}
           E2E_RESOURCE_GROUP: ${{ vars.E2E_RESOURCE_GROUP || 'aztunnel-e2e' }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-        run: make e2e
+        run: make e2e-azure
