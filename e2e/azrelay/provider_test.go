@@ -260,6 +260,106 @@ func TestPairToken_ResultPassesThrough(t *testing.T) {
 	}
 }
 
+// TestPairToken_HycoNamesSkipEntraSurfacesEmpty asserts that when a
+// PairToken has a populated Result whose EntraHycoName is empty
+// (SkipEntra mode), HycoNames returns the empty entra name from the
+// Result rather than falling back to the suffix-derived synthetic
+// name. This locks in "result wins over suffix" at the PairToken
+// level.
+func TestPairToken_HycoNamesSkipEntraSurfacesEmpty(t *testing.T) {
+	const suffix = "00112233aabb"
+	tok := &PairToken{
+		suffix: suffix,
+		result: &Result{
+			EntraHycoName: "",
+			SASHycoName:   "e2e-sas-" + suffix,
+		},
+	}
+	entra, sas := tok.HycoNames()
+	if entra != "" {
+		t.Errorf("entra = %q, want empty (Result wins over suffix)", entra)
+	}
+	if sas != "e2e-sas-"+suffix {
+		t.Errorf("sas = %q, want %q", sas, "e2e-sas-"+suffix)
+	}
+}
+
+// TestPairToken_TeardownSkipsEntraWhenResultEntraEmpty asserts that
+// Teardown invokes deleteFn exactly once (SAS only) when the Result
+// records SkipEntra (EntraHycoName empty), and that the count holds
+// across repeat calls.
+func TestPairToken_TeardownSkipsEntraWhenResultEntraEmpty(t *testing.T) {
+	const suffix = "feedface1234"
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var capturedNames []string
+	tok := &PairToken{
+		suffix: suffix,
+		result: &Result{
+			EntraHycoName: "",
+			SASHycoName:   "e2e-sas-" + suffix,
+		},
+		deleteFn: func(ctx context.Context, name string) error {
+			calls.Add(1)
+			mu.Lock()
+			capturedNames = append(capturedNames, name)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	if err := tok.Teardown(t.Context()); err != nil {
+		t.Fatalf("first teardown: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("deleteFn invoked %d times, want 1 (SkipEntra: SAS only)", got)
+	}
+	if len(capturedNames) != 1 || capturedNames[0] != "e2e-sas-"+suffix {
+		t.Errorf("captured names = %v, want [%q]", capturedNames, "e2e-sas-"+suffix)
+	}
+
+	if err := tok.Teardown(t.Context()); err != nil {
+		t.Fatalf("second teardown: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("after second teardown, deleteFn invoked %d times, want still 1", got)
+	}
+}
+
+// TestPairToken_TeardownErrorOnSASOnly asserts that a deleteFn error
+// on the SAS-only Teardown path is wrapped, replayed identically on
+// subsequent calls, and that the underlying sentinel is recoverable
+// via errors.Is — matching the production idempotency contract for
+// the both-hycos path.
+func TestPairToken_TeardownErrorOnSASOnly(t *testing.T) {
+	const suffix = "deadbabe5678"
+	sentinel := errors.New("sas-only boom")
+	var calls atomic.Int32
+	tok := &PairToken{
+		suffix: suffix,
+		result: &Result{
+			EntraHycoName: "",
+			SASHycoName:   "e2e-sas-" + suffix,
+		},
+		deleteFn: func(ctx context.Context, name string) error {
+			calls.Add(1)
+			return sentinel
+		},
+	}
+
+	err1 := tok.Teardown(t.Context())
+	if err1 == nil || !errors.Is(err1, sentinel) {
+		t.Fatalf("first teardown err = %v; want errors.Is(sentinel)", err1)
+	}
+	err2 := tok.Teardown(t.Context())
+	if err2 != err1 {
+		t.Errorf("second teardown err = %v; want same value as first (%v)", err2, err1)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("deleteFn invoked %d times across 2 teardowns, want 1 (SkipEntra)", got)
+	}
+}
+
 // TestPairToken_TeardownHonoursCallerDeadline verifies that a
 // deadline set on the caller's context is preserved across the
 // cancellation strip in Teardown. Specifically: a deadline shorter

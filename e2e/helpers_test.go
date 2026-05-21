@@ -119,7 +119,11 @@ func requireDedicatedHyco(t testing.TB) *relayEnv {
 	}
 
 	entra, sas := tok.HycoNames()
-	t.Logf("provisioned dedicated hyco pair: %s, %s", entra, sas)
+	if entra == "" {
+		t.Logf("provisioned dedicated hyco: %s (entra skipped, SAS-only mode)", sas)
+	} else {
+		t.Logf("provisioned dedicated hyco pair: %s, %s", entra, sas)
+	}
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), hycoTeardownTimeout)
@@ -128,7 +132,11 @@ func requireDedicatedHyco(t testing.TB) *relayEnv {
 			// Log only — the janitor will reap anything we miss,
 			// and failing the test on cleanup errors would mask
 			// the actual test outcome.
-			t.Logf("teardown dedicated hyco pair %s/%s: %v", entra, sas, err)
+			if entra == "" {
+				t.Logf("teardown dedicated hyco %s: %v", sas, err)
+			} else {
+				t.Logf("teardown dedicated hyco pair %s/%s: %v", entra, sas, err)
+			}
 		}
 	})
 
@@ -202,7 +210,11 @@ func leaseSharedHyco(tb testing.TB) *relayEnv {
 		tb.Fatalf("provision shared bench hyco pair: %v", err)
 	}
 	entra, sas := tok.HycoNames()
-	tb.Logf("leased shared bench hyco pair: %s, %s", entra, sas)
+	if entra == "" {
+		tb.Logf("leased shared bench hyco: %s (entra skipped, SAS-only mode)", sas)
+	} else {
+		tb.Logf("leased shared bench hyco pair: %s, %s", entra, sas)
+	}
 	benchLeaseTok = tok
 	benchLeaseEnv = resultToEnv(tok.Result())
 	return benchLeaseEnv
@@ -227,7 +239,11 @@ func drainBenchLease() {
 	benchLeaseTok = nil
 	entra, sas := tok.HycoNames()
 	if err := tok.Teardown(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco pair %s/%s: %v\n", entra, sas, err)
+		if entra == "" {
+			fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco %s: %v\n", sas, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco pair %s/%s: %v\n", entra, sas, err)
+		}
 	}
 }
 
@@ -294,10 +310,17 @@ func availableAuths(t testing.TB, env *relayEnv) []authConfig {
 // E2E_AUTH=entra, ["sas"] when E2E_AUTH=sas. Any other value fails
 // the caller.
 //
-// The shared Provider always provisions both an Entra hyco and a SAS
-// hyco per call, so there is no "auth method is unavailable" branch
-// here — every name returned is guaranteed buildable by authFromEnv
-// once a fresh env is in hand.
+// The shared Provider provisions the SAS hyco unconditionally and
+// the entra hyco unless Config.SkipEntra is true. TestMain enables
+// SkipEntra only when E2E_AUTH=="sas" or when E2E_AUTH is unset
+// (LookupEnv reports !isSet) and resolved.Local.SASOnly is true —
+// both paths produce a filter that excludes "entra" from the names
+// returned here (E2E_AUTH=="sas" directly, or the upstream setenv
+// block forcing E2E_AUTH=sas in the unset+SASOnly case). When
+// "entra" is in the returned names the entra hyco is always
+// provisioned and every name is guaranteed buildable by authFromEnv
+// once a fresh env is in hand — there is no "auth method is
+// unavailable" branch.
 func availableAuthNames(t testing.TB) []string {
 	t.Helper()
 	filter := os.Getenv("E2E_AUTH")
@@ -316,8 +339,10 @@ func availableAuthNames(t testing.TB) []string {
 // freshly-provisioned env. Used by azureBackend.Setup to derive the
 // concrete auth (hyco + optional SAS creds) AFTER each Setup call
 // provisions its own hyco pair. The env is assumed to have been
-// produced by Provider.Provision (i.e. both entra and SAS slots are
-// populated); a missing field will fail the test rather than skip.
+// produced by Provider.Provision with the slot for `name` populated
+// (SAS is always populated; entra is populated unless
+// Config.SkipEntra was true at Provision time); a missing field
+// will fail the test rather than skip.
 func authFromEnv(t testing.TB, env *relayEnv, name string) authConfig {
 	t.Helper()
 	switch name {

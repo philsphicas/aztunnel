@@ -63,8 +63,24 @@ fmt: ## Format markdown and YAML with prettier
 fmt-check: ## Check formatting (same as CI)
 	npx --yes prettier --check .
 
+# `go test` buffers each test binary's combined stdout+stderr until
+# that binary exits when multiple packages share one invocation,
+# so `-v` does NOT stream output across packages. The `./e2e/` run
+# is the slow one (~14-17 min on Azure); keep these as separate
+# invocations so each binary's output streams live. Both
+# invocations run unconditionally and the recipe exits with the
+# combined non-zero status if either fails — mirroring the
+# multi-package `go test` semantics so a failure in azrelay does
+# not mask one in ./e2e/ (see also the e2e-docker target's
+# status-capture pattern). The 20 m per-invocation timeout is
+# generous against the ~14-17 min Azure run and is independent of
+# the GHA job-level `timeout-minutes` (which is the binding
+# constraint on CI). See golang/go#24929.
 e2e: build ## Run end-to-end tests (configure once via `make e2e-setup`)
-	go test -tags=e2e -timeout=40m -v ./e2e/azrelay/ ./e2e/
+	@status=0; \
+	go test -tags=e2e -timeout=20m -v ./e2e/azrelay/ || status=$$?; \
+	go test -tags=e2e -timeout=20m -v ./e2e/ || status=$$?; \
+	exit $$status
 
 e2e-docker: ## Run container-to-container e2e tests
 	@status=0; \

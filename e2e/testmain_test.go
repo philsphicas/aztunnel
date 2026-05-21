@@ -134,11 +134,34 @@ func testMain(m *testing.M) int {
 
 	conc := readConcurrencyEnv()
 
+	// SAS-only mode signal: when the test process will only exercise
+	// SAS, skip provisioning an entra hyco. E2E_AUTH is authoritative
+	// — an explicit E2E_AUTH=entra (e.g. the user was granted the
+	// role but hasn't refreshed .local.json yet) keeps entra
+	// provisioning enabled even when SASOnly is persisted. When
+	// E2E_AUTH is unset, fall back to resolved.Local.SASOnly so a
+	// future contributor deleting the setenv block above does not
+	// silently regress SkipEntra. (When SASOnly is true and E2E_AUTH
+	// was unset on entry, the setenv block above has already forced
+	// E2E_AUTH=sas, so this fallback only fires when both signals
+	// would have produced the same answer.)
+	skipEntra := false
+	v, isSet := os.LookupEnv("E2E_AUTH")
+	switch {
+	case isSet && v == "sas":
+		skipEntra = true
+	case !isSet:
+		if resolved.Local != nil && resolved.Local.SASOnly {
+			skipEntra = true
+		}
+	}
+
 	cfg := azrelay.Config{
 		SubscriptionID: resolved.Subscription,
 		ResourceGroup:  resolved.ResourceGroup,
 		Namespace:      resolved.RelayName,
 		Concurrency:    conc,
+		SkipEntra:      skipEntra,
 	}
 
 	// Acquire the namespace SAS rule keys. The rules
