@@ -4,19 +4,32 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor vulncheck bench bench-compare help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor vulncheck bench check-installable help
 
 .DEFAULT_GOAL := help
 
 build: ## Build the aztunnel binary
 	go build $(GOFLAGS) $(LDFLAGS) -o bin/aztunnel ./cmd/aztunnel
 
+check-installable: ## Assert root go.mod has no replace directives (required for `go install`)
+	@if grep -nE '^replace[[:space:]]|^replace[[:space:]]*\(' go.mod >/dev/null 2>&1; then \
+		echo "error: root go.mod contains replace directive(s):" >&2; \
+		grep -nE '^replace[[:space:]]|^replace[[:space:]]*\(' go.mod >&2; \
+		echo >&2; \
+		echo "  \`go install github.com/philsphicas/aztunnel/cmd/aztunnel@<sha>\` will reject this module." >&2; \
+		echo "  Move test-only imports of in-repo siblings into the e2e/ module instead." >&2; \
+		exit 1; \
+	fi
+	@echo "ok: root go.mod has no replace directives"
+
 test: ## Run tests (with -race if CGO is available)
 ifneq ($(RACE),)
 	go test -race ./...
+	cd e2e && go test -race ./...
 else
 	@echo "warning: CGO disabled (no C compiler), running tests without -race"
 	go test ./...
+	cd e2e && go test ./...
 endif
 
 cover: ## Run tests with coverage report
@@ -28,10 +41,12 @@ else
 endif
 	go tool cover -func=coverage.txt
 
-lint: ## Run linters (go vet + golangci-lint)
+lint: ## Run linters (go vet + golangci-lint) across root and e2e modules
 	go vet ./...
+	cd e2e && go vet ./...
 	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run ./...; \
+		golangci-lint run ./... && \
+		(cd e2e && golangci-lint run ./...); \
 	else \
 		echo "warning: golangci-lint not found, skipping (install: https://golangci-lint.run/welcome/install/)"; \
 	fi
@@ -77,13 +92,15 @@ fmt-check: ## Check formatting (same as CI)
 # the GHA job-level `timeout-minutes` (which is the binding
 # constraint on CI). See golang/go#24929.
 e2e-mock: ## Run e2e scenarios against the in-process mock relay
-	go test -tags=e2e -timeout=20m -v ./e2e/backends/mock/...
+	cd e2e && go test -tags=e2e -timeout=20m -v ./backends/mock/...
 
 e2e-azure: build ## Run e2e scenarios against a real Azure Relay namespace (configure via `make e2e-setup`)
-	@status=0; \
-	go test -tags=e2e -timeout=20m -v ./e2e/azrelay/ || status=$$?; \
-	go test -tags=e2e -timeout=20m -v ./e2e/backends/azure/... || status=$$?; \
-	exit $$status
+	@cd e2e && { \
+		status=0; \
+		go test -tags=e2e -timeout=20m -v ./azrelay/ || status=$$?; \
+		go test -tags=e2e -timeout=20m -v ./backends/azure/... || status=$$?; \
+		exit $$status; \
+	}
 
 # Run mock and Azure backends; safe to run with `make -j2` because
 # the two targets share no infra (mock runs entirely in-process,
@@ -127,19 +144,12 @@ e2e-janitor: ## Delete orphaned per-invocation hybrid connections older than 4h
 
 vulncheck: ## Check Go dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	cd e2e && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
-	go test -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
+	cd e2e && go test -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
 		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
-		./e2e/backends/mock/...
-
-bench-compare: ## Compare e2e benchmarks across two refs: BASE=<sha> [HEAD=<sha>]
-	@if [ -z "$(BASE)" ]; then \
-		echo "usage: make bench-compare BASE=<sha> [HEAD=<sha>] [BACKEND=mock|azure] [COUNT=N] [BENCHTIME=...]" >&2; \
-		exit 2; \
-	fi
-	BACKEND='$(or $(BACKEND),mock)' COUNT='$(or $(COUNT),5)' BENCHTIME='$(BENCHTIME)' \
-		scripts/bench-compare.sh '$(BASE)' '$(HEAD)'
+		./backends/mock/...
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \

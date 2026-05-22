@@ -9,7 +9,9 @@
 // daily cleanup workflow.
 //
 // Per-invocation hyco provisioning lives in github.com/philsphicas/aztunnel/e2e/azrelay
-// in the parent module, imported here via go.work + replace.
+// in the sibling e2e module. The `replace` directive below keeps the
+// module buildable outside workspace mode (GOWORK=off); go.work is
+// used for the workspace-development experience.
 module github.com/philsphicas/aztunnel/e2e/infra
 
 go 1.26.0
@@ -23,7 +25,7 @@ require (
 	github.com/alecthomas/kong v1.15.0
 	github.com/google/go-github/v86 v86.0.0
 	github.com/google/uuid v1.6.0
-	github.com/philsphicas/aztunnel v0.0.0
+	github.com/philsphicas/aztunnel/e2e v0.0.0
 	golang.org/x/crypto v0.52.0
 )
 
@@ -34,9 +36,9 @@ require (
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
-	golang.org/x/net v0.54.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 )
 
-replace github.com/philsphicas/aztunnel => ../..
+replace github.com/philsphicas/aztunnel/e2e => ..

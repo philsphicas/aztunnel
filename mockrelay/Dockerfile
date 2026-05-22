@@ -12,11 +12,15 @@ ARG CGO_ENABLED=0
 FROM ${BUILDER_IMAGE} AS builder
 ARG CGO_ENABLED
 WORKDIR /src
-# Copy the workspace + both modules so module resolution works.
+# Pre-stage the workspace file and every workspace member's go.mod /
+# go.sum so `go mod download` can resolve the full module graph before
+# the rest of the source tree is copied. Order matches go.work's
+# `use` directive (., ./e2e, ./e2e/infra, ./mockrelay).
 COPY go.work ./
 COPY go.mod go.sum ./
-COPY mockrelay/go.mod mockrelay/go.sum ./mockrelay/
+COPY e2e/go.mod e2e/go.sum ./e2e/
 COPY e2e/infra/go.mod e2e/infra/go.sum ./e2e/infra/
+COPY mockrelay/go.mod mockrelay/go.sum ./mockrelay/
 RUN go mod download
 COPY . .
 ARG VERSION=dev
