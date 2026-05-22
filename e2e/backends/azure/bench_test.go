@@ -18,8 +18,14 @@ import (
 // Only one auth method is exercised — whichever availableAuthNames
 // returns first — to keep the run time bounded. Run with E2E_AUTH=sas
 // or E2E_AUTH=entra to pin the method, which is important for
-// benchstat name-matching across BASE and HEAD invocations of
-// scripts/bench-compare.sh.
+// benchstat name-matching across BASE and HEAD invocations of the
+// benchmark workflow. To exercise these from the repo root:
+//
+//   cd e2e && go test -tags=e2e -run='^$' -bench=. -benchmem \
+//     -count=1 -timeout=60m ./backends/azure/...
+//
+// (`make bench` runs only the mock-backend benchmarks; the Azure
+// benchmarks require a real namespace and the invocation above.)
 //
 // All sub-benches share a single process-leased hyco pair
 // (leaseSharedHyco, drained at TestMain exit). This is the only
