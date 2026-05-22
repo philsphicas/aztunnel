@@ -41,6 +41,9 @@ jobs:
         run: go test -race ./...
         working-directory: mockrelay
 
+      - name: E2E mock-backend scenarios
+        run: make e2e-mock
+
       - name: Coverage summary
         run: go tool cover -func=coverage.txt
 

@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/philsphicas/aztunnel/internal/relay"
 )
@@ -370,4 +376,125 @@ func TestNewLoggerWritesToStderr(t *testing.T) {
 	if !strings.Contains(output, "test message") {
 		t.Errorf("expected logger output to contain %q, got %q", "test message", output)
 	}
+}
+
+// TestCLI_MissingRequiredArgs verifies the aztunnel CLI emits a
+// clean error (not a usage dump) when a required argument is
+// missing. Runs the freshly-built binary as a subprocess and
+// captures stderr; the assertion is on the error shape, not on the
+// exact message wording. Pure CLI parsing path — no network.
+func TestCLI_MissingRequiredArgs(t *testing.T) {
+	binary := buildAztunnelForTest(t)
+
+	// Strip AZTUNNEL_* from env so resolveAuth doesn't pick up
+	// values from a developer shell.
+	var cleanEnv []string
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "AZTUNNEL_") {
+			cleanEnv = append(cleanEnv, e)
+		}
+	}
+
+	runClean := func(t *testing.T, args ...string) string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec // test-controlled binary path
+		cmd.Env = cleanEnv
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		cmd.Stdout = io.Discard
+		err := cmd.Run()
+		if err == nil {
+			t.Fatal("expected non-zero exit")
+		}
+		return stderr.String()
+	}
+
+	t.Run("listener_no_relay", func(t *testing.T) {
+		output := runClean(t, "relay-listener", "--hyco", "some-hyco")
+		if !strings.Contains(output, "relay") {
+			t.Errorf("expected error mentioning 'relay', got: %s", output)
+		}
+	})
+
+	t.Run("sender_no_relay", func(t *testing.T) {
+		output := runClean(t, "relay-sender", "port-forward", "127.0.0.1:22")
+		if !strings.Contains(output, "relay") && !strings.Contains(output, "hyco") {
+			t.Errorf("expected error mentioning 'relay' or 'hyco', got: %s", output)
+		}
+	})
+
+	t.Run("sender_no_target", func(t *testing.T) {
+		output := runClean(t, "relay-sender", "connect")
+		if !strings.Contains(output, "arg") && !strings.Contains(output, "expected") {
+			t.Errorf("expected error about missing argument, got: %s", output)
+		}
+	})
+}
+
+// TestCLI_BadRelayName verifies the aztunnel CLI exits cleanly with
+// a recognisable error when given a relay name that doesn't
+// resolve. Uses a TLD reserved by RFC 2606 (.invalid) so DNS lookup
+// fails NXDOMAIN — no real network round-trip, no Azure setup.
+func TestCLI_BadRelayName(t *testing.T) {
+	binary := buildAztunnelForTest(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binary, //nolint:gosec // test-controlled binary path
+		"relay-listener",
+		"--relay", "nonexistent.relay.invalid",
+		"--hyco", "some-hyco",
+		"--log-level", "debug",
+	)
+	cmd.Env = append(os.Environ(),
+		"AZTUNNEL_KEY_NAME=test-key-name",
+		// Valid base64 placeholder so SAS code path doesn't reject
+		// at parse time; the relay-name DNS failure is the
+		// observable error.
+		"AZTUNNEL_KEY=dGVzdGtleQ==",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = io.Discard
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected aztunnel to exit non-zero on bad relay name")
+	}
+	logs := stderr.String()
+	// The listener subprocess logs "control channel disconnected"
+	// after the dial fails; that's the operator-visible signal
+	// for a bad-relay-name failure. We also tolerate "control
+	// channel" error log lines that contain a DNS resolution
+	// failure (lookup *.invalid: no such host).
+	if !strings.Contains(logs, "control channel") && !strings.Contains(logs, "no such host") &&
+		!strings.Contains(logs, "lookup") {
+		t.Errorf("expected control-channel or DNS error in stderr; got:\n%s", logs)
+	}
+	// Redaction contract: no raw sb-hc-token in stderr.
+	stripped := strings.ReplaceAll(logs, "sb-hc-token=REDACTED", "")
+	if strings.Contains(stripped, "sb-hc-token=") {
+		t.Error("stderr contains non-redacted sb-hc-token")
+	}
+}
+
+// buildAztunnelForTest builds cmd/aztunnel into a temp directory
+// and returns the binary path. Per-test build keeps the
+// no-e2e-tag main_test.go independent of the e2e helpers' shared
+// build cache.
+func buildAztunnelForTest(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	name := "aztunnel"
+	if runtime.GOOS == "windows" {
+		name = "aztunnel.exe"
+	}
+	binary := filepath.Join(dir, name)
+	cmd := exec.Command("go", "build", "-o", binary, ".") //nolint:gosec // test-controlled args
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build aztunnel: %v\n%s", err, out)
+	}
+	return binary
 }
