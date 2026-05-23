@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -15,9 +18,24 @@ import (
 // expressed as testing.T so CI fails when wall time exceeds the
 // per-backend threshold.
 //
-// Two scenarios assert against ConnectLatencyThreshold; the third
-// (ShortSession_Serial) is observation-only — it logs per-
-// iteration timings but does not assert a threshold.
+// Two scenarios assert per-iteration time against
+// ConnectLatencyThreshold; ShortSession_Serial is observation-only.
+// The 12 parameterized echo-workload scenarios that follow
+// (Serial|Parallel × ConnPerRequest|ConnReused|ConnPrewarmed ×
+// _PortForward|_SOCKS5), plus the single _MultiTarget variant that
+// exercises the NumTargets axis, emit a per-round
+// workload-summary log line for trend analysis; each round's wall
+// time is strictly bounded by roundBudget(threshold, w) because
+// per-conn dial+I/O deadlines are clamped to the remaining round
+// budget. See the WorkloadShape doc block below for details.
+//
+// The summary line is tagged with `scenario=<t.Name()>` so each
+// line is self-identifying when copied out of test output for
+// off-line aggregation. The subtest path is the slash-joined chain
+// of Backend.Axes() values followed by the scenario subtest name
+// (the string passed to t.Run, not the Go function name — e.g.
+// `TestE2E_Azure/entra/Parallel_ConnPrewarmedEcho_SOCKS5`); axis
+// NAMES are not encoded — only the per-cell VALUES.
 //
 // Scenarios run sequentially. Each builds its own topology via
 // b.Setup so the timing measurement is dominated by the per-
@@ -31,6 +49,20 @@ func RunPerformanceScenarios(t *testing.T, b Backend) {
 		{"ConnectLatency_Serial_PortForward", ScenarioConnectLatency_Serial_PortForward},
 		{"ConnectLatency_Serial_SOCKS5", ScenarioConnectLatency_Serial_SOCKS5},
 		{"ShortSession_Serial", ScenarioShortSession_Serial},
+		// Parameterized echo-workload scenarios — see WorkloadShape doc below.
+		{"Serial_ConnPerRequestEcho_PortForward", ScenarioSerial_ConnPerRequestEcho_PortForward},
+		{"Serial_ConnReusedEcho_PortForward", ScenarioSerial_ConnReusedEcho_PortForward},
+		{"Serial_ConnPrewarmedEcho_PortForward", ScenarioSerial_ConnPrewarmedEcho_PortForward},
+		{"Parallel_ConnPerRequestEcho_PortForward", ScenarioParallel_ConnPerRequestEcho_PortForward},
+		{"Parallel_ConnReusedEcho_PortForward", ScenarioParallel_ConnReusedEcho_PortForward},
+		{"Parallel_ConnPrewarmedEcho_PortForward", ScenarioParallel_ConnPrewarmedEcho_PortForward},
+		{"Serial_ConnPerRequestEcho_SOCKS5", ScenarioSerial_ConnPerRequestEcho_SOCKS5},
+		{"Serial_ConnReusedEcho_SOCKS5", ScenarioSerial_ConnReusedEcho_SOCKS5},
+		{"Serial_ConnPrewarmedEcho_SOCKS5", ScenarioSerial_ConnPrewarmedEcho_SOCKS5},
+		{"Parallel_ConnPerRequestEcho_SOCKS5", ScenarioParallel_ConnPerRequestEcho_SOCKS5},
+		{"Parallel_ConnReusedEcho_SOCKS5", ScenarioParallel_ConnReusedEcho_SOCKS5},
+		{"Parallel_ConnPrewarmedEcho_SOCKS5", ScenarioParallel_ConnPrewarmedEcho_SOCKS5},
+		{"Parallel_ConnPrewarmedEcho_SOCKS5_MultiTarget", ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -249,4 +281,552 @@ func timeOneConnect(senderAddr, target string, mode SenderMode, payload, buf []b
 		return time.Since(start), err
 	}
 	return time.Since(start), nil
+}
+
+// ============================================================================
+// Parameterized echo-workload scenarios.
+//
+// These complement the threshold-asserting smoke scenarios above by
+// capturing how representative application workload shapes (e.g. "15
+// serial REST-style calls, fresh conn each time", "5 concurrent conns
+// each doing 6 sequential round-trips", "5 pre-warmed conns sustained
+// throughput") behave on a backend. Each scenario emits a single
+// `workload-summary` log line so the same code can be diffed across
+// backends (mock / westus2 / AUE / India / …) to characterize the
+// cost of the Azure Relay rendezvous and bridged data path.
+//
+// Three connection lifecycles, two concurrency modes, two sender modes:
+//
+//   ConnPerRequest   each measured request gets a fresh conn (cold path)
+//   ConnReused       one conn handles many requests; cold path
+//                    AND warm path are measured in the same run
+//   ConnPrewarmed    one warm-up request per conn is discarded; only
+//                    the steady-state distribution is reported
+//
+//   Serial           one conn in flight at a time
+//   Parallel         N conns in flight simultaneously
+//
+//   _PortForward     sender = `aztunnel relay-sender port-forward`
+//   _SOCKS5          sender = `aztunnel relay-sender socks5-proxy`
+//
+// Scenarios do not assert per-request latency thresholds; the
+// workload-summary line carries the per-shape distribution for
+// trend / regression detection. Each round's wall time is strictly
+// bounded by roundBudget(threshold, w) — per-conn dial+I/O deadlines
+// are clamped to the remaining round budget, so a hung or slow
+// connection cannot extend the round beyond its budget. CI failure
+// surfaces when the workload itself fails (connection refused,
+// mismatched echo, listener-side rejection, etc.) or when a conn
+// hits the clamped deadline before completing.
+// ============================================================================
+
+// WorkloadShape parameterizes a single echo-workload run.
+//
+// The (TotalConns, Concurrency, RequestsPerConn) triple defines the
+// shape; WarmupRequests determines how many of each conn's leading
+// requests are discarded from the reported stats.
+//
+//	cold-path scenarios (ConnPerRequest, ConnReused):
+//	  WarmupRequests = 0 — first request times count as ttfw/ttc
+//	steady-state scenarios (ConnPrewarmed):
+//	  WarmupRequests = 1 — first request is discarded; the rest are
+//	  reported as warm_min/mean/p50/p95/p99/max
+type WorkloadShape struct {
+	TotalConns      int
+	Concurrency     int
+	RequestsPerConn int // total requests per conn, INCLUDING warmup
+	WarmupRequests  int // first N requests per conn discarded from stats
+	ReqSize         int
+	RespSize        int
+	// NumTargets is the number of downstream echo servers the
+	// workload fans out to. Connections are assigned to targets
+	// round-robin by conn index. Defaults to 1.
+	//
+	// Only meaningful in ModeSOCKS5 — the SOCKS5 client picks the
+	// target per connection, and the listener allows any address
+	// in the configured list. In ModePortForward the listener has a
+	// single fixed Target on SetupOptions, so NumTargets > 1 is
+	// rejected by validate(); fan-out under PortForward needs a
+	// separate axis (NumListeners) and is out of scope here.
+	NumTargets   int
+	Mode         SenderMode
+	RepeatRounds int
+}
+
+func runWorkload(t *testing.T, b Backend, w WorkloadShape) {
+	t.Helper()
+	AssertNoLeaks(t)
+	if w.Concurrency <= 0 {
+		w.Concurrency = 1
+	}
+	if w.RepeatRounds <= 0 {
+		w.RepeatRounds = 1
+	}
+	if w.NumTargets <= 0 {
+		w.NumTargets = 1
+	}
+	if err := w.validate(); err != nil {
+		t.Fatalf("invalid WorkloadShape: %v", err)
+	}
+	addrs := make([]string, w.NumTargets)
+	for i := range addrs {
+		addrs[i] = StartPlainEcho(t).Addr()
+	}
+	opts := SetupOptions{NumListeners: 1, SenderMode: w.Mode, AllowedTargets: addrs}
+	if w.Mode == ModePortForward {
+		// validate() ensures NumTargets == 1 in this mode.
+		opts.Target = addrs[0]
+	}
+	tun := b.Setup(t, opts)
+	threshold := b.ConnectLatencyThreshold()
+
+	for r := 0; r < w.RepeatRounds; r++ {
+		if w.RepeatRounds > 1 {
+			t.Logf("--- round %d/%d ---", r+1, w.RepeatRounds)
+		}
+		runRound(t, tun, addrs, threshold, w)
+	}
+}
+
+// validate checks the workload-shape invariants the runner relies on.
+// Called from runWorkload AFTER the zero-value defaults for
+// Concurrency, RepeatRounds, and NumTargets have been filled in.
+func (w WorkloadShape) validate() error {
+	if w.TotalConns < 1 {
+		return fmt.Errorf("TotalConns must be >= 1, got %d", w.TotalConns)
+	}
+	if w.Concurrency > w.TotalConns {
+		return fmt.Errorf("WorkloadShape.Concurrency (%d) must be <= TotalConns (%d): more parallel slots than connections is a misconfiguration",
+			w.Concurrency, w.TotalConns)
+	}
+	if w.RequestsPerConn < 1 {
+		return fmt.Errorf("RequestsPerConn must be >= 1, got %d", w.RequestsPerConn)
+	}
+	if w.WarmupRequests < 0 {
+		return fmt.Errorf("WarmupRequests must be >= 0, got %d", w.WarmupRequests)
+	}
+	if w.WarmupRequests >= w.RequestsPerConn {
+		return fmt.Errorf("WarmupRequests (%d) must be < RequestsPerConn (%d) to leave at least one measured request",
+			w.WarmupRequests, w.RequestsPerConn)
+	}
+	if w.ReqSize < 1 || w.RespSize < 1 {
+		return fmt.Errorf("ReqSize (%d) and RespSize (%d) must both be >= 1", w.ReqSize, w.RespSize)
+	}
+	if w.ReqSize != w.RespSize {
+		return fmt.Errorf("ReqSize (%d) and RespSize (%d) must match: the workload is an echo, so the response is the request",
+			w.ReqSize, w.RespSize)
+	}
+	if w.NumTargets < 1 {
+		return fmt.Errorf("NumTargets must be >= 1, got %d", w.NumTargets)
+	}
+	if w.NumTargets > 1 && w.Mode == ModePortForward {
+		return fmt.Errorf("NumTargets > 1 is only supported with ModeSOCKS5; ModePortForward has a single fixed Target (got NumTargets=%d)", w.NumTargets)
+	}
+	switch w.Mode {
+	case ModePortForward, ModeSOCKS5:
+	default:
+		return fmt.Errorf("mode must be ModePortForward or ModeSOCKS5, got %v", w.Mode)
+	}
+	return nil
+}
+
+// connResult holds the per-conn timings runOneConn returns.
+//
+// If WarmupRequests == 0, FirstReq is the cold-path measurement
+// (dial → write[0] → read[0]) and Warm holds the elapsed times of
+// requests 1..N-1 (each measured from write to read of that request).
+//
+// If WarmupRequests > 0, FirstReq is zero-valued and Warm holds the
+// elapsed times of requests WarmupRequests..N-1.
+type connResult struct {
+	FirstReq firstReqTiming
+	Warm     []time.Duration
+	Err      error
+}
+
+type firstReqTiming struct {
+	TTFW time.Duration // dial → first write complete (request transmitted to local sender; NOT the conventional "time to first byte received")
+	TTC  time.Duration // dial → first read complete (full request → response round-trip including dial)
+}
+
+func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold time.Duration, w WorkloadShape) {
+	results := make([]connResult, w.TotalConns)
+
+	sem := make(chan struct{}, w.Concurrency)
+	var wg sync.WaitGroup
+	budget := roundBudget(threshold, w)
+	start := time.Now()
+	roundDeadline := start.Add(budget)
+
+	for i := 0; i < w.TotalConns; i++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			target := addrs[i%len(addrs)]
+			results[i] = runOneConn(tun.SenderAddr, target, w, roundDeadline)
+			r := results[i]
+			if r.Err != nil {
+				t.Logf("conn[%d] FAILED: %v", i, r.Err)
+				return
+			}
+			switch {
+			case w.WarmupRequests > 0 && len(r.Warm) > 0:
+				wmin, wmax, wmean := minMaxMean(r.Warm)
+				t.Logf("conn[%d] warm_n=%d warm_min=%v warm_mean=%v warm_max=%v",
+					i, len(r.Warm), wmin, wmean, wmax)
+			case len(r.Warm) > 0:
+				wmin, wmax, wmean := minMaxMean(r.Warm)
+				t.Logf("conn[%d] first_req_ttfw=%v first_req_ttc=%v warm_n=%d warm_min=%v warm_mean=%v warm_max=%v",
+					i, r.FirstReq.TTFW, r.FirstReq.TTC, len(r.Warm), wmin, wmean, wmax)
+			default:
+				t.Logf("conn[%d] ttfw=%v ttc=%v",
+					i, r.FirstReq.TTFW, r.FirstReq.TTC)
+			}
+		}(i)
+	}
+	wg.Wait()
+	wall := time.Since(start)
+
+	var failures int
+	var coldTTFW, coldTTC, warmAll []time.Duration
+	for _, r := range results {
+		if r.Err != nil {
+			failures++
+			continue
+		}
+		if w.WarmupRequests == 0 {
+			coldTTFW = append(coldTTFW, r.FirstReq.TTFW)
+			coldTTC = append(coldTTC, r.FirstReq.TTC)
+		}
+		warmAll = append(warmAll, r.Warm...)
+	}
+	if failures > 0 {
+		t.Errorf("%d/%d connections failed", failures, w.TotalConns)
+	}
+
+	var parts []string
+	// Tag the summary line with the full subtest path so the line is
+	// self-identifying when copied out of test output for off-line
+	// aggregation. The subtest path is the slash-joined chain of
+	// Backend.Axes() values followed by the scenario subtest name
+	// (the string passed to t.Run, not the Go function name — e.g.
+	// `TestE2E_Azure/entra/Parallel_ConnPrewarmedEcho_SOCKS5`).
+	parts = append(parts, "workload-summary", fmt.Sprintf("scenario=%s", t.Name()))
+
+	if len(coldTTFW) > 0 {
+		parts = append(parts,
+			fmtDist("ttfw", coldTTFW),
+			fmtDist("ttc", coldTTC),
+		)
+	}
+	if len(warmAll) > 0 {
+		parts = append(parts, fmtDist("warm", warmAll))
+	}
+	parts = append(parts,
+		fmt.Sprintf("wall=%v", wall),
+		fmt.Sprintf("budget=%v", budget),
+		fmt.Sprintf("cold_n=%d", len(coldTTFW)),
+		fmt.Sprintf("warm_n=%d", len(warmAll)),
+		fmt.Sprintf("num_targets=%d", len(addrs)),
+		fmt.Sprintf("success=%d/%d", w.TotalConns-failures, w.TotalConns),
+	)
+	t.Logf("%s", strings.Join(parts, " "))
+
+	// Go's net deadlines are best-effort: an I/O op can return a few
+	// hundred milliseconds after its deadline under scheduler / OS
+	// poll jitter, so allow a small epsilon over the budget before
+	// failing the sanity assertion.
+	const sanityEpsilon = 2 * time.Second
+	if wall > budget+sanityEpsilon {
+		t.Fatalf("sanity: round wall=%v exceeded budget=%v + epsilon=%v despite per-conn deadline clamping (shape: %+v)", wall, budget, sanityEpsilon, w)
+	}
+}
+
+// roundBudget returns the per-round wall-time ceiling for shape w on
+// a backend with the given per-conn connect-latency threshold. The
+// formula models per-conn cost as `threshold` (cold path: dial +
+// rendezvous) plus `RequestsPerConn × 500 ms` (warm path: pessimistic
+// upper bound on RTT for cross-region links), multiplied by the
+// serial depth (TotalConns / Concurrency rounded up), with a 2×
+// safety factor and a 60 s floor for trivial shapes. Round wall time
+// is bounded by this budget because per-conn dial+I/O deadlines in
+// runOneConn are clamped to the remaining round budget; the post-hoc
+// check in runRound is a sanity assertion.
+func roundBudget(threshold time.Duration, w WorkloadShape) time.Duration {
+	serialDepth := (w.TotalConns + w.Concurrency - 1) / w.Concurrency
+	perConn := threshold + time.Duration(w.RequestsPerConn)*500*time.Millisecond
+	budget := time.Duration(serialDepth) * perConn * 2
+	if budget < 60*time.Second {
+		budget = 60 * time.Second
+	}
+	return budget
+}
+
+// fmtDist returns a space-joined "<label>_<stat>=<v>" sequence for a
+// distribution. Includes p50/p95/p99 only when the sample is large
+// enough for each to be meaningful (10/20/100 samples respectively).
+func fmtDist(label string, ds []time.Duration) string {
+	if len(ds) == 0 {
+		return ""
+	}
+	sorted := make([]time.Duration, len(ds))
+	copy(sorted, ds)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	min, max, mean := minMaxMean(sorted)
+	out := []string{
+		fmt.Sprintf("%s_min=%v", label, min),
+		fmt.Sprintf("%s_mean=%v", label, mean),
+	}
+	if len(sorted) >= 10 {
+		out = append(out, fmt.Sprintf("%s_p50=%v", label, pct(sorted, 0.50)))
+	}
+	if len(sorted) >= 20 {
+		out = append(out, fmt.Sprintf("%s_p95=%v", label, pct(sorted, 0.95)))
+	}
+	if len(sorted) >= 100 {
+		out = append(out, fmt.Sprintf("%s_p99=%v", label, pct(sorted, 0.99)))
+	}
+	out = append(out, fmt.Sprintf("%s_max=%v", label, max))
+	return strings.Join(out, " ")
+}
+
+// pct returns the value at the given percentile (0.0..1.0) from a
+// pre-sorted slice. Uses linear-rank selection (no interpolation);
+// callers should require enough samples for the percentile to be
+// meaningful before calling.
+func pct(sorted []time.Duration, p float64) time.Duration {
+	if len(sorted) == 0 {
+		return 0
+	}
+	idx := int(float64(len(sorted)-1) * p)
+	if idx >= len(sorted) {
+		idx = len(sorted) - 1
+	}
+	return sorted[idx]
+}
+
+func minMaxMean(ds []time.Duration) (min, max, mean time.Duration) {
+	min, max = ds[0], ds[0]
+	var sum time.Duration
+	for _, d := range ds {
+		if d < min {
+			min = d
+		}
+		if d > max {
+			max = d
+		}
+		sum += d
+	}
+	return min, max, sum / time.Duration(len(ds))
+}
+
+// runOneConn dials the sender, runs the workload on the resulting
+// connection, and returns the per-conn timing breakdown. The dial
+// timeout is the smaller of 60 s and the time remaining until
+// roundDeadline; the post-dial connection deadline is the earlier of
+// now+120 s and roundDeadline. If less than minDeadline remains
+// before dialing, the dial is skipped and an error is returned (the
+// floor is only enforced at this pre-dial gate; the clamped
+// deadlines themselves are not floored). This keeps each round's
+// wall time strictly bounded by runRound's roundBudget.
+func runOneConn(senderAddr, target string, w WorkloadShape, roundDeadline time.Time) connResult {
+	const minDeadline = 100 * time.Millisecond
+	if time.Until(roundDeadline) <= minDeadline {
+		return connResult{Err: fmt.Errorf("round budget exhausted before dial")}
+	}
+	dialTimeout := 60 * time.Second
+	if remaining := time.Until(roundDeadline); remaining < dialTimeout {
+		dialTimeout = remaining
+	}
+	dialStart := time.Now()
+	var conn net.Conn
+	var err error
+	switch w.Mode {
+	case ModePortForward:
+		conn, err = net.DialTimeout("tcp", senderAddr, dialTimeout)
+	case ModeSOCKS5:
+		conn, err = DialSOCKS5(senderAddr, target, dialTimeout)
+	default:
+		return connResult{Err: fmt.Errorf("unsupported mode %v", w.Mode)}
+	}
+	if err != nil {
+		return connResult{Err: fmt.Errorf("dial: %w", err)}
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	connDeadline := time.Now().Add(120 * time.Second)
+	if connDeadline.After(roundDeadline) {
+		connDeadline = roundDeadline
+	}
+	if err := conn.SetDeadline(connDeadline); err != nil {
+		return connResult{Err: fmt.Errorf("set deadline: %w", err)}
+	}
+
+	req := make([]byte, w.ReqSize)
+	for i := range req {
+		req[i] = byte(i)
+	}
+	buf := make([]byte, w.RespSize)
+
+	res := connResult{}
+	for i := 0; i < w.RequestsPerConn; i++ {
+		reqStart := time.Now()
+		if err = writeFull(conn, req); err != nil {
+			res.Err = fmt.Errorf("write[%d]: %w", i, err)
+			return res
+		}
+		if i == 0 && w.WarmupRequests == 0 {
+			res.FirstReq.TTFW = time.Since(dialStart)
+		}
+		if _, err = io.ReadFull(conn, buf); err != nil {
+			res.Err = fmt.Errorf("read[%d]: %w", i, err)
+			return res
+		}
+		if !bytes.Equal(buf, req) {
+			res.Err = fmt.Errorf("echo[%d]: payload mismatch", i)
+			return res
+		}
+		elapsed := time.Since(reqStart)
+		switch {
+		case i == 0 && w.WarmupRequests == 0:
+			res.FirstReq.TTC = time.Since(dialStart)
+		case i >= w.WarmupRequests:
+			res.Warm = append(res.Warm, elapsed)
+		}
+	}
+	return res
+}
+
+// ----------------------------------------------------------------------------
+// PortForward scenarios
+// ----------------------------------------------------------------------------
+
+// ScenarioSerial_ConnPerRequestEcho_PortForward dials 15 connections one
+// at a time; each does a single 1 KB → 1 KB echo round-trip and
+// closes. Measures cold-path latency (the dial cost dominates).
+func ScenarioSerial_ConnPerRequestEcho_PortForward(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 15, Concurrency: 1, RequestsPerConn: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModePortForward,
+	})
+}
+
+// ScenarioSerial_ConnReusedEcho_PortForward dials one connection and
+// does 30 sequential 1 KB → 1 KB echo round-trips on it. First-request
+// stats include the dial cost (cold path); the remaining 29 are
+// reported as warm distribution.
+func ScenarioSerial_ConnReusedEcho_PortForward(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 1, Concurrency: 1, RequestsPerConn: 30,
+		ReqSize: 1024, RespSize: 1024, Mode: ModePortForward,
+	})
+}
+
+// ScenarioSerial_ConnPrewarmedEcho_PortForward dials one connection,
+// does one warm-up round-trip (discarded), then 50 measured 1 KB → 1 KB
+// echo round-trips. Reports steady-state distribution only.
+func ScenarioSerial_ConnPrewarmedEcho_PortForward(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 1, Concurrency: 1, RequestsPerConn: 51, WarmupRequests: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModePortForward,
+	})
+}
+
+// ScenarioParallel_ConnPerRequestEcho_PortForward dials 30 connections
+// concurrently, each doing a single 1 KB → 1 KB echo round-trip.
+// Measures cold-path latency under contention.
+func ScenarioParallel_ConnPerRequestEcho_PortForward(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 30, Concurrency: 30, RequestsPerConn: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModePortForward,
+	})
+}
+
+// ScenarioParallel_ConnReusedEcho_PortForward dials 5 connections
+// concurrently; each does 6 sequential 1 KB → 1 KB echo round-trips.
+// Reports cold-path (per-conn first request) and warm path together.
+func ScenarioParallel_ConnReusedEcho_PortForward(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 5, Concurrency: 5, RequestsPerConn: 6,
+		ReqSize: 1024, RespSize: 1024, Mode: ModePortForward,
+	})
+}
+
+// ScenarioParallel_ConnPrewarmedEcho_PortForward dials 5 connections
+// concurrently; each does one warm-up round-trip (discarded) and 20
+// measured 1 KB → 1 KB echo round-trips. 100 total warm samples
+// reported as the steady-state distribution. Closest of the family
+// to a sustained-throughput test.
+func ScenarioParallel_ConnPrewarmedEcho_PortForward(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 5, Concurrency: 5, RequestsPerConn: 21, WarmupRequests: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModePortForward,
+	})
+}
+
+// ----------------------------------------------------------------------------
+// SOCKS5 scenarios (identical workload shapes, SOCKS5 sender)
+// ----------------------------------------------------------------------------
+
+func ScenarioSerial_ConnPerRequestEcho_SOCKS5(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 15, Concurrency: 1, RequestsPerConn: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
+	})
+}
+
+func ScenarioSerial_ConnReusedEcho_SOCKS5(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 1, Concurrency: 1, RequestsPerConn: 30,
+		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
+	})
+}
+
+func ScenarioSerial_ConnPrewarmedEcho_SOCKS5(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 1, Concurrency: 1, RequestsPerConn: 51, WarmupRequests: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
+	})
+}
+
+func ScenarioParallel_ConnPerRequestEcho_SOCKS5(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 30, Concurrency: 30, RequestsPerConn: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
+	})
+}
+
+func ScenarioParallel_ConnReusedEcho_SOCKS5(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 5, Concurrency: 5, RequestsPerConn: 6,
+		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
+	})
+}
+
+func ScenarioParallel_ConnPrewarmedEcho_SOCKS5(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 5, Concurrency: 5, RequestsPerConn: 21, WarmupRequests: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
+	})
+}
+
+// ----------------------------------------------------------------------------
+// Multi-target scenarios (NumTargets > 1; SOCKS5-only by validate())
+// ----------------------------------------------------------------------------
+
+// ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget mirrors
+// ScenarioParallel_ConnPrewarmedEcho_SOCKS5 (5 parallel conns × 21
+// requests, 1 warm-up discarded) but fans out across 4 distinct
+// downstream echo servers — conns are assigned to targets
+// round-robin by index. Exercises the SOCKS5 listener's allow-list
+// fan-out path and the per-target rendezvous behavior under
+// steady-state load. Single observation point for the NumTargets
+// axis; broader sweep is out of scope here.
+func ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 5, Concurrency: 5, RequestsPerConn: 21, WarmupRequests: 1,
+		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
+		NumTargets: 4,
+	})
 }
