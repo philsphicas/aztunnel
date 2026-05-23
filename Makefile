@@ -81,16 +81,19 @@ fmt-check: ## Check formatting (same as CI)
 # `go test` buffers each test binary's combined stdout+stderr until
 # that binary exits when multiple packages share one invocation,
 # so `-v` does NOT stream output across packages. The Azure run is
-# the slow one (~12-15 min); keep these as separate invocations so
-# each binary's output streams live. Each invocation runs
-# unconditionally and the recipe exits with the combined non-zero
-# status if any fails — mirroring the multi-package `go test`
-# semantics so a failure in azrelay does not mask one in
-# ./e2e/backends/azure/ (see also the e2e-docker target's
-# status-capture pattern). The 20 m per-invocation timeout is
-# generous against the ~12-15 min Azure run and is independent of
-# the GHA job-level `timeout-minutes` (which is the binding
-# constraint on CI). See golang/go#24929.
+# the slow one (~18-22 min with the per-shape echo-workload
+# scenarios); keep these as separate invocations so each binary's
+# output streams live. Each invocation runs unconditionally and the
+# recipe exits with the combined non-zero status if any fails —
+# mirroring the multi-package `go test` semantics so a failure in
+# azrelay does not mask one in ./e2e/backends/azure/ (see also the
+# e2e-docker target's status-capture pattern). The 25 m per-
+# invocation timeout for the backend target is set below the 30 m
+# GHA job-level `timeout-minutes` to leave headroom for `go test`
+# to emit its own per-package goroutine dump on hang; the job-level
+# timeout still covers the whole job (checkout, build, azrelay,
+# backend) so the workflow envelope remains the outer cap if the
+# preceding steps consume too much of it. See golang/go#24929.
 e2e-mock: ## Run e2e scenarios against the in-process mock relay
 	cd e2e && go test -tags=e2e -timeout=20m -v ./backends/mock/...
 
@@ -98,7 +101,7 @@ e2e-azure: build ## Run e2e scenarios against a real Azure Relay namespace (conf
 	@cd e2e && { \
 		status=0; \
 		go test -tags=e2e -timeout=20m -v ./azrelay/ || status=$$?; \
-		go test -tags=e2e -timeout=20m -v ./backends/azure/... || status=$$?; \
+		go test -tags=e2e -timeout=25m -v ./backends/azure/... || status=$$?; \
 		exit $$status; \
 	}
 
