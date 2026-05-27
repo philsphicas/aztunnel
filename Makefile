@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor vulncheck bench check-installable help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure vulncheck bench check-installable help
 
 .DEFAULT_GOAL := help
 
@@ -153,6 +153,32 @@ bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
 	cd e2e && go test -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
 		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
 		./backends/mock/...
+
+# Performance characterization scenarios (e2e/scenarios/performance.go).
+# Filters the shared e2e suite down to the performance scenarios via
+# the scenario-name prefix regex so the Core/Topology/Reliability/
+# Observability suites do not run. Each scenario emits a
+# `workload-summary` log line; pipe to `grep workload-summary` to
+# extract the per-shape distribution. Override the scenario filter
+# with PERF=<regex>, e.g.
+# `make perf-mock PERF=Parallel_ConnPrewarmedEcho_SOCKS5`.
+PERF_SCENARIO_FILTER = $(or $(PERF),^(ConnectLatency|ShortSession|Serial_Conn|Parallel_Conn))
+
+perf-mock: ## Run performance characterization scenarios against the in-process mock relay
+	cd e2e && go test -tags=e2e -timeout=20m -v \
+		-run='TestE2E_Mock/$(PERF_SCENARIO_FILTER)' \
+		./backends/mock/
+
+# Pass E2E_AUTH=entra (or sas) to pin one auth method and skip the
+# other; default runs both. Configure infra with `make e2e-setup`
+# first. Timeout matches `e2e-azure` to leave room for ARM
+# provisioning + the Performance round budgets.
+perf-azure: build ## Run performance characterization scenarios against a real Azure Relay namespace
+	cd e2e && go test -tags=e2e -timeout=25m -v \
+		-run='TestE2E_Azure/[^/]+/$(PERF_SCENARIO_FILTER)' \
+		./backends/azure/
+
+perf: perf-mock perf-azure ## Run performance scenarios against both backends
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
