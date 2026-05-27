@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,6 +65,49 @@ func TestTLSConfigForDial(t *testing.T) {
 		base.InsecureSkipVerify = true
 		if cfg.InsecureSkipVerify {
 			t.Error("returned cfg shares mutable state with base — Clone() not applied")
+		}
+	})
+
+	t.Run("nil base installs relayCurvePreferences", func(t *testing.T) {
+		cfg := tlsConfigForDial(nil)
+		if !slices.Equal(cfg.CurvePreferences, relayCurvePreferences) {
+			t.Errorf("CurvePreferences = %v, want %v", cfg.CurvePreferences, relayCurvePreferences)
+		}
+	})
+
+	t.Run("empty CurvePreferences populated with relayCurvePreferences", func(t *testing.T) {
+		base := &tls.Config{CurvePreferences: []tls.CurveID{}}
+		cfg := tlsConfigForDial(base)
+		if !slices.Equal(cfg.CurvePreferences, relayCurvePreferences) {
+			t.Errorf("CurvePreferences = %v, want %v (empty slice should be treated as unset)", cfg.CurvePreferences, relayCurvePreferences)
+		}
+	})
+
+	t.Run("caller-supplied CurvePreferences preserved verbatim", func(t *testing.T) {
+		caller := []tls.CurveID{tls.X25519, tls.CurveP256}
+		base := &tls.Config{CurvePreferences: caller}
+		cfg := tlsConfigForDial(base)
+		if !slices.Equal(cfg.CurvePreferences, caller) {
+			t.Errorf("CurvePreferences = %v, want %v (caller value must not be overridden)", cfg.CurvePreferences, caller)
+		}
+	})
+
+	t.Run("relayCurvePreferences is exactly [CurveP384]", func(t *testing.T) {
+		// Guards two invariants:
+		//
+		//  1. CurveP384 is the only allowed group, so Go (Azure
+		//     Relay's HRR-avoidance fix depends on this) has no
+		//     choice but to send a key_share for P-384 (or for
+		//     a hybrid whose fallback share is P-384).
+		//
+		//  2. No curve has been added that sorts before CurveP384
+		//     in Go's defaultCurvePreferences (X25519MLKEM768,
+		//     SecP256r1MLKEM768, SecP384r1MLKEM1024, X25519,
+		//     CurveP256), which would win the "default-order first
+		//     survivor" race and reintroduce the HRR.
+		want := []tls.CurveID{tls.CurveP384}
+		if !slices.Equal(relayCurvePreferences, want) {
+			t.Errorf("relayCurvePreferences = %v, want %v", relayCurvePreferences, want)
 		}
 	})
 }
@@ -266,6 +310,77 @@ func TestWSDialOptionsSessionResumption(t *testing.T) {
 	for _, n := range resumedOn {
 		if n == 1 {
 			t.Errorf("first dial reported DidResume — impossible without prior cache state")
+		}
+	}
+}
+
+// TestWSDialOptionsAdvertisesP384First asserts the end-to-end
+// behavior that makes the Azure Relay HelloRetryRequest fix work: a
+// dial via WSDialOptions with no caller-supplied CurvePreferences
+// must produce a ClientHello whose supported_groups extension lists
+// CurveP384 first. Per Go 1.24+ documented behavior, the first
+// supported group is the one the client sends an initial key_share
+// for; this test relies on that invariant rather than parsing the
+// raw ClientHello key_share extension.
+//
+// Uses a single dial against a fresh httptest TLS server to avoid
+// session resumption (a resumed handshake might skip the curve
+// selection path entirely).
+func TestWSDialOptionsAdvertisesP384First(t *testing.T) {
+	var (
+		mu  sync.Mutex
+		chi *tls.ClientHelloInfo
+	)
+
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		_ = ws.Close(websocket.StatusNormalClosure, "ok")
+	}))
+	// httptest.NewTLSServer attaches a default TLSConfig; we need to
+	// install GetConfigForClient before Start so it captures the
+	// first (and only) ClientHello.
+	srv.TLS = &tls.Config{
+		GetConfigForClient: func(info *tls.ClientHelloInfo) (*tls.Config, error) {
+			mu.Lock()
+			chi = info
+			mu.Unlock()
+			return nil, nil
+		},
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	//nolint:gosec // test server uses self-signed cert
+	baseTLS := &tls.Config{InsecureSkipVerify: true}
+	wssURL := "wss://" + strings.TrimPrefix(srv.URL, "https://")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws, _, err := websocket.Dial(ctx, wssURL, WSDialOptions(nil, baseTLS))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_, _, _ = ws.Read(ctx)
+	_ = ws.CloseNow()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if chi == nil {
+		t.Fatal("GetConfigForClient was not invoked — server did not see a ClientHello")
+	}
+	if len(chi.SupportedCurves) == 0 {
+		t.Fatal("ClientHello SupportedCurves is empty")
+	}
+	if chi.SupportedCurves[0] != tls.CurveP384 {
+		t.Errorf("ClientHello SupportedCurves[0] = %v, want CurveP384 (Azure Relay would HRR otherwise); full list = %v", chi.SupportedCurves[0], chi.SupportedCurves)
+	}
+	for _, c := range chi.SupportedCurves {
+		switch c {
+		case tls.X25519MLKEM768, tls.SecP256r1MLKEM768, tls.SecP384r1MLKEM1024, tls.X25519, tls.CurveP256:
+			t.Errorf("ClientHello SupportedCurves contains %v, which sorts before CurveP384 in Go's defaultCurvePreferences and would reintroduce the HRR; full list = %v", c, chi.SupportedCurves)
 		}
 	}
 }
