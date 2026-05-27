@@ -195,9 +195,7 @@ func Dial(ctx context.Context, info *RelayInfo, port int) (*websocket.Conn, erro
 	headers.Set("Service-Configuration-Token", info.ServiceConfigurationToken)
 	headers.Set("Microsoft-Guestgateway-Target", fmt.Sprintf("localhost:%d", port))
 
-	ws, _, err := websocket.Dial(ctx, connectURL, &websocket.DialOptions{
-		HTTPHeader: headers,
-	})
+	ws, _, err := websocket.Dial(ctx, connectURL, relay.WSDialOptions(headers, nil))
 	if err != nil {
 		return nil, fmt.Errorf("dial arc relay: %w", sanitizeErr(err))
 	}
@@ -282,9 +280,7 @@ func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slo
 			wssHost, info.HybridConnectionName, newUUID())
 
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-		ws, resp, err := websocket.Dial(dialCtx, connectURL, &websocket.DialOptions{
-			HTTPHeader: headers,
-		})
+		ws, resp, err := websocket.Dial(dialCtx, connectURL, relay.WSDialOptions(headers, nil))
 		cancel()
 
 		if err == nil {
