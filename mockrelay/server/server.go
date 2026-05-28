@@ -104,6 +104,12 @@ type Server struct {
 	// Zero value means no faults active; the production NewServer
 	// constructor never touches it.
 	faults faults
+	// delayProfile parameterizes the synthetic per-lane delays applied
+	// to every relay-side step. Zero value (DelayProfileZero) means no
+	// synthetic delay anywhere, matching production behavior. Set via
+	// WithDelayProfile in NewServerForTesting; production NewServer
+	// never touches it.
+	delayProfile DelayProfile
 }
 
 // NewServer constructs a Server with the given config. It validates the

@@ -57,9 +57,29 @@ func (c *controlSession) writeJSON(ctx context.Context, msg interface{}) error {
 // ws.Read. This approach correctly treats pings as activity (matching
 // the documented behavior), whereas the previous per-iter
 // context.WithTimeout did not.
+//
+// DelayProfile timing: handleListen models the wire as DNS lookup +
+// hopsHandshake legs + hopsWSGet leg before the listener's SAS token
+// arrives at the relay; then AuthInternal for token validation; then
+// hopsResponse leg for the 101 (or error) reply. All sleeps honor the
+// request context so server shutdown is not blocked.
 func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity string) {
+	ctx := r.Context()
+	p := s.delayProfile
+	// Pre-auth wire transit: DNS lookup, TCP+TLS handshake, then the
+	// TLS Fin + WS GET that delivers the SAS token to the relay.
+	if !sleepContext(ctx, p.DNSLookup+hopsHandshake*p.LLatency+hopsWSGet*p.LLatency) {
+		return
+	}
+	// Relay-side auth cost runs in parallel with the response leg in
+	// the real relay, but we serialise here so AuthInternal is
+	// observable as a separate knob.
+	if !sleepContext(ctx, p.AuthInternal) {
+		return
+	}
 	if err := s.validateSAS(r); err != nil {
 		s.log.Warn("listener auth failed", "entity", entity, "remote", r.RemoteAddr, "error", err)
+		_ = sleepContext(ctx, hopsResponse*p.LLatency)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -69,7 +89,14 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 	// probes cannot consume the fault.
 	if s.faults.rejectControlDial.CompareAndSwap(true, false) {
 		s.log.Debug("fault: rejecting control dial", "entity", entity)
+		_ = sleepContext(ctx, hopsResponse*p.LLatency)
 		http.Error(w, "service unavailable (fault injection)", http.StatusServiceUnavailable)
+		return
+	}
+	// 101 transit leg: model the response trip back to the listener
+	// before we emit the upgrade. The library completes the upgrade
+	// synchronously; the wire model owns the transit.
+	if !sleepContext(ctx, hopsResponse*p.LLatency) {
 		return
 	}
 	activity := make(chan struct{}, 1)
@@ -100,9 +127,6 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 
 	s.log.Info("listener connected", "entity", entity, "remote", r.RemoteAddr)
 	defer s.log.Info("listener disconnected", "entity", entity, "remote", r.RemoteAddr)
-
-	// Use the request context so server shutdown propagates.
-	ctx := r.Context()
 
 	if s.cfg.ListenerIdleTimeout > 0 {
 		// handlerDone is closed when this handler returns. It signals
@@ -203,7 +227,15 @@ type acceptBody struct {
 // writeAccept sends the accept message to a chosen control session,
 // instructing it to dial the rendezvous URL. Returns the error from the
 // write so callers can fall back to another listener.
-func (c *controlSession) writeAccept(ctx context.Context, addr, id string) error {
+//
+// DelayProfile timing: the accept frame is one hop on the listener's
+// existing control WS. The sleep is paid BEFORE acquiring writeMu so
+// concurrent writers don't see their own latency stack on top of the
+// previous writer's transit time.
+func (c *controlSession) writeAccept(ctx context.Context, p DelayProfile, addr, id string) error {
+	if !sleepContext(ctx, hopsAcceptFrame*p.LLatency) {
+		return ctx.Err()
+	}
 	msg := acceptMessage{
 		Accept: acceptBody{
 			Address:        addr,
