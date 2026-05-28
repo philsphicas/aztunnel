@@ -87,6 +87,8 @@ func PortForward(ctx context.Context, cfg PortForwardConfig) error {
 func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg PortForwardConfig) error {
 	// Set TCP keepalive on the incoming connection.
 	relay.SetTCPKeepAlive(conn, cfg.TCPKeepAlive)
+	ctx, conn, stopWatch := connBoundContext(ctx, conn)
+	defer stopWatch()
 
 	bridgeID := idgen.NewBridgeID()
 	logger := cfg.Logger.With("bridge_id", bridgeID)
@@ -110,6 +112,7 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 		return err
 	}
 	logAccept(logger, target, listenerID)
+	stopWatch()
 
 	// Bridge data.
 	result, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)

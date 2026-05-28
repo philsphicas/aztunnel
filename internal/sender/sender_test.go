@@ -3,6 +3,7 @@ package sender
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,12 +11,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/philsphicas/aztunnel/internal/protocol"
+	"github.com/philsphicas/aztunnel/internal/relay"
 )
 
 // --- stdioConn tests ---
@@ -519,4 +522,176 @@ func TestLogAccept(t *testing.T) {
 			t.Errorf("listener_id should be omitted when empty:\n  got: %s", line)
 		}
 	})
+}
+
+type staticTokenProvider struct{}
+
+func (staticTokenProvider) GetToken(context.Context, string) (string, error) {
+	return "test-token", nil
+}
+
+func tcpPair(t *testing.T) (net.Conn, net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- c
+	}()
+
+	peer, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	select {
+	case err := <-acceptErr:
+		_ = peer.Close()
+		t.Fatalf("accept: %v", err)
+	case local := <-accepted:
+		return local, peer
+	}
+	return nil, nil
+}
+
+func TestConnBoundContext_CancelsOnPeerClose(t *testing.T) {
+	local, peer := tcpPair(t)
+	defer local.Close()
+	defer peer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connCtx, _, stop := connBoundContext(ctx, local)
+	defer stop()
+
+	if err := peer.Close(); err != nil {
+		t.Fatalf("peer.Close: %v", err)
+	}
+
+	select {
+	case <-connCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("conn-bound context was not cancelled after peer close")
+	}
+}
+
+func TestConnBoundContext_PreservesPrefetchedData(t *testing.T) {
+	local, peer := tcpPair(t)
+	defer local.Close()
+	defer peer.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, watched, stop := connBoundContext(ctx, local)
+	defer stop()
+
+	if _, err := peer.Write([]byte("x")); err != nil {
+		t.Fatalf("peer.Write: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	stop()
+
+	if err := watched.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 1)
+	n, err := watched.Read(buf)
+	if err != nil {
+		t.Fatalf("watched.Read: %v", err)
+	}
+	if n != 1 || buf[0] != 'x' {
+		t.Fatalf("watched.Read = %q (%d bytes), want %q (1 byte)", buf[:n], n, []byte("x"))
+	}
+}
+
+func TestForwardConnection_CancelsRetryWhenPeerCloses(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- c
+	}()
+
+	peer, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial local listener: %v", err)
+	}
+	defer peer.Close()
+
+	var local net.Conn
+	select {
+	case err := <-acceptErr:
+		t.Fatalf("accept: %v", err)
+	case local = <-accepted:
+	}
+	defer local.Close()
+
+	cfg := PortForwardConfig{
+		Endpoint:      u.Host,
+		EntityPath:    "test-hc",
+		TokenProvider: staticTokenProvider{},
+		ClientOptions: relay.ClientOptions{
+			TLSConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		Target: "example.internal:443",
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- forwardConnection(ctx, local, cfg.Target, cfg)
+	}()
+
+	if err := peer.Close(); err != nil {
+		t.Fatalf("peer.Close: %v", err)
+	}
+	start := time.Now()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("forwardConnection returned nil, want cancellation error")
+		}
+		if !strings.Contains(err.Error(), "context canceled") {
+			t.Fatalf("forwardConnection error = %v, want context cancellation", err)
+		}
+		if elapsed := time.Since(start); elapsed >= time.Second {
+			t.Fatalf("forwardConnection returned after %v, want <1s (before retry backoff)", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("forwardConnection did not stop after peer close")
+	}
 }

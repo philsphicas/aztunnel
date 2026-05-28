@@ -104,6 +104,8 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	bridgeID := idgen.NewBridgeID()
 	logger := cfg.Logger.With("bridge_id", bridgeID)
 	logger.Info("connection requested", "target", target)
+	ctx, conn, stopWatch := connBoundContext(ctx, conn)
+	defer stopWatch()
 
 	// Dial the relay.
 	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
@@ -130,6 +132,7 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	// Tell the SOCKS5 client we're connected.
 	tcpAddr, _ := conn.LocalAddr().(*net.TCPAddr)
 	_ = socks5.SendReply(conn, socks5.RepSuccess, tcpAddr)
+	stopWatch()
 
 	// Bridge data.
 	result, bridgeErr := cfg.Metrics.TrackedBridge(ctx, ws, conn, "sender", target)
