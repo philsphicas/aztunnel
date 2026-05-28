@@ -655,16 +655,10 @@ func TestBridge_Result_WSSideErrors(t *testing.T) {
 	}
 }
 
-// TestBridge_Result_BothError drives BOTH pumps to surface real
-// (non-induced) errors. The WS server closes with StatusInternalError
-// (a CloseError that survives the normal-close filter); the local TCP
-// side is a scripted conn whose Read returns a sentinel and whose
-// SetReadDeadline is a no-op (so the bridge's deadline-based unblock
-// does not overwrite the sentinel with a timeout). The scripted conn
-// holds its Read until the test releases it, so the bridge has
-// finished processing the first pump exit before the second pump
-// returns its real error.
-func TestBridge_Result_BothError(t *testing.T) {
+// TestBridge_Result_SecondPumpSuppressed proves the bridge only reports
+// the first pump's terminal error. Even when the drained second pump
+// returns a real sentinel error, BridgeResult keeps that side nil.
+func TestBridge_Result_SecondPumpSuppressed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ws, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -714,8 +708,8 @@ func TestBridge_Result_BothError(t *testing.T) {
 		if res.result.WSToTCP == nil {
 			t.Errorf("WSToTCP = nil, want CloseError")
 		}
-		if !errors.Is(res.result.TCPToWS, sentinel) {
-			t.Errorf("TCPToWS = %v, want %v", res.result.TCPToWS, sentinel)
+		if res.result.TCPToWS != nil {
+			t.Errorf("TCPToWS = %v, want nil (second-pump collateral)", res.result.TCPToWS)
 		}
 		if res.err == nil {
 			t.Errorf("bridgeErr = nil, want non-nil")

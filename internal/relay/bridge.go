@@ -39,17 +39,13 @@ type BridgeStats struct {
 // terminating error of that direction's pump after the normal-close
 // filters (ignoreNormalClose, ignoreEOF) have run.
 //
-// Induced cancellations are suppressed to nil so the per-direction
-// fields surface only that direction's own failure: when the first
-// pump returns the bridge cancels its internal ctx (interrupting the
-// second pump's ws.Reader with context.Canceled) and calls
-// tcp.SetReadDeadline(time.Now()) (interrupting the second pump's
-// tcp.Read with net.Error.Timeout()). Both shapes match
-// isInducedCancellation and are filtered out before BridgeResult is
-// returned. The same filter also catches both pumps' ctx.Canceled /
-// ctx.DeadlineExceeded under a parent-ctx cancel/timeout, so
-// user-cancel and timeout bridges report nil per-direction errors
-// alongside an EndCause of "user_cancel" / "timeout".
+// The first pump decides the bridge outcome. After the first pump
+// returns the bridge cancels/drains the other direction, so the
+// second pump is treated as collateral and always reported as nil.
+// Induced-cancellation shapes (context canceled/deadline or timeout)
+// are still filtered to nil on the first pump so parent-ctx cancel
+// and timeout bridges report clean per-direction errors alongside an
+// EndCause of "user_cancel" / "timeout".
 //
 // EndCause is bridgecause.Name(context.Cause(bridgeCtx)) at return
 // time — one of the stable short labels operators grep on.
@@ -133,8 +129,8 @@ func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) (BridgeResult
 	}()
 
 	// Wait for the first direction to finish, stamp cause, then
-	// unblock the other pump.
-	var first, second pumpResult
+	// unblock/drain the other pump.
+	var first pumpResult
 	var firstWasWSToTCP bool
 	select {
 	case r := <-wsToTCPCh:
@@ -150,9 +146,9 @@ func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) (BridgeResult
 	_ = tcp.SetReadDeadline(time.Now())
 
 	if firstWasWSToTCP {
-		second = <-tcpToWSCh
+		<-tcpToWSCh
 	} else {
-		second = <-wsToTCPCh
+		<-wsToTCPCh
 	}
 
 	// Join the ping loop before returning. ctx is already cancelled,
@@ -163,10 +159,10 @@ func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) (BridgeResult
 	var wsErr, tcpErr error
 	if firstWasWSToTCP {
 		wsErr = first.err
-		tcpErr = second.err
+		tcpErr = nil
 	} else {
 		tcpErr = first.err
-		wsErr = second.err
+		wsErr = nil
 	}
 	if isInducedCancellation(wsErr) {
 		wsErr = nil
@@ -189,8 +185,8 @@ func Bridge(ctx context.Context, ws *websocket.Conn, tcp net.Conn) (BridgeResult
 	// Returning nil on a normal close preserves the single-error
 	// callers' existing observable behavior (WARN-on-cancel sender
 	// callers still fire on a parent-ctx cancellation; a normal
-	// peer-close stays at DEBUG). The second pump's err is reported
-	// via result.{TCPToWS,WSToTCP} for the diagnostic log.
+	// peer-close stays at DEBUG). The second pump always races the
+	// bridge cancel/teardown and is treated as collateral noise.
 	return result, first.err
 }
 
