@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure vulncheck bench check-installable help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure vulncheck bench bench-azure check-installable help
 
 .DEFAULT_GOAL := help
 
@@ -153,6 +153,27 @@ bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
 	cd e2e && go test -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
 		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
 		./backends/mock/...
+
+# bench-azure runs the e2e benchmark suite against a real Azure
+# Relay namespace. Default knobs (COUNT=3, BENCHTIME=10x) are tuned
+# for the CI bench workflow's budget: each iteration is a real relay
+# round-trip (~1-2s on Azure today), so 10x per benchmark with 3
+# samples per cell yields ~10-15 minutes of actual benchmark time
+# across the seven sub-benches while giving benchstat enough data
+# without amplifying namespace cost disproportionately. Operators
+# wanting tighter confidence intervals can run locally with COUNT=6
+# BENCHTIME=20x and a longer timeout.
+# BENCH defaults to BenchmarkE2E_Azure (the single-mode suite);
+# override to run a specific benchmark.
+#
+# No `build` dep: BenchmarkE2E_Azure uses the in-process backend,
+# not the CLI binary, so building aztunnel here is wasted work.
+bench-azure: ## Run Azure-live e2e benchmarks (override BENCH=, COUNT=, BENCHTIME=, BENCH_TIMEOUT=)
+	cd e2e && go test -tags=e2e \
+		-run='^$$' -bench='$(or $(BENCH),BenchmarkE2E_Azure)' -benchmem \
+		-count='$(or $(COUNT),3)' -benchtime='$(or $(BENCHTIME),10x)' \
+		-timeout='$(or $(BENCH_TIMEOUT),30m)' \
+		./backends/azure/...
 
 # Performance characterization scenarios (e2e/scenarios/performance.go).
 # Filters the shared e2e suite down to the performance scenarios via

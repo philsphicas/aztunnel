@@ -1,0 +1,254 @@
+name: Bench
+
+# Runs the e2e benchmark suite in two flavours:
+#
+#   - bench-mock:  fast (~seconds), in-process, free. Gates every
+#     PR/push and catches CPU/allocation regressions in the relay
+#     and mux code paths without network noise.
+#   - bench-azure: slow (~10-15m), real Azure Relay namespace.
+#     Validates perf claims against the real data plane; the only
+#     place network-bound costs show up. Gated on bench-mock to
+#     avoid spending Azure cycles on a code change that already
+#     broke compilation or shape.
+#
+# Both jobs post the raw output as a job summary plus an artifact.
+#
+# Triggers:
+#   - pull_request: gate every PR that could regress relay perf.
+#     Paths filter keeps doc-only PRs free.
+#   - push: main: catch regressions that slip through path-filtered
+#     PRs (e.g. infra refactors). Same paths filter as PR for
+#     symmetry — doc-only merges don't need an Azure run.
+#   - workflow_dispatch: manual re-run with operator-supplied knobs
+#     (apply to the Azure job only; mock is cheap and uses defaults).
+#   - schedule: nightly to surface drift not tied to a PR.
+
+on:
+  pull_request:
+    paths: &perf_paths
+      - "internal/**"
+      - "cmd/**"
+      - "e2e/**"
+      - "go.mod"
+      - "go.sum"
+      - "go.work"
+      - "go.work.sum"
+      - "Makefile"
+      - ".github/workflows/bench.yml"
+  push:
+    branches: [main]
+    paths: *perf_paths
+  workflow_dispatch:
+    inputs:
+      bench:
+        description: "Benchmark regex (default BenchmarkE2E_Azure)"
+        default: "BenchmarkE2E_Azure"
+      count:
+        description: "Samples per benchmark (benchstat needs >=6 for CI)"
+        default: "3"
+      benchtime:
+        description: "Iterations per sample (e.g. 10x, 20x, 30s)"
+        default: "10x"
+  schedule:
+    # 08:00 UTC daily. Catches drift on main without competing with
+    # business-hour PR runs for the shared Azure namespace.
+    - cron: "0 8 * * *"
+
+permissions:
+  id-token: write
+  contents: read
+
+# Serialise per-ref so a fast follow-up commit cancels the older
+# run. Cross-ref isolation is provided at the hyco level by
+# e2e/azrelay's per-invocation provisioning (each invocation creates
+# its own hyco pair with a fresh suffix), so concurrent bench runs
+# on different refs do not share data-plane state. The shared
+# control plane (ARM) can throttle if many provisions land at once,
+# but the e2e suite already tolerates 429-with-backoff so this is
+# acceptable for the bench workflow too. PR number gives fork safety
+# (github.head_ref alone collides across forks with the same branch
+# name). The event-name suffix prevents a push-to-main and the
+# nightly schedule (both resolve to refs/heads/main) from cancelling
+# each other when they overlap.
+concurrency:
+  group: bench-azure-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: true
+
+env:
+  # Defaults for non-dispatch events (PR / push / schedule).
+  # workflow_dispatch overrides these via the validation step below.
+  # Job-level so every step sees the same values.
+  BENCH: "BenchmarkE2E_Azure"
+  COUNT: "3"
+  BENCHTIME: "10x"
+
+jobs:
+  bench-mock:
+    # Fast in-process benchmarks: no Azure, no network. Catches CPU
+    # and allocation regressions in the relay/mux code that real
+    # Azure runs would mask with network jitter. Cheap enough to
+    # gate every PR/push, and a hard prereq for bench-azure so a
+    # broken-shape change can't burn Azure cycles.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Run mock benchmarks
+        run: |
+          set -o pipefail
+          mkdir -p bench-out
+          # Defaults from `make bench` (COUNT=1 BENCHTIME=1s) are
+          # already tuned for fast feedback; override here only if a
+          # specific run needs tighter samples.
+          make bench 2>&1 | tee bench-out/mock.txt
+
+      - name: Post mock benchmark output to job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Mock benchmarks"
+            echo
+            echo "_Commit: \`${{ github.sha }}\` · backend: mock (in-process)_"
+            echo
+            if [ -s bench-out/mock.txt ]; then
+              echo '```'
+              grep -E '^(Benchmark|PASS|FAIL|ok\s|---\sFAIL)' bench-out/mock.txt || tail -100 bench-out/mock.txt
+              echo '```'
+            else
+              echo "_no raw benchmark output — earlier step failed before benchmarks ran_"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw mock benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-mock-raw
+          path: bench-out/
+          retention-days: 30
+
+  bench-azure:
+    needs: bench-mock
+    runs-on: ubuntu-latest
+    environment: e2e-azure
+    # 30m bench budget (~10-15m expected wall-clock for 7 sub-benches
+    # × count=3 × benchtime=10x at ~1-2s/iter on Azure) + headroom
+    # for provisioning, az login, and one slow sub-bench.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          # Match e2e.yml so version drift affects both workflows
+          # together. Pinning would give tighter benchmark
+          # comparability over time but would diverge from the rest
+          # of CI.
+          go-version: stable
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          # Same as e2e.yml: CI principal has namespace-scoped RBAC,
+          # not subscription-level Reader, so `az login` must be
+          # tenant-only. AZURE_SUBSCRIPTION_ID is passed to ARM
+          # clients via the run step's env block below.
+          allow-no-subscriptions: true
+
+      - name: Resolve and validate bench knobs
+        # Pass dispatch inputs through an env block so the values
+        # reach the shell as ordinary env vars rather than being
+        # expression-expanded into the script body — this is the
+        # standard GitHub Actions defence against `${{ }}` injection
+        # in run steps. Validate against an allow-list before
+        # promoting to job env, because $(or ...) in the Makefile
+        # would otherwise interpolate them straight into the shell
+        # command line.
+        env:
+          BENCH_IN: ${{ inputs.bench }}
+          COUNT_IN: ${{ inputs.count }}
+          BENCHTIME_IN: ${{ inputs.benchtime }}
+        run: |
+          set -euo pipefail
+          bench="${BENCH_IN:-$BENCH}"
+          count="${COUNT_IN:-$COUNT}"
+          benchtime="${BENCHTIME_IN:-$BENCHTIME}"
+          # Benchmark name regex must be a benign identifier/regex,
+          # not arbitrary shell. Allow letters, digits, _, /, ., ^,
+          # $, (, |, ), -, * which covers every Go benchmark name and
+          # the common regex constructs.
+          case "$bench" in
+            '' | *[!A-Za-z0-9_/.\^\$\(\|\)\-\*]*)
+              echo "::error::invalid bench regex '$bench'"
+              exit 2
+              ;;
+          esac
+          case "$count" in
+            '' | *[!0-9]*)
+              echo "::error::invalid count '$count' — must be a positive integer"
+              exit 2
+              ;;
+          esac
+          # benchtime is either an integer + 'x' (Nx iterations) or a
+          # Go duration (e.g. 30s, 1m). Restrict to a safe charset.
+          case "$benchtime" in
+            '' | *[!0-9smhx.]*)
+              echo "::error::invalid benchtime '$benchtime' — must match [0-9smhx.]+"
+              exit 2
+              ;;
+          esac
+          {
+            echo "BENCH=$bench"
+            echo "COUNT=$count"
+            echo "BENCHTIME=$benchtime"
+          } >>"$GITHUB_ENV"
+
+      - name: Run Azure benchmarks
+        env:
+          E2E_RELAY_NAME: ${{ vars.E2E_RELAY_NAME }}
+          E2E_RESOURCE_GROUP: ${{ vars.E2E_RESOURCE_GROUP || 'aztunnel-e2e' }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # Pin SAS so name-matching across runs is stable
+          # (BenchmarkE2E_Azure uses availableAuthNames[0]).
+          E2E_AUTH: sas
+        run: |
+          set -o pipefail
+          mkdir -p bench-out
+          make bench-azure 2>&1 | tee bench-out/raw.txt
+
+      - name: Post benchmark output to job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## Azure benchmarks"
+            echo
+            echo "_Commit: \`${{ github.sha }}\` · auth: SAS · bench: \`${BENCH}\` · count: \`${COUNT}\` · benchtime: \`${BENCHTIME}\`_"
+            echo
+            if [ -s bench-out/raw.txt ]; then
+              # Show only the Benchmark/PASS/FAIL lines in the
+              # summary so it stays readable; the full output (with
+              # provisioning chatter etc.) ships as an artifact.
+              echo '```'
+              grep -E '^(Benchmark|PASS|FAIL|ok\s|---\sFAIL)' bench-out/raw.txt || tail -100 bench-out/raw.txt
+              echo '```'
+            else
+              echo "_no raw benchmark output — earlier step failed before benchmarks ran_"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-raw
+          path: bench-out/
+          retention-days: 30
