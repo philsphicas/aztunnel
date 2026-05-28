@@ -79,14 +79,6 @@ concurrency:
   group: bench-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.ref) }}
   cancel-in-progress: true
 
-env:
-  # Defaults for non-dispatch events (PR / push / schedule).
-  # workflow_dispatch overrides these via the validation step below.
-  # Job-level so every step sees the same values.
-  BENCH: "BenchmarkE2E_Azure"
-  COUNT: "3"
-  BENCHTIME: "10x"
-
 jobs:
   bench-mock:
     # Fast in-process benchmarks: no Azure, no network. Catches CPU
@@ -111,6 +103,15 @@ jobs:
           # already tuned for fast feedback; override here only if a
           # specific run needs tighter samples.
           make bench 2>&1 | tee bench-out/mock.txt
+          # Belt-and-braces: a misconfigured BENCH regex (e.g. a
+          # workflow-level env leak — see the bench-azure job's
+          # `env:` rationale for the historical bug this defends
+          # against) can match zero sub-benches and still exit 0
+          # with just `PASS` printed. Refuse to call that green.
+          if ! grep -q '^Benchmark' bench-out/mock.txt; then
+            echo "::error::make bench produced no Benchmark lines — bench regex matched nothing, or all subtests skipped"
+            exit 1
+          fi
 
       - name: Post mock benchmark output to job summary
         if: always()
@@ -168,6 +169,20 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: e2e-azure
+    # Defaults for non-dispatch events (push:main / schedule).
+    # workflow_dispatch overrides these via the validation step
+    # below. Scoped to this job — not workflow-level — because
+    # GitHub propagates workflow `env:` into every job's environment,
+    # and `make bench` in bench-mock does
+    # `-bench='$(or $(BENCH),.)'`. With workflow-level BENCH the
+    # mock job would run `-bench=BenchmarkE2E_Azure` against
+    # ./backends/mock/... (which defines BenchmarkE2E_Mock), match
+    # nothing, and exit green with zero Benchmark lines — silently
+    # turning the PR gate into a no-op.
+    env:
+      BENCH: "BenchmarkE2E_Azure"
+      COUNT: "3"
+      BENCHTIME: "10x"
     # 40m bench budget. Azure runs four serial sub-benches
     # (ConnectLatency_Serial_PortForward / _SOCKS5,
     # SteadyThroughput, ShortSessionRate_N1) — see
