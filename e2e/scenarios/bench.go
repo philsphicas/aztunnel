@@ -6,14 +6,129 @@ import (
 	"io"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
+// BackendScope restricts a sub-benchmark to a subset of backends.
+// Out-of-scope sub-benchmarks are skipped (b.Skipf) at registration
+// time so the scope decision is visible in the bench output rather
+// than hidden in an inline `if backend.Name() != "x"` inside the
+// sub-benchmark body.
+type BackendScope int
+
+const (
+	// AnyBackend runs the sub-benchmark on every backend.
+	AnyBackend BackendScope = iota
+	// MockOnly runs the sub-benchmark only when the backend is the
+	// in-process mock. Use when the sub-bench's signal depends on
+	// having no network jitter or shared-namespace contention — the
+	// mock isolates aztunnel CPU/goroutine cost cleanly, while the
+	// same sub-bench on Azure would be dominated by data-plane
+	// variance.
+	MockOnly
+	// AzureOnly runs the sub-benchmark only when the backend is the
+	// real Azure Relay. Reserved for sub-benches whose signal only
+	// exists on the real data plane (none today after the scope
+	// cleanup landed alongside this enum).
+	AzureOnly
+)
+
+func (s BackendScope) appliesTo(backendName string) bool {
+	switch s {
+	case AnyBackend:
+		return true
+	case MockOnly:
+		return backendName == "mock"
+	case AzureOnly:
+		return backendName == "azure"
+	default:
+		return false
+	}
+}
+
+func (s BackendScope) String() string {
+	switch s {
+	case AnyBackend:
+		return "any"
+	case MockOnly:
+		return "mock-only"
+	case AzureOnly:
+		return "azure-only"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(s))
+	}
+}
+
+// benchCase is one entry in the benchmark registry. Split out as a
+// named struct (rather than an anonymous struct literal inside
+// RunBenchmarks) so benchmarkCases() can be unit-tested without
+// invoking any benchmark bodies — see bench_test.go.
+type benchCase struct {
+	name string
+	// scope restricts which backends run this sub-bench; out-of-scope
+	// invocations are skipped with b.Skipf.
+	scope BackendScope
+	// reason is shown in the skip message when scope excludes the
+	// current backend. Required for non-AnyBackend scopes; ignored
+	// otherwise.
+	reason string
+	run    func(*testing.B, Backend)
+}
+
+// benchmarkCases returns the registry of e2e benchmarks. Pure
+// metadata: no benchmark body runs and no Backend is referenced.
+// The split from RunBenchmarks lets bench_test.go assert scope
+// decisions without standing up a real topology.
+func benchmarkCases() []benchCase {
+	return []benchCase{
+		{
+			name:  "ConnectLatency_Serial_PortForward",
+			scope: AnyBackend,
+			run: func(b *testing.B, backend Backend) {
+				benchConnectLatencySerial(b, backend, ModePortForward)
+			},
+		},
+		{
+			name:  "ConnectLatency_Serial_SOCKS5",
+			scope: AnyBackend,
+			run: func(b *testing.B, backend Backend) {
+				benchConnectLatencySerial(b, backend, ModeSOCKS5)
+			},
+		},
+		{
+			name:  "SteadyThroughput",
+			scope: AnyBackend,
+			run: func(b *testing.B, backend Backend) {
+				benchSteadyThroughput(b, backend)
+			},
+		},
+		{
+			name:  "ShortSessionRate_N1",
+			scope: AnyBackend,
+			run: func(b *testing.B, backend Backend) {
+				benchShortSessionRate(b, backend, 1)
+			},
+		},
+		{
+			name:   "ConcurrentConnect_N100",
+			scope:  MockOnly,
+			reason: "Azure runs are gateway-contention-bound; mock isolates aztunnel/local fan-out overhead.",
+			run: func(b *testing.B, backend Backend) {
+				benchConcurrentConnect(b, backend, 100)
+			},
+		},
+	}
+}
+
 // RunBenchmarks registers every e2e benchmark as a sub-bench under
-// b. Mirrors RunCoreScenarios for tests: a single entry point keeps the
-// per-backend bench_test.go files trivial.
+// b. Mirrors RunCoreScenarios for tests: a single entry point keeps
+// the per-backend bench_test.go files trivial.
+//
+// Each entry has a BackendScope (see above). When the entry's scope
+// excludes backend.Name() the sub-bench is skipped via b.Skipf with
+// the registered reason — the skip is visible in the bench output
+// rather than buried in an inline conditional in the sub-bench body.
 //
 // The sub-benches measure the connection-setup and concurrent-
 // connect dimensions of the relay path, plus a control benchmark
@@ -27,27 +142,17 @@ import (
 // timer.
 func RunBenchmarks(b *testing.B, backend Backend) {
 	b.Helper()
-	b.Run("ConnectLatency_Serial_PortForward", func(b *testing.B) {
-		benchConnectLatencySerial(b, backend, ModePortForward)
-	})
-	b.Run("ConnectLatency_Serial_SOCKS5", func(b *testing.B) {
-		benchConnectLatencySerial(b, backend, ModeSOCKS5)
-	})
-	b.Run("ConcurrentConnect_N100", func(b *testing.B) {
-		benchConcurrentConnect(b, backend, 100)
-	})
-	b.Run("ShortSessionRate_N1", func(b *testing.B) {
-		benchShortSessionRate(b, backend, 1)
-	})
-	b.Run("ShortSessionRate_N2", func(b *testing.B) {
-		benchShortSessionRate(b, backend, 2)
-	})
-	b.Run("SteadyThroughput", func(b *testing.B) {
-		benchSteadyThroughput(b, backend)
-	})
-	b.Run("ConnectFailureRate", func(b *testing.B) {
-		benchConnectFailureRate(b, backend)
-	})
+	name := backend.Name()
+	for _, bc := range benchmarkCases() {
+		bc := bc
+		b.Run(bc.name, func(b *testing.B) {
+			if !bc.scope.appliesTo(name) {
+				b.Skipf("scope=%s, backend=%q: %s", bc.scope, name, bc.reason)
+				return
+			}
+			bc.run(b, backend)
+		})
+	}
 }
 
 // benchConnectLatencySerial measures the per-iteration wall time of:
@@ -159,9 +264,10 @@ func benchConcurrentConnect(b *testing.B, backend Backend, n int) {
 // each carrying a small payload.
 //
 // numSenders controls how many sender binds receive the load round-
-// robin. The single-sender variant is the strict baseline; the
-// multi-sender variant probes whether scaling out senders compensates
-// for serial per-sender rendezvous.
+// robin. Today only the single-sender variant is registered (see
+// benchmarkCases); numSenders is retained as a parameter so an
+// operator can probe sender-scaling locally without editing the
+// benchmark body.
 //
 // b.SetBytes(1024) makes MB/s appear alongside ns/op for benchstat,
 // counting payload bytes written per iteration.
@@ -271,74 +377,12 @@ func benchSteadyThroughput(b *testing.B, backend Backend) {
 	}
 }
 
-// benchConnectFailureRate measures stability under load. Each
-// iteration fires numDials=500 concurrent dials and counts how many
-// errored. The aggregate failure fraction across all iterations is
-// reported via b.ReportMetric so benchstat can diff it.
-//
-// The default ns/op reflects the wall time of one 500-dial round and
-// is preserved for completeness; the headline signal is the custom
-// fail% metric.
-func benchConnectFailureRate(b *testing.B, backend Backend) {
-	b.Helper()
-	const numDials = 500
-	skipIfFDLimitTooLow(b, numDials*4+64)
-	echo := StartPlainEcho(b)
-	tun := backend.Setup(b, SetupOptions{
-		NumListeners:   1,
-		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
-	})
-
-	var totalFailures atomic.Int64
-	var totalDials atomic.Int64
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var wg sync.WaitGroup
-		wg.Add(numDials)
-		for j := 0; j < numDials; j++ {
-			go func() {
-				defer wg.Done()
-				totalDials.Add(1)
-				conn, err := net.DialTimeout("tcp", tun.SenderAddr, 30*time.Second)
-				if err != nil {
-					totalFailures.Add(1)
-					return
-				}
-				// Issue a tiny round-trip so a successful TCP that
-				// then fails inside the bridge is still counted as a
-				// failure. Without this, a sender that accepts the
-				// TCP and immediately drops would look like a
-				// success.
-				_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-				if err := writeFull(conn, []byte{0x42}); err != nil {
-					totalFailures.Add(1)
-					_ = conn.Close()
-					return
-				}
-				buf := make([]byte, 1)
-				if _, err := io.ReadFull(conn, buf); err != nil {
-					totalFailures.Add(1)
-					_ = conn.Close()
-					return
-				}
-				_ = conn.Close()
-			}()
-		}
-		wg.Wait()
-	}
-	b.StopTimer()
-
-	dials := totalDials.Load()
-	fails := totalFailures.Load()
-	var pct float64
-	if dials > 0 {
-		pct = float64(fails) / float64(dials) * 100.0
-	}
-	b.ReportMetric(pct, "fail%")
-}
+// benchConnectFailureRate has been removed. It dialled at the
+// documented Azure Relay per-HC sender cap (500) and reported
+// fail% — characterising relay capacity, not aztunnel. Concurrency
+// regressions in aztunnel itself are caught by
+// benchConcurrentConnect (which is well below the relay cap and so
+// attributes failures to aztunnel).
 
 // benchDial opens a connection to the sender bind for the given
 // mode. For SOCKS5 it performs the CONNECT handshake to the supplied

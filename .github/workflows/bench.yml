@@ -122,8 +122,13 @@ jobs:
             echo "_Commit: \`${{ github.sha }}\` · backend: mock (in-process)_"
             echo
             if [ -s bench-out/mock.txt ]; then
+              # Match Benchmark/PASS/FAIL/ok/SKIP markers plus any
+              # indented `<file>.go:<line>:` log line so the skip
+              # *reason* emitted by b.Skipf (which Go prints on the
+              # line before the `--- SKIP` marker) reaches the
+              # summary.
               echo '```'
-              grep -E '^(Benchmark|PASS|FAIL|ok\s|---\sFAIL)' bench-out/mock.txt || tail -100 bench-out/mock.txt
+              grep -E '^(\s+\S+\.go:.*|Benchmark|PASS|FAIL|ok\s|---\s(FAIL|SKIP))' bench-out/mock.txt || tail -100 bench-out/mock.txt
               echo '```'
             else
               echo "_no raw benchmark output — earlier step failed before benchmarks ran_"
@@ -145,25 +150,32 @@ jobs:
     # against it — most importantly the same-PR e2e job, which
     # provisions additional hycos and drives traffic through the
     # same per-namespace frontend gateways. Empirically that
-    # contention is the dominant source of bench failures: of the
-    # three bench-azure runs on this PR's first day, the one that
-    # overlapped with the same-PR e2e job failed
-    # ConcurrentConnect_N100 / ShortSessionRate / ConnectFailureRate,
-    # while the two that ran in isolation passed cleanly. Rather
-    # than turning the benches into retry-tolerant tests (which
-    # would invalidate the very capacity signal they exist to
-    # measure), we restrict bench-azure to events where namespace
-    # contention is structurally low: push:main (one merge at a
-    # time), the nightly schedule (off-hours), and manual dispatch
-    # (operator picks the moment). To get an on-demand Azure bench
-    # for an open PR, dispatch this workflow with that PR's branch
-    # as `ref`.
+    # contention was the dominant source of bench failures on this
+    # PR's first day: the noisier sub-benches (the original
+    # ConcurrentConnect_N100 / ShortSessionRate / ConnectFailureRate
+    # set) failed when overlapping with the same-PR e2e job and
+    # passed cleanly in isolation. We cut the bench surface to the
+    # serial-only signal that's intrinsically less contention-
+    # sensitive (see e2e/scenarios/bench.go), and still keep this
+    # gate: forks don't have the Azure secrets needed to log in, so
+    # without the gate every fork PR would get a deterministic red
+    # bench-azure run. Restrict to events where namespace contention
+    # is structurally low AND secrets are reachable: push:main (one
+    # merge at a time), the nightly schedule (off-hours), and manual
+    # dispatch (operator picks the moment). To get an on-demand
+    # Azure bench for an open PR, dispatch this workflow with that
+    # PR's branch as `ref`.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: e2e-azure
-    # 30m bench budget (~10-15m expected wall-clock for 7 sub-benches
-    # × count=3 × benchtime=10x at ~1-2s/iter on Azure) + headroom
-    # for provisioning, az login, and one slow sub-bench.
+    # 40m bench budget. Azure runs four serial sub-benches
+    # (ConnectLatency_Serial_PortForward / _SOCKS5,
+    # SteadyThroughput, ShortSessionRate_N1) — see
+    # e2e/scenarios/bench.go's benchmarkCases registry; the mock-
+    # only ConcurrentConnect_N100 is skipped on this backend. At
+    # ~1-2s/iter on Azure with count=3 × benchtime=10x that's
+    # ~10-15m of actual bench time, plus headroom for provisioning,
+    # az login, and one slow sub-bench.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -301,11 +313,18 @@ jobs:
             echo "_Commit: \`${{ github.sha }}\` · auth: SAS · bench: \`${BENCH}\` · count: \`${COUNT}\` · benchtime: \`${BENCHTIME}\`_"
             echo
             if [ -s bench-out/raw.txt ]; then
-              # Show only the Benchmark/PASS/FAIL lines in the
+              # Show only the Benchmark/PASS/FAIL/SKIP lines in the
               # summary so it stays readable; the full output (with
               # provisioning chatter etc.) ships as an artifact.
+              # SKIP is included so scope-driven skips (e.g. the
+              # mock-only ConcurrentConnect_N100 on Azure) are
+              # visible at a glance rather than buried in the raw
+              # log. The indented `<file>.go:<line>:` pattern catches
+              # the skip *reason* that go test prints on the line
+              # before the `--- SKIP` marker (only emitted with
+              # -v — see the Makefile's bench-azure target).
               echo '```'
-              grep -E '^(Benchmark|PASS|FAIL|ok\s|---\sFAIL)' bench-out/raw.txt || tail -100 bench-out/raw.txt
+              grep -E '^(\s+\S+\.go:.*|Benchmark|PASS|FAIL|ok\s|---\s(FAIL|SKIP))' bench-out/raw.txt || tail -100 bench-out/raw.txt
               echo '```'
             else
               echo "_no raw benchmark output — earlier step failed before benchmarks ran_"

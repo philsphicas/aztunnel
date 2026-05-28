@@ -150,7 +150,7 @@ vulncheck: ## Check Go dependencies for known vulnerabilities
 	cd e2e && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
-	cd e2e && go test -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
+	cd e2e && go test -v -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
 		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
 		./backends/mock/...
 
@@ -159,17 +159,24 @@ bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
 # for the CI bench workflow's budget: each iteration is a real relay
 # round-trip (~1-2s on Azure today), so 10x per benchmark with 3
 # samples per cell yields ~10-15 minutes of actual benchmark time
-# across the seven sub-benches while giving benchstat enough data
-# without amplifying namespace cost disproportionately. Operators
-# wanting tighter confidence intervals can run locally with COUNT=6
-# BENCHTIME=20x and a longer timeout.
+# across the registered sub-benches (see e2e/scenarios/bench.go's
+# benchmarkCases — Azure runs the four serial ones; the mock-only
+# ConcurrentConnect_N100 is skipped on this backend) while giving
+# benchstat enough data without amplifying namespace cost
+# disproportionately. Operators wanting tighter confidence intervals
+# can run locally with COUNT=6 BENCHTIME=20x and a longer timeout.
 # BENCH defaults to BenchmarkE2E_Azure (the single-mode suite);
 # override to run a specific benchmark.
 #
 # No `build` dep: BenchmarkE2E_Azure uses the in-process backend,
 # not the CLI binary, so building aztunnel here is wasted work.
+# `go test -v` is required so that BackendScope-driven b.Skipf
+# emissions ("--- SKIP:" markers + the skip reason on the preceding
+# log line) actually land in the captured output; without -v Go's
+# bench harness suppresses both for skipped sub-benches and the
+# scope-skip decision becomes invisible to the operator.
 bench-azure: ## Run Azure-live e2e benchmarks (override BENCH=, COUNT=, BENCHTIME=, BENCH_TIMEOUT=)
-	cd e2e && go test -tags=e2e \
+	cd e2e && go test -v -tags=e2e \
 		-run='^$$' -bench='$(or $(BENCH),BenchmarkE2E_Azure)' -benchmem \
 		-count='$(or $(COUNT),3)' -benchtime='$(or $(BENCHTIME),10x)' \
 		-timeout='$(or $(BENCH_TIMEOUT),30m)' \
