@@ -554,14 +554,14 @@ func tcpPair(t *testing.T) (net.Conn, net.Conn) {
 		t.Fatalf("dial: %v", err)
 	}
 
+	var local net.Conn
 	select {
 	case err := <-acceptErr:
 		_ = peer.Close()
 		t.Fatalf("accept: %v", err)
-	case local := <-accepted:
-		return local, peer
+	case local = <-accepted:
 	}
-	return nil, nil
+	return local, peer
 }
 
 func TestConnBoundContext_CancelsOnPeerClose(t *testing.T) {
@@ -661,6 +661,8 @@ func TestForwardConnection_CancelsRetryWhenPeerCloses(t *testing.T) {
 		EntityPath:    "test-hc",
 		TokenProvider: staticTokenProvider{},
 		ClientOptions: relay.ClientOptions{
+			// Test-only self-signed TLS server; never use InsecureSkipVerify
+			// outside controlled tests.
 			TLSConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 		Target: "example.internal:443",

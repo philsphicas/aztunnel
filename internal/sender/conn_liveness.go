@@ -1,12 +1,15 @@
 package sender
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
 )
 
+// 200ms keeps close-detection responsive while avoiding tight polling loops.
 const connLivenessPollInterval = 200 * time.Millisecond
 
 // connBoundContext returns a child context tied to the peer-liveness of conn.
@@ -21,6 +24,7 @@ func connBoundContext(parent context.Context, conn net.Conn) (context.Context, n
 	stop := func() {
 		stopOnce.Do(func() {
 			cancel()
+			// Force any blocked watcher Read to return so stop() can wait.
 			_ = conn.SetReadDeadline(time.Now())
 			<-done
 		})
@@ -39,17 +43,19 @@ func connBoundContext(parent context.Context, conn net.Conn) (context.Context, n
 			}
 
 			if err := conn.SetReadDeadline(time.Now().Add(connLivenessPollInterval)); err != nil {
+				cancel()
 				return
 			}
 
 			n, err := conn.Read(buf)
 			if n > 0 {
-				wrapped.prepend(buf[:n])
+				wrapped.stash(buf[:n])
 			}
 			if err == nil {
 				continue
 			}
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
 				continue
 			}
 			cancel()
@@ -63,28 +69,24 @@ func connBoundContext(parent context.Context, conn net.Conn) (context.Context, n
 type prefetchedConn struct {
 	net.Conn
 	mu   sync.Mutex
-	head []byte
+	head bytes.Buffer
 }
 
-func (c *prefetchedConn) prepend(p []byte) {
+func (c *prefetchedConn) stash(p []byte) {
 	if len(p) == 0 {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	h := make([]byte, 0, len(c.head)+len(p))
-	h = append(h, p...)
-	h = append(h, c.head...)
-	c.head = h
+	_, _ = c.head.Write(p)
 }
 
 func (c *prefetchedConn) Read(p []byte) (int, error) {
 	c.mu.Lock()
-	if len(c.head) > 0 {
-		n := copy(p, c.head)
-		c.head = c.head[n:]
+	if c.head.Len() > 0 {
+		n, err := c.head.Read(p)
 		c.mu.Unlock()
-		return n, nil
+		return n, err
 	}
 	c.mu.Unlock()
 	return c.Conn.Read(p)
