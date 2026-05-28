@@ -44,7 +44,7 @@ on:
         description: "Benchmark regex (default BenchmarkE2E_Azure)"
         default: "BenchmarkE2E_Azure"
       count:
-        description: "Samples per benchmark (benchstat needs >=6 for CI)"
+        description: "Samples per benchmark (CI default 3; raise to 6+ for tighter benchstat confidence)"
         default: "3"
       benchtime:
         description: "Iterations per sample (e.g. 10x, 20x, 30s)"
@@ -152,6 +152,33 @@ jobs:
           # of CI.
           go-version: stable
 
+      - name: Verify Azure environment
+        # Defensive preflight before Azure Login so a misconfigured
+        # e2e-azure environment fails fast with a clear error
+        # instead of producing a confusing login/test failure
+        # deeper in the job. TestMain in e2e/backends/azure already
+        # fatals when these values are missing, but reasserting at
+        # the workflow layer (a) shortens the feedback loop and (b)
+        # protects against a future regression in
+        # `requireProvider`'s nil-check becoming a soft skip, which
+        # would otherwise let this job go green with no benchmark
+        # data. E2E_RESOURCE_GROUP is deliberately omitted because
+        # the `vars.E2E_RESOURCE_GROUP || 'aztunnel-e2e'` fallback
+        # below guarantees a non-empty value.
+        env:
+          E2E_RELAY_NAME: ${{ vars.E2E_RELAY_NAME }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${E2E_RELAY_NAME:-}" ] || missing+=(E2E_RELAY_NAME)
+          [ -n "${AZURE_SUBSCRIPTION_ID:-}" ] || missing+=(AZURE_SUBSCRIPTION_ID)
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::missing Azure config in e2e-azure environment: ${missing[*]}"
+            echo "::error::set vars.E2E_RELAY_NAME and secrets.AZURE_SUBSCRIPTION_ID on the e2e-azure environment"
+            exit 1
+          fi
+
       - name: Azure Login (OIDC)
         uses: azure/login@v3
         with:
@@ -191,9 +218,16 @@ jobs:
               exit 2
               ;;
           esac
+          # Reject empty, non-digit, and any leading-zero form
+          # (`0`, `00`, `01`, …). `go test -count=0` is legal and
+          # runs zero samples, which would yield a green workflow
+          # with no data; reject it here. `0*` is shell-glob for
+          # "starts with 0 and has zero or more trailing chars" —
+          # combined with the `*[!0-9]*` filter this is equivalent
+          # to "digits only AND no leading zero".
           case "$count" in
-            '' | *[!0-9]*)
-              echo "::error::invalid count '$count' — must be a positive integer"
+            '' | *[!0-9]* | 0*)
+              echo "::error::invalid count '$count' — must be a positive integer with no leading zeros"
               exit 2
               ;;
           esac
@@ -220,9 +254,18 @@ jobs:
           # (BenchmarkE2E_Azure uses availableAuthNames[0]).
           E2E_AUTH: sas
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p bench-out
           make bench-azure 2>&1 | tee bench-out/raw.txt
+          # Belt-and-braces: even with the preflight above and
+          # TestMain's fatal-on-missing-config, a future regression
+          # (or a dispatch-time `bench` regex that matches nothing)
+          # could exit Go's test binary cleanly with zero Benchmark
+          # lines emitted. Refuse to call that green.
+          if ! grep -q '^Benchmark' bench-out/raw.txt; then
+            echo "::error::make bench-azure produced no Benchmark lines — bench regex matched nothing, or all subtests skipped"
+            exit 1
+          fi
 
       - name: Post benchmark output to job summary
         if: always()
