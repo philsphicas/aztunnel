@@ -25,6 +25,12 @@ type SOCKS5Config struct {
 	TCPKeepAlive  time.Duration
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
+	// DialBudget bounds the per-connection relay dial + retry
+	// duration. Zero (the default) uses defaultDialBudget. See
+	// issue #94: without a per-connection bound, retry continues
+	// after the local app has closed its socket, producing ghost
+	// rendezvous when a listener eventually appears.
+	DialBudget time.Duration
 	// Ready, if non-nil, is invoked once after the local bind succeeds
 	// and before the accept loop starts. Tests use this to learn the
 	// chosen bind address (when BindAddress is :0) without having to
@@ -105,8 +111,13 @@ func handleSOCKS5(ctx context.Context, conn net.Conn, cfg SOCKS5Config) error {
 	logger := cfg.Logger.With("bridge_id", bridgeID)
 	logger.Info("connection requested", "target", target)
 
-	// Dial the relay.
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
+	// Per-connection dial budget caps retry duration so a stale
+	// local socket can't keep retrying indefinitely (issue #94).
+	// The bridge below intentionally uses the original ctx, not
+	// dialCtx, so a successful dial isn't torn down by cancelDial.
+	dialCtx, cancelDial := context.WithTimeout(ctx, dialBudget(cfg.DialBudget))
+	ws, err := cfg.Metrics.InstrumentedDial(dialCtx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
+	cancelDial()
 	if err != nil {
 		_ = socks5.SendReply(conn, socks5.RepGeneralFailure, nil)
 		logger.Warn("socks5 failed", "error", err)

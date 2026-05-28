@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/philsphicas/aztunnel/internal/idgen"
 	"github.com/philsphicas/aztunnel/internal/metrics"
@@ -21,6 +22,12 @@ type ConnectConfig struct {
 	Stdout        io.WriteCloser
 	Logger        *slog.Logger
 	Metrics       *metrics.Metrics // optional; nil disables metrics
+	// DialBudget bounds the relay dial + retry duration. Zero (the
+	// default) uses defaultDialBudget. See issue #94: without a
+	// bound, retry runs until the parent ctx is cancelled (which in
+	// `connect` mode is the process lifetime), keeping the user
+	// hanging if no listener ever appears.
+	DialBudget time.Duration
 }
 
 // Connect performs a one-shot connection: dials the relay, sends the
@@ -35,7 +42,13 @@ func Connect(ctx context.Context, cfg ConnectConfig) error {
 	logger := cfg.Logger.With("bridge_id", bridgeID)
 	logger.Info("connection requested", "target", cfg.Target)
 
-	ws, err := cfg.Metrics.InstrumentedDial(ctx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
+	// Per-connection dial budget caps retry duration so the user
+	// isn't left hanging if no listener ever appears (issue #94).
+	// The bridge below uses the original ctx (process lifetime),
+	// not dialCtx, so a successful dial isn't torn down here.
+	dialCtx, cancelDial := context.WithTimeout(ctx, dialBudget(cfg.DialBudget))
+	ws, err := cfg.Metrics.InstrumentedDial(dialCtx, cfg.Endpoint, cfg.EntityPath, cfg.TokenProvider, cfg.ClientOptions, "sender", logger)
+	cancelDial()
 	if err != nil {
 		return err
 	}
