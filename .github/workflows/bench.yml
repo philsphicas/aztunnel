@@ -7,20 +7,22 @@ name: Bench
 #     and mux code paths without network noise.
 #   - bench-azure: slow (~10-15m), real Azure Relay namespace.
 #     Validates perf claims against the real data plane; the only
-#     place network-bound costs show up. Gated on bench-mock to
-#     avoid spending Azure cycles on a code change that already
-#     broke compilation or shape.
+#     place network-bound costs show up. Runs on push:main,
+#     nightly schedule, and manual dispatch — NOT on pull_request.
+#     See the `if:` guard on the job for the rationale.
 #
 # Both jobs post the raw output as a job summary plus an artifact.
 #
 # Triggers:
-#   - pull_request: gate every PR that could regress relay perf.
-#     Paths filter keeps doc-only PRs free.
-#   - push: main: catch regressions that slip through path-filtered
-#     PRs (e.g. infra refactors). Same paths filter as PR for
-#     symmetry — doc-only merges don't need an Azure run.
+#   - pull_request: runs bench-mock only. Cheap shape/regression
+#     gate; paths filter keeps doc-only PRs free.
+#   - push: main: runs both jobs. Catches regressions that slip
+#     through path-filtered PRs (e.g. infra refactors) and gives
+#     bench-azure a per-merge Azure baseline.
 #   - workflow_dispatch: manual re-run with operator-supplied knobs
 #     (apply to the Azure job only; mock is cheap and uses defaults).
+#     Use this to get an on-demand bench-azure run against a PR by
+#     dispatching with that PR's branch as `ref`.
 #   - schedule: nightly to surface drift not tied to a PR.
 
 on:
@@ -59,19 +61,22 @@ permissions:
   contents: read
 
 # Serialise per-ref so a fast follow-up commit cancels the older
-# run. Cross-ref isolation is provided at the hyco level by
-# e2e/azrelay's per-invocation provisioning (each invocation creates
-# its own hyco pair with a fresh suffix), so concurrent bench runs
-# on different refs do not share data-plane state. The shared
-# control plane (ARM) can throttle if many provisions land at once,
-# but the e2e suite already tolerates 429-with-backoff so this is
-# acceptable for the bench workflow too. PR number gives fork safety
-# (github.head_ref alone collides across forks with the same branch
-# name). The event-name suffix prevents a push-to-main and the
-# nightly schedule (both resolve to refs/heads/main) from cancelling
-# each other when they overlap.
+# run. Group name is intentionally `bench-` (not `bench-azure-`)
+# because on PRs only bench-mock runs and we want consecutive PR
+# pushes to cancel the previous mock run too. Cross-ref isolation
+# is provided at the hyco level by e2e/azrelay's per-invocation
+# provisioning (each invocation creates its own hyco pair with a
+# fresh suffix), so concurrent bench runs on different refs do not
+# share data-plane state. The shared control plane (ARM) can
+# throttle if many provisions land at once, but the e2e suite
+# already tolerates 429-with-backoff so this is acceptable for the
+# bench workflow too. PR number gives fork safety (github.head_ref
+# alone collides across forks with the same branch name). The
+# event-name suffix prevents a push-to-main and the nightly
+# schedule (both resolve to refs/heads/main) from cancelling each
+# other when they overlap.
 concurrency:
-  group: bench-azure-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.ref) }}
+  group: bench-${{ github.event.pull_request.number || format('{0}-{1}', github.event_name, github.ref) }}
   cancel-in-progress: true
 
 env:
@@ -135,6 +140,25 @@ jobs:
 
   bench-azure:
     needs: bench-mock
+    # Do NOT run on pull_request. Azure benches share the
+    # `aztunnel-e2e` namespace with whatever else is running
+    # against it — most importantly the same-PR e2e job, which
+    # provisions additional hycos and drives traffic through the
+    # same per-namespace frontend gateways. Empirically that
+    # contention is the dominant source of bench failures: of the
+    # three bench-azure runs on this PR's first day, the one that
+    # overlapped with the same-PR e2e job failed
+    # ConcurrentConnect_N100 / ShortSessionRate / ConnectFailureRate,
+    # while the two that ran in isolation passed cleanly. Rather
+    # than turning the benches into retry-tolerant tests (which
+    # would invalidate the very capacity signal they exist to
+    # measure), we restrict bench-azure to events where namespace
+    # contention is structurally low: push:main (one merge at a
+    # time), the nightly schedule (off-hours), and manual dispatch
+    # (operator picks the moment). To get an on-demand Azure bench
+    # for an open PR, dispatch this workflow with that PR's branch
+    # as `ref`.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: e2e-azure
     # 30m bench budget (~10-15m expected wall-clock for 7 sub-benches
