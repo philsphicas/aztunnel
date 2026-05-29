@@ -1109,6 +1109,9 @@ func ScenarioTokenFetchMetric(t *testing.T, b Backend) {
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		t.Fatalf("read: %v", err)
 	}
+	if !bytes.Equal(buf, payload) {
+		t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
+	}
 
 	// Token fetch happens inside the sender on the dial path —
 	// metric scrape lags the round-trip by Prometheus collection
