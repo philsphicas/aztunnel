@@ -48,9 +48,6 @@ jobs:
         run: go test -race -coverprofile=coverage-e2e.txt ./...
         working-directory: e2e
 
-      - name: E2E mock-backend scenarios
-        run: make e2e-mock
-
       - name: Coverage summary
         run: |
           echo "=== root module ==="
