@@ -56,8 +56,12 @@ on:
     # business-hour PR runs for the shared Azure namespace.
     - cron: "0 8 * * *"
 
+# Workflow-level grants only read permissions. id-token: write is
+# scoped to the bench-azure job (it's the only one that needs OIDC
+# for azure/login). bench-mock runs PR-supplied code via
+# `make bench`, so giving it OIDC token-write would expose a token
+# to untrusted code — see the bench-azure job for the narrow grant.
 permissions:
-  id-token: write
   contents: read
 
 # Serialise per-ref so a fast follow-up commit cancels the older
@@ -169,6 +173,13 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment: e2e-azure
+    # Narrow OIDC grant: only this job needs id-token: write (for
+    # azure/login below). bench-mock runs PR-supplied code via
+    # `make bench` and explicitly does NOT get a writable id-token
+    # — see the workflow-level `permissions:` block.
+    permissions:
+      id-token: write
+      contents: read
     # Defaults for non-dispatch events (push:main / schedule).
     # workflow_dispatch overrides these via the validation step
     # below. Scoped to this job — not workflow-level — because
