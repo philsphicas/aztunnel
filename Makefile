@@ -87,8 +87,8 @@ fmt-check: ## Check formatting (same as CI)
 # recipe exits with the combined non-zero status if any fails —
 # mirroring the multi-package `go test` semantics so a failure in
 # azrelay does not mask one in ./e2e/backends/azure/ (see also the
-# e2e-docker target's status-capture pattern). The 25 m per-
-# invocation timeout for the backend target is set below the 30 m
+# e2e-docker target's status-capture pattern). The 35 m per-
+# invocation timeout for the backend target is set below the 40 m
 # GHA job-level `timeout-minutes` to leave headroom for `go test`
 # to emit its own per-package goroutine dump on hang; the job-level
 # timeout still covers the whole job (checkout, build, azrelay,
@@ -101,7 +101,7 @@ e2e-azure: build ## Run e2e scenarios against a real Azure Relay namespace (conf
 	@cd e2e && { \
 		status=0; \
 		go test -tags=e2e -timeout=20m -v ./azrelay/ || status=$$?; \
-		go test -tags=e2e -timeout=25m -v ./backends/azure/... || status=$$?; \
+		go test -tags=e2e -timeout=35m -v ./backends/azure/... || status=$$?; \
 		exit $$status; \
 	}
 
@@ -207,7 +207,7 @@ perf-mock: ## Run performance characterization scenarios against the in-process 
 # first. Timeout matches `e2e-azure` to leave room for ARM
 # provisioning + the Performance round budgets.
 perf-azure: build ## Run performance characterization scenarios against a real Azure Relay namespace
-	cd e2e && go test -tags=e2e -timeout=25m -v \
+	cd e2e && go test -tags=e2e -timeout=35m -v \
 		-run='TestE2E_Azure/[^/]+/$(PERF_SCENARIO_FILTER)' \
 		./backends/azure/
 
