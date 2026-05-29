@@ -5,7 +5,7 @@ name: Bench
 #   - bench-mock:  fast (~seconds), in-process, free. Gates every
 #     PR/push and catches CPU/allocation regressions in the relay
 #     and mux code paths without network noise.
-#   - bench-azure: slow (~10-15m), real Azure Relay namespace.
+#   - bench-azure: ~2-5m, real Azure Relay namespace.
 #     Validates perf claims against the real data plane; the only
 #     place network-bound costs show up. Runs on push:main,
 #     nightly schedule, and manual dispatch — NOT on pull_request.
@@ -194,15 +194,23 @@ jobs:
       BENCH: "BenchmarkE2E_Azure"
       COUNT: "3"
       BENCHTIME: "10x"
-    # 40m bench budget. Azure runs four serial sub-benches
+      # `go test -timeout`. Self-terminates with cleanup before the
+      # job-level `timeout-minutes: 15` SIGKILLs the runner, leaving
+      # ~5m of headroom for artifact upload and the summary step to
+      # still fire on a runaway hang. Override via Makefile only —
+      # the workflow_dispatch input surface intentionally does not
+      # expose BENCH_TIMEOUT.
+      BENCH_TIMEOUT: "10m"
+    # 15m bench budget. Azure runs four serial sub-benches
     # (ConnectLatency_Serial_PortForward / _SOCKS5,
     # SteadyThroughput, ShortSessionRate_N1) — see
     # e2e/scenarios/bench.go's benchmarkCases registry; the mock-
     # only ConcurrentConnect_N100 is skipped on this backend. At
-    # ~1-2s/iter on Azure with count=3 × benchtime=10x that's
-    # ~10-15m of actual bench time, plus headroom for provisioning,
-    # az login, and one slow sub-bench.
-    timeout-minutes: 40
+    # ~0.3-1.0s/iter on Azure with count=3 × benchtime=10x that's
+    # ~2 min of actual bench time (measured on dispatch 26617916064);
+    # the 15m budget is ~5x headroom for module downloads, az login,
+    # hyco provisioning, ARM 429-with-backoff, and future sub-benches.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
 
