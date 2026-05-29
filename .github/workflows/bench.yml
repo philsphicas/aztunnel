@@ -112,8 +112,13 @@ jobs:
           # `env:` rationale for the historical bug this defends
           # against) can match zero sub-benches and still exit 0
           # with just `PASS` printed. Refuse to call that green.
-          if ! grep -q '^Benchmark' bench-out/mock.txt; then
-            echo "::error::make bench produced no Benchmark lines — bench regex matched nothing, or all subtests skipped"
+          # Match measurement rows specifically (they always have
+          # `ns/op`); with `go test -v`, parent group lines like
+          # `BenchmarkE2E_Mock/SteadyThroughput` print BEFORE any
+          # measurement, so `^Benchmark` alone would falsely pass
+          # for an all-skip run.
+          if ! grep -qE '^Benchmark.*ns/op' bench-out/mock.txt; then
+            echo "::error::make bench produced no measured Benchmark rows — bench regex matched nothing, or all selected sub-benches skipped"
             exit 1
           fi
 
@@ -332,11 +337,17 @@ jobs:
           make bench-azure 2>&1 | tee bench-out/raw.txt
           # Belt-and-braces: even with the preflight above and
           # TestMain's fatal-on-missing-config, a future regression
-          # (or a dispatch-time `bench` regex that matches nothing)
-          # could exit Go's test binary cleanly with zero Benchmark
-          # lines emitted. Refuse to call that green.
-          if ! grep -q '^Benchmark' bench-out/raw.txt; then
-            echo "::error::make bench-azure produced no Benchmark lines — bench regex matched nothing, or all subtests skipped"
+          # (or a dispatch-time `bench` regex that matches nothing,
+          # or one that selects only MockOnly sub-benches that all
+          # skip on Azure) could exit Go's test binary cleanly with
+          # zero measured benchmark rows emitted. Refuse to call
+          # that green. Match measurement rows specifically (they
+          # always have `ns/op`); with `go test -v`, parent group
+          # lines like `BenchmarkE2E_Azure/sas` print BEFORE any
+          # measurement, so `^Benchmark` alone would falsely pass
+          # for an all-skip run.
+          if ! grep -qE '^Benchmark.*ns/op' bench-out/raw.txt; then
+            echo "::error::make bench-azure produced no measured Benchmark rows — bench regex matched nothing, or all selected sub-benches skipped"
             exit 1
           fi
 
