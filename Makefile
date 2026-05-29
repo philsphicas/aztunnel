@@ -168,8 +168,12 @@ bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
 # BENCH defaults to BenchmarkE2E_Azure (the single-mode suite);
 # override to run a specific benchmark.
 #
-# No `build` dep: BenchmarkE2E_Azure uses the in-process backend,
-# not the CLI binary, so building aztunnel here is wasted work.
+# No `build` dep: BenchmarkE2E_Azure exercises real `aztunnel`
+# subprocesses (the Azure backend driver in e2e/backends/azure
+# matches what production users hit), but TestMain pre-builds
+# cmd/aztunnel internally via helpers_test.go:buildAztunnelBinary
+# before any benchmark runs, so re-building from this Makefile
+# target would just duplicate work TestMain already does.
 # `go test -v` is required so that BackendScope-driven b.Skipf
 # emissions ("--- SKIP:" markers + the skip reason on the preceding
 # log line) actually land in the captured output; without -v Go's
