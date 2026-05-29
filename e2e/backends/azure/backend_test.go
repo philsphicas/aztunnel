@@ -128,9 +128,30 @@ func (b *azureBackend) Cell(values map[string]string) scenarios.Backend {
 // seconds, not hundreds of ms).
 //
 // Returns 3 s regardless of authName: both Entra and SAS hit the
-// same control-plane rendezvous path.
+// same control-plane rendezvous path for steady-state dials. Per-
+// auth cold-start cost is regression-protected separately via
+// ColdStartLatencyThreshold.
 func (*azureBackend) ConnectLatencyThreshold() time.Duration {
 	return 3 * time.Second
+}
+
+// ColdStartLatencyThreshold returns the per-backend ceiling for the
+// first connection through a freshly-started sender. The first
+// dial pays one-time costs the steady-state threshold excludes —
+// most prominently the EntraTokenProvider's initial OAuth2 token
+// fetch. The cost varies with the underlying TokenCredential the
+// operator's DefaultAzureCredential resolves to: workload identity
+// federation in CI runs ~1.3 s, `az` CLI shell-out locally runs
+// ~3.3 s; both are well inside the 6 s ceiling. SAS cells pay no
+// cold-start cost (HMAC signing is in-process) but share the same
+// threshold for simplicity.
+//
+// 6 s is intentionally wider than ConnectLatencyThreshold so the
+// scenario remains CI-stable across credential paths while still
+// catching multi-second regressions (e.g., a 10 s degradation in
+// Entra ID's token endpoint would still trip it).
+func (*azureBackend) ColdStartLatencyThreshold() time.Duration {
+	return 6 * time.Second
 }
 
 // Setup brings up the requested topology (NumListeners listeners and

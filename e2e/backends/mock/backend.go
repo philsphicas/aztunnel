@@ -87,6 +87,15 @@ func (*MockBackend) ConnectLatencyThreshold() time.Duration {
 	return 3 * time.Second
 }
 
+// ColdStartLatencyThreshold returns the per-backend ceiling for the
+// first connection through a freshly-started sender. The mock has
+// no per-process credential cache to warm — every dial pays the
+// same rendezvous delay regardless of order — so the cold-start
+// budget intentionally matches ConnectLatencyThreshold.
+func (*MockBackend) ColdStartLatencyThreshold() time.Duration {
+	return 3 * time.Second
+}
+
 // Setup brings up the in-process topology described by opts and blocks
 // until every listener's control channel is attached and every sender
 // bind is accepting TCP. All goroutines, the mock HTTP server, and

@@ -109,7 +109,29 @@ type Backend interface {
 	// the target dial, the echo round-trip, and the socket close. A
 	// backend that wanted to split those costs into separate budgets
 	// would need a richer interface.
+	//
+	// The Performance suite's ConnectLatency_Serial scenarios drive
+	// this threshold against the steady-state path — they discard one
+	// untimed warm-up dial before measuring. Cold-start cost is
+	// regression-protected separately via ColdStartLatencyThreshold
+	// and ConnectLatency_ColdStart_* scenarios.
 	ConnectLatencyThreshold() time.Duration
+
+	// ColdStartLatencyThreshold is the per-backend ceiling for the
+	// very first connection through a freshly-started sender — the
+	// connection that pays one-time costs the steady-state threshold
+	// excludes (most notably the EntraTokenProvider's first OAuth2
+	// token fetch). It is read on the cell-pinned backend so an Azure
+	// implementation may use a wider value for Entra cells than for
+	// SAS cells.
+	//
+	// The ConnectLatency_ColdStart_* scenarios assert exactly one
+	// timed dial against this threshold. The budget is intentionally
+	// looser than ConnectLatencyThreshold so it remains stable across
+	// the credential paths operators legitimately use (workload
+	// identity federation in CI, `az` CLI shell-out locally) while
+	// still catching multi-second regressions.
+	ColdStartLatencyThreshold() time.Duration
 
 	// Setup brings up a relay topology described by opts and returns a
 	// Tunnel handle the scenario can drive. All resources (goroutines,

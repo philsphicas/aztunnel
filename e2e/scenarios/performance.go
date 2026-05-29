@@ -48,6 +48,8 @@ func RunPerformanceScenarios(t *testing.T, b Backend) {
 	}{
 		{"ConnectLatency_Serial_PortForward", ScenarioConnectLatency_Serial_PortForward},
 		{"ConnectLatency_Serial_SOCKS5", ScenarioConnectLatency_Serial_SOCKS5},
+		{"ConnectLatency_ColdStart_PortForward", ScenarioConnectLatency_ColdStart_PortForward},
+		{"ConnectLatency_ColdStart_SOCKS5", ScenarioConnectLatency_ColdStart_SOCKS5},
 		{"ShortSession_Serial", ScenarioShortSession_Serial},
 		// Parameterized echo-workload scenarios — see WorkloadShape doc below.
 		{"Serial_ConnPerRequestEcho_PortForward", ScenarioSerial_ConnPerRequestEcho_PortForward},
@@ -248,6 +250,92 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 		}
 		t.Logf("ConnectLatency_Serial_%v iter %d: %v (< %v)", mode, i, elapsed, threshold)
 	}
+}
+
+// ScenarioConnectLatency_ColdStart_PortForward opens exactly one
+// port-forward connection on a freshly-started sender, times the
+// full Dial → 1-byte write → 1-byte echo read → Close round-trip,
+// and asserts the elapsed wall time is less than
+// b.ColdStartLatencyThreshold(). It deliberately performs no warm-
+// up: the measured iteration is the first connection through the
+// sender, so per-process cold-start costs the steady-state scenario
+// excludes (most prominently the EntraTokenProvider's first OAuth2
+// token fetch) are inside the budget.
+//
+// This scenario is a regression alarm on first-connection latency.
+// The steady-state ConnectLatency_Serial_* scenarios discard one
+// untimed warm-up dial before measuring; if that warm-up dial
+// silently drifts from ~1 s to >20 s (e.g. a token-cache regression
+// or an Entra ID outage) the steady-state scenarios would keep
+// passing while operators would see catastrophic first-connection
+// latency. ColdStart guards exactly that path with a separate,
+// wider budget.
+//
+// Backends configure the budget via ColdStartLatencyThreshold; see
+// the Backend.ColdStartLatencyThreshold doc for the rationale on
+// the Azure value (covers both workload-identity-federation in CI
+// at ~1.3 s and `az` CLI shell-out locally at ~3.3 s).
+//
+// Failure-mode handling mirrors runSerialConnectLatency: operational
+// errors are t.Fatalf, threshold violations are t.Errorf. With only
+// one measured dial the distinction matters less than in the serial
+// case but the symmetry keeps log lines uniform between the two
+// scenario families.
+func ScenarioConnectLatency_ColdStart_PortForward(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	runColdStartConnectLatency(t, b, ModePortForward)
+}
+
+// ScenarioConnectLatency_ColdStart_SOCKS5 mirrors the port-forward
+// variant against a SOCKS5 proxy sender. The SOCKS5 handshake adds
+// tens of milliseconds on top of the relay rendezvous and OAuth2
+// token fetch; the same ColdStartLatencyThreshold applies because
+// the handshake cost is negligible relative to the cold-start
+// budget.
+func ScenarioConnectLatency_ColdStart_SOCKS5(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	runColdStartConnectLatency(t, b, ModeSOCKS5)
+}
+
+// runColdStartConnectLatency is the shared implementation of the
+// two ConnectLatency_ColdStart variants. It builds a fresh topology,
+// performs exactly one timed dial through the cold sender, and
+// asserts the elapsed time is below b.ColdStartLatencyThreshold().
+//
+// Unlike runSerialConnectLatency, no warm-up dial precedes the
+// measurement — measuring the cold-start cost is the whole point.
+// The dial timeout and connection deadline both use
+// threshold + connectSlack so a regression surfaces as the explicit
+// elapsed >= threshold assertion rather than as an i/o timeout from
+// the deadline firing exactly at the threshold.
+func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
+	t.Helper()
+	threshold := b.ColdStartLatencyThreshold()
+	echo := StartPlainEcho(t)
+	opts := SetupOptions{
+		NumListeners:   1,
+		SenderMode:     mode,
+		AllowedTargets: []string{echo.Addr()},
+	}
+	if mode == ModePortForward {
+		opts.Target = echo.Addr()
+	}
+	tun := b.Setup(t, opts)
+
+	payload := []byte{0x42}
+	buf := make([]byte, 1)
+
+	elapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, threshold)
+	if err != nil {
+		t.Fatalf("cold-start dial: %v (elapsed=%v)", err, elapsed)
+	}
+	if elapsed >= threshold {
+		t.Errorf("cold-start connect latency %v >= threshold %v", elapsed, threshold)
+		return
+	}
+	t.Logf("ConnectLatency_ColdStart_%v: %v (< %v)", mode, elapsed, threshold)
 }
 
 // timeOneConnect opens one connection in the given mode, writes
