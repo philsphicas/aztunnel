@@ -109,7 +109,29 @@ type Backend interface {
 	// the target dial, the echo round-trip, and the socket close. A
 	// backend that wanted to split those costs into separate budgets
 	// would need a richer interface.
+	//
+	// The Performance suite's ConnectLatency_Serial scenarios drive
+	// this threshold against the steady-state path — they discard one
+	// untimed warm-up dial before measuring. Cold-start cost is
+	// regression-protected separately via ColdStartLatencyThreshold
+	// and ConnectLatency_ColdStart_* scenarios.
 	ConnectLatencyThreshold() time.Duration
+
+	// ColdStartLatencyThreshold is the per-backend ceiling for the
+	// very first connection through a freshly-started sender — the
+	// connection that pays one-time costs the steady-state threshold
+	// excludes (most notably the EntraTokenProvider's first OAuth2
+	// token fetch). It is read on the cell-pinned backend so an Azure
+	// implementation may use a wider value for Entra cells than for
+	// SAS cells.
+	//
+	// The ConnectLatency_ColdStart_* scenarios assert exactly one
+	// timed dial against this threshold. The budget is intentionally
+	// looser than ConnectLatencyThreshold so it remains stable across
+	// the credential paths operators legitimately use (workload
+	// identity federation in CI, `az` CLI shell-out locally) while
+	// still catching multi-second regressions.
+	ColdStartLatencyThreshold() time.Duration
 
 	// Setup brings up a relay topology described by opts and returns a
 	// Tunnel handle the scenario can drive. All resources (goroutines,
@@ -247,6 +269,24 @@ type AuthOverride struct {
 	// mock backend ignores it because the mock has no Entra
 	// validation path.
 	BadEntraToken string
+
+	// UseOppositeSASDirection, if true, replaces the SAS credentials
+	// with the valid keys from the OPPOSITE direction — i.e. on
+	// OverrideListenerAuth it supplies the sender-direction key as
+	// the listener's credentials, and vice versa on
+	// OverrideSenderAuth. Exercises the relay's per-key Listen vs
+	// Send claim enforcement: the SAS material itself authenticates
+	// successfully, but the claim does not authorize the action.
+	//
+	// Mutually exclusive with BadSASKey on the same override —
+	// setting both is a test-author error and Backends MUST fatal.
+	//
+	// Azure-only contract: the mock relay does not model per-key
+	// direction, so callers MUST scope the scenario to AzureOnly
+	// (or otherwise gate on backend) and the Azure backend MUST
+	// skip cells whose auth method is not SAS — the relevant key
+	// material exists only on the SAS hyco.
+	UseOppositeSASDirection bool
 }
 
 // FailureHandle is returned by Backend.SetupExpectingFailure. It
@@ -351,6 +391,20 @@ type Sender struct {
 	// nil and the scenario calls t.Skip.
 	DialDurationSamples func() uint64
 
+	// TokenFetchOK returns one TokenFetchObservation per
+	// (provider) label observed in the aztunnel_token_fetch_total
+	// and aztunnel_token_fetch_seconds_count metrics on this
+	// sender's /metrics surface, filtered to result="ok". Returns
+	// nil when no observations have been recorded yet.
+	//
+	// Used by ScenarioTokenFetchMetric (scope=AzureOnly) to assert
+	// that exactly one token-provider was used and that the counter
+	// and histogram counts agree. Optional: backends that do not
+	// fetch real credentials (the in-process mock) leave this nil;
+	// the scenario itself carries scope=AzureOnly so the mock skips
+	// it before dereferencing this field.
+	TokenFetchOK func() []TokenFetchObservation
+
 	// Stop drops this sender. Idempotent.
 	Stop func()
 
@@ -358,6 +412,27 @@ type Sender struct {
 	// joined by newlines. See Listener.Logs for usage and the
 	// optional-nil contract.
 	Logs func() string
+}
+
+// TokenFetchObservation is one (provider, counter, histogram-count)
+// triple observed on a sender's /metrics surface for a single
+// `provider` label with result="ok". Used by ScenarioTokenFetchMetric
+// to assert exactly one provider was exercised and that the counter
+// and histogram count agree (the wrapper observes both per call).
+type TokenFetchObservation struct {
+	// Provider is the value of the `provider` Prometheus label
+	// (e.g. "entra" or "sas") on the observed metric line.
+	Provider string
+
+	// CounterValue is the aztunnel_token_fetch_total{provider=…,
+	// result="ok"} value at the moment TokenFetchOK was called.
+	CounterValue uint64
+
+	// HistogramCount is the aztunnel_token_fetch_seconds_count{
+	// provider=…, result="ok"} value at the moment TokenFetchOK was
+	// called. Must equal CounterValue (the observability wrapper
+	// records both per token fetch).
+	HistogramCount uint64
 }
 
 // Tunnel is a running listener/sender/relay topology returned by

@@ -25,26 +25,33 @@ import (
 // log capture so the parity claim stays honest.
 func RunObservabilityScenarios(t *testing.T, b Backend) {
 	t.Helper()
-	scenarios := []struct {
-		name string
-		run  func(*testing.T, Backend)
-	}{
-		{"BridgeID_Correlation", ScenarioBridgeID_Correlation},
-		{"ControlSessionID_OnConnectedLine", ScenarioControlSessionID_OnConnectedLine},
-		{"SenderLogsCode_OnConnectFailure", ScenarioSenderLogsCode_OnConnectFailure},
-		{"ListenerDialFailureLog_CarriesCode", ScenarioListenerDialFailureLog_CarriesCode},
-		{"BridgeCauseLogs", ScenarioBridgeCauseLogs},
-		{"BridgePerDirection_NormalClose", ScenarioBridgePerDirection_NormalClose},
-		{"Metrics_EndpointShape", ScenarioMetrics_EndpointShape},
-		{"Metrics_BothSidesConverge", ScenarioMetrics_BothSidesConverge},
-		{"Metrics_DialDuration", ScenarioMetrics_DialDuration},
-		{"ListenerID_PropagatesAndChangesOnRestart", ScenarioListenerID_PropagatesAndChangesOnRestart},
-		{"AcceptID_Saturation", ScenarioAcceptID_Saturation},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			sc.run(t, b)
-		})
+	runScenarioCases(t, b, observabilityCases())
+}
+
+// observabilityCases is the metadata-only registry of observability
+// scenarios. The cross-backend log-shape parity gate is what makes
+// the suite meaningful, so every entry is AnyBackend except
+// TokenFetchMetric — which exists only on Azure because the mock has
+// no Entra/SAS provider to fetch from.
+func observabilityCases() []scenarioCase {
+	return []scenarioCase{
+		{name: "BridgeID_Correlation", scope: AnyBackend, run: ScenarioBridgeID_Correlation},
+		{name: "ControlSessionID_OnConnectedLine", scope: AnyBackend, run: ScenarioControlSessionID_OnConnectedLine},
+		{name: "SenderLogsCode_OnConnectFailure", scope: AnyBackend, run: ScenarioSenderLogsCode_OnConnectFailure},
+		{name: "ListenerDialFailureLog_CarriesCode", scope: AnyBackend, run: ScenarioListenerDialFailureLog_CarriesCode},
+		{name: "BridgeCauseLogs", scope: AnyBackend, run: ScenarioBridgeCauseLogs},
+		{name: "BridgePerDirection_NormalClose", scope: AnyBackend, run: ScenarioBridgePerDirection_NormalClose},
+		{name: "Metrics_EndpointShape", scope: AnyBackend, run: ScenarioMetrics_EndpointShape},
+		{name: "Metrics_BothSidesConverge", scope: AnyBackend, run: ScenarioMetrics_BothSidesConverge},
+		{name: "Metrics_DialDuration", scope: AnyBackend, run: ScenarioMetrics_DialDuration},
+		{name: "ListenerID_PropagatesAndChangesOnRestart", scope: AnyBackend, run: ScenarioListenerID_PropagatesAndChangesOnRestart},
+		{name: "AcceptID_Saturation", scope: AnyBackend, run: ScenarioAcceptID_Saturation},
+		{
+			name:   "TokenFetchMetric",
+			scope:  AzureOnly,
+			reason: "exercises real Entra/SAS provider token fetch wiring; the mock relay does not fetch credentials",
+			run:    ScenarioTokenFetchMetric,
+		},
 	}
 }
 
@@ -171,26 +178,83 @@ func requireLogs(t *testing.T, tun *Tunnel) {
 	}
 }
 
-// bridgeIDForTarget scans logs for the first "connection requested"
-// line whose target field matches target and returns its bridge_id.
-// Empty string when no match. Anchoring on the deterministic
-// "connection requested" line avoids double-counting bridges that
-// emit multiple bridge_id-tagged lines (debug logs, bridge-end
-// logs, etc.).
+// bridgeIDForTarget returns the bridge_id minted by the sender for
+// the most recent successful relay rendezvous to target. It scans
+// for "connection requested" lines whose target matches and returns
+// the bridge_id of the last such line whose bridge_id also appears
+// on a "relay connected" log line. Empty string when no match.
+//
+// Filtering by "relay connected" is essential: when
+// dialSOCKS5WithRetry retries a transient relay-side drop, the
+// sender emits "connection requested" for both the abandoned
+// attempt and the successful retry, but only the successful
+// attempt's bridge_id round-trips through the listener. Returning
+// the abandoned bridge_id would then race the test against a
+// listener that never saw it. Both backends run the sender at
+// debug log level (see e2e/backends/azure/backend_test.go and
+// e2e/backends/mock/backend.go) so the "relay connected" signal
+// is reliably present.
+//
+// Anchoring on the deterministic "connection requested" line for
+// target selection avoids double-counting bridges that emit
+// multiple bridge_id-tagged lines (debug logs, bridge-end logs,
+// etc.).
+//
+// target is matched as a whole-field slog attribute rather than a
+// substring: a target of "127.0.0.1:4141" must not match a log
+// line carrying "target=127.0.0.1:41415". slog text encoding emits
+// the addr:port unquoted (no spaces inside) so splitting the line
+// on whitespace and looking for an exact "target=<value>" token is
+// both correct and cheap.
 func bridgeIDForTarget(logs, target string) string {
+	connected := connectedBridgeIDs(logs)
+	field := "target=" + target
+	var last string
 	for _, line := range strings.Split(logs, "\n") {
 		if !strings.Contains(line, `msg="connection requested"`) {
 			continue
 		}
-		if !strings.Contains(line, "target="+target) {
+		if !hasField(line, field) {
 			continue
 		}
 		m := bridgeIDRe.FindStringSubmatch(line)
-		if m != nil {
-			return m[1]
+		if m == nil {
+			continue
+		}
+		if _, ok := connected[m[1]]; !ok {
+			continue
+		}
+		last = m[1]
+	}
+	return last
+}
+
+// hasField reports whether line contains field as a whole
+// whitespace-separated token, not merely as a substring.
+func hasField(line, field string) bool {
+	for _, f := range strings.Fields(line) {
+		if f == field {
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+// connectedBridgeIDs returns the set of bridge_ids that have a
+// "relay connected" line in logs. Used by bridgeIDForTarget to
+// exclude bridges that dialSOCKS5WithRetry abandoned before the
+// relay rendezvous completed.
+func connectedBridgeIDs(logs string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, `msg="relay connected"`) {
+			continue
+		}
+		if m := bridgeIDRe.FindStringSubmatch(line); m != nil {
+			out[m[1]] = struct{}{}
+		}
+	}
+	return out
 }
 
 // listenerHasBridge reports whether the listener log stream contains
@@ -993,4 +1057,83 @@ func waitForLogSubstring(logs func() string, substr string, timeout time.Duratio
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
+}
+
+// ScenarioTokenFetchMetric drives one short echo round-trip through
+// the tunnel and asserts the sender's /metrics surface records the
+// token fetch:
+//   - aztunnel_token_fetch_total{provider=X,result="ok"} >= 1
+//   - aztunnel_token_fetch_seconds_count{provider=X,result="ok"} >= 1
+//   - histogram count equals counter (the observability wrapper
+//     records both per call, so divergence means one side wasn't
+//     wired)
+//   - exactly one provider observed (no token leak across providers)
+//
+// Provider is taken from the cell's auth axis (entra/sas); the
+// scenario does not need to know the provider name in advance —
+// Backend.Sender.TokenFetchOK reports observed providers via the
+// returned []TokenFetchObservation slice.
+//
+// scope=AzureOnly via the observability registry: the in-process
+// mock has no Entra/SAS provider to fetch from. The mock-side
+// emulation of the metric SHAPE lives in
+// TestMockEmulates_TokenFetchMetric.
+func ScenarioTokenFetchMetric(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	sender := tun.Senders[0]
+	if sender.TokenFetchOK == nil {
+		t.Skipf("backend=%q does not expose Sender.TokenFetchOK", b.Name())
+	}
+
+	conn, err := net.DialTimeout("tcp", tun.SenderAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	payload := []byte("token-fetch-metric\n")
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if err := writeFull(conn, payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(buf, payload) {
+		t.Fatalf("echo mismatch: got %q, want %q", buf, payload)
+	}
+
+	// Token fetch happens inside the sender on the dial path —
+	// metric scrape lags the round-trip by Prometheus collection
+	// granularity. Poll until we see at least one observation.
+	var observed []TokenFetchObservation
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		observed = sender.TokenFetchOK()
+		if len(observed) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(observed) != 1 {
+		t.Fatalf("got %d token-fetch providers, want exactly 1: %+v", len(observed), observed)
+	}
+	obs := observed[0]
+	if obs.CounterValue < 1 {
+		t.Errorf("token_fetch_total{provider=%q,result=\"ok\"} = %d, want >= 1", obs.Provider, obs.CounterValue)
+	}
+	if obs.HistogramCount != obs.CounterValue {
+		t.Errorf("histogram count %d != counter %d for provider=%q (wrapper must observe both per call)",
+			obs.HistogramCount, obs.CounterValue, obs.Provider)
+	}
 }

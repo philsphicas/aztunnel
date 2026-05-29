@@ -87,6 +87,15 @@ func (*MockBackend) ConnectLatencyThreshold() time.Duration {
 	return 3 * time.Second
 }
 
+// ColdStartLatencyThreshold returns the per-backend ceiling for the
+// first connection through a freshly-started sender. The mock has
+// no per-process credential cache to warm — every dial pays the
+// same rendezvous delay regardless of order — so the cold-start
+// budget intentionally matches ConnectLatencyThreshold.
+func (*MockBackend) ColdStartLatencyThreshold() time.Duration {
+	return 3 * time.Second
+}
+
 // Setup brings up the in-process topology described by opts and blocks
 // until every listener's control channel is attached and every sender
 // bind is accepting TCP. All goroutines, the mock HTTP server, and
@@ -430,6 +439,15 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 	}
 	if opts.OverrideListenerAuth == nil && opts.OverrideSenderAuth == nil && opts.OverrideHycoName == "" {
 		t.Fatalf("SetupExpectingFailure requires at least one override (ListenerAuth, SenderAuth, or HycoName)")
+	}
+	// UseOppositeSASDirection exercises Azure's per-key claim
+	// enforcement, which the mock relay does not model (the mock
+	// has a single shared key for both directions). Scenarios that
+	// set this MUST scope to AzureOnly; the defensive skip here
+	// catches any future caller that forgets.
+	if (opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.UseOppositeSASDirection) ||
+		(opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.UseOppositeSASDirection) {
+		t.Skipf("UseOppositeSASDirection requires per-direction SAS keys not modelled by the mock relay")
 	}
 
 	host, clientOpts := startMockRelay(t, b.DelayProfile)

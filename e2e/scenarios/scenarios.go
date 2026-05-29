@@ -64,23 +64,22 @@ func RunAllBenchmarks(b *testing.B, backend Backend) {
 // suite so this gate stays green regardless of bridge architecture.
 func RunCoreScenarios(t *testing.T, b Backend) {
 	t.Helper()
-	scenarios := []struct {
-		name string
-		run  func(*testing.T, Backend)
-	}{
-		{"Echo_PortForward", ScenarioEcho_PortForward},
-		{"Echo_PortForward_CIDRAllow", ScenarioEcho_PortForward_CIDRAllow},
-		{"Echo_SOCKS5", ScenarioEcho_SOCKS5},
-		{"Echo_Connect", ScenarioEcho_Connect},
-		{"SSH_ProxyCommand", ScenarioSSH_ProxyCommand},
-		{"SOCKS5_DistinctTargets", ScenarioSOCKS5_DistinctTargets},
-		{"Ordering_PortForward", ScenarioOrdering_PortForward},
-		{"Bidirectional_PortForward", ScenarioBidirectional_PortForward},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			sc.run(t, b)
-		})
+	runScenarioCases(t, b, coreCases())
+}
+
+// coreCases is the metadata-only registry of core scenarios. Split
+// from RunCoreScenarios so scenarios_test.go can pin the registry
+// shape without standing up a topology.
+func coreCases() []scenarioCase {
+	return []scenarioCase{
+		{name: "Echo_PortForward", scope: AnyBackend, run: ScenarioEcho_PortForward},
+		{name: "Echo_PortForward_CIDRAllow", scope: AnyBackend, run: ScenarioEcho_PortForward_CIDRAllow},
+		{name: "Echo_SOCKS5", scope: AnyBackend, run: ScenarioEcho_SOCKS5},
+		{name: "Echo_Connect", scope: AnyBackend, run: ScenarioEcho_Connect},
+		{name: "SSH_ProxyCommand", scope: AnyBackend, run: ScenarioSSH_ProxyCommand},
+		{name: "SOCKS5_DistinctTargets", scope: AnyBackend, run: ScenarioSOCKS5_DistinctTargets},
+		{name: "Ordering_PortForward", scope: AnyBackend, run: ScenarioOrdering_PortForward},
+		{name: "Bidirectional_PortForward", scope: AnyBackend, run: ScenarioBidirectional_PortForward},
 	}
 }
 

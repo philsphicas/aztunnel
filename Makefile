@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure vulncheck bench check-installable help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure vulncheck bench bench-azure check-installable help
 
 .DEFAULT_GOAL := help
 
@@ -87,8 +87,8 @@ fmt-check: ## Check formatting (same as CI)
 # recipe exits with the combined non-zero status if any fails —
 # mirroring the multi-package `go test` semantics so a failure in
 # azrelay does not mask one in ./e2e/backends/azure/ (see also the
-# e2e-docker target's status-capture pattern). The 25 m per-
-# invocation timeout for the backend target is set below the 30 m
+# e2e-docker target's status-capture pattern). The 50 m per-
+# invocation timeout for the backend target is set below the 60 m
 # GHA job-level `timeout-minutes` to leave headroom for `go test`
 # to emit its own per-package goroutine dump on hang; the job-level
 # timeout still covers the whole job (checkout, build, azrelay,
@@ -101,7 +101,7 @@ e2e-azure: build ## Run e2e scenarios against a real Azure Relay namespace (conf
 	@cd e2e && { \
 		status=0; \
 		go test -tags=e2e -timeout=20m -v ./azrelay/ || status=$$?; \
-		go test -tags=e2e -timeout=25m -v ./backends/azure/... || status=$$?; \
+		go test -tags=e2e -timeout=50m -v ./backends/azure/... || status=$$?; \
 		exit $$status; \
 	}
 
@@ -150,9 +150,42 @@ vulncheck: ## Check Go dependencies for known vulnerabilities
 	cd e2e && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
-	cd e2e && go test -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
+	cd e2e && go test -v -tags=e2e -run='^$$' -bench='$(or $(BENCH),.)' -benchmem \
 		-count='$(or $(COUNT),1)' -benchtime='$(or $(BENCHTIME),1s)' \
 		./backends/mock/...
+
+# bench-azure runs the e2e benchmark suite against a real Azure
+# Relay namespace. Default knobs (COUNT=3, BENCHTIME=10x) are tuned
+# for the CI bench workflow's budget: each iteration is a real relay
+# round-trip (~0.3-1.0s on Azure today, varies ~3x with namespace
+# latency), so 10x per benchmark with 3 samples per cell yields ~2
+# minutes of actual benchmark time across the registered sub-benches
+# (see e2e/scenarios/bench.go's benchmarkCases — Azure runs the four
+# serial ones; the mock-only ConcurrentConnect_N100 is skipped on
+# this backend) while giving benchstat enough data without
+# amplifying namespace cost disproportionately. Operators wanting
+# tighter confidence intervals can run locally with COUNT=6
+# BENCHTIME=20x and a longer timeout.
+# BENCH defaults to BenchmarkE2E_Azure (the single-mode suite);
+# override to run a specific benchmark.
+#
+# No `build` dep: BenchmarkE2E_Azure exercises real `aztunnel`
+# subprocesses (the Azure backend driver in e2e/backends/azure
+# matches what production users hit), but TestMain pre-builds
+# cmd/aztunnel internally via helpers_test.go:buildAztunnelBinary
+# before any benchmark runs, so re-building from this Makefile
+# target would just duplicate work TestMain already does.
+# `go test -v` is required so that BackendScope-driven b.Skipf
+# emissions ("--- SKIP:" markers + the skip reason on the preceding
+# log line) actually land in the captured output; without -v Go's
+# bench harness suppresses both for skipped sub-benches and the
+# scope-skip decision becomes invisible to the operator.
+bench-azure: ## Run Azure-live e2e benchmarks (override BENCH=, COUNT=, BENCHTIME=, BENCH_TIMEOUT=)
+	cd e2e && go test -v -tags=e2e \
+		-run='^$$' -bench='$(or $(BENCH),BenchmarkE2E_Azure)' -benchmem \
+		-count='$(or $(COUNT),3)' -benchtime='$(or $(BENCHTIME),10x)' \
+		-timeout='$(or $(BENCH_TIMEOUT),30m)' \
+		./backends/azure/...
 
 # Performance characterization scenarios (e2e/scenarios/performance.go).
 # Filters the shared e2e suite down to the performance scenarios via
@@ -174,7 +207,7 @@ perf-mock: ## Run performance characterization scenarios against the in-process 
 # first. Timeout matches `e2e-azure` to leave room for ARM
 # provisioning + the Performance round budgets.
 perf-azure: build ## Run performance characterization scenarios against a real Azure Relay namespace
-	cd e2e && go test -tags=e2e -timeout=25m -v \
+	cd e2e && go test -tags=e2e -timeout=35m -v \
 		-run='TestE2E_Azure/[^/]+/$(PERF_SCENARIO_FILTER)' \
 		./backends/azure/
 

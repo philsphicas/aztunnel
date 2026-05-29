@@ -24,47 +24,57 @@ import (
 // burns mock-CI budget without adding new failure modes.
 func RunTopologyScenarios(t *testing.T, b Backend) {
 	t.Helper()
+	runScenarioCases(t, b, topologyCases())
+}
 
+// topologyCases is the metadata-only registry of topology scenarios.
+//
+// Topology scenarios are parameterised by an inner N×M cell matrix
+// (number of senders × number of listeners). Each registry entry's
+// run closure iterates that scenario's cells and emits per-cell
+// sub-tests named `N{n}M{m}`. The cell matrices are conservative —
+// we cover only the four corners of the {1,2}×{1,2} matrix where
+// they add information.
+//
+// Capability gates (e.g. AddListener nil) are NOT scope decisions —
+// they're handled inside the scenario body so backends missing a
+// capability are simply not exercised (no t.Skip noise).
+func topologyCases() []scenarioCase {
 	type cell struct{ n, m int }
 	all := []cell{{1, 1}, {1, 2}, {2, 1}, {2, 2}}
 	withMultiListener := []cell{{1, 2}, {2, 2}}
 	withMultiSender := []cell{{2, 1}, {2, 2}}
 
-	scenarios := []struct {
-		name  string
-		cells []cell
-		run   func(*testing.T, Backend, int, int)
-	}{
-		{"NSenderMListener_Echo", all, scenarioNMEcho},
-		{"Distribution_PerListener", withMultiListener, scenarioDistributionPerListener},
-		{"Distribution_PerSender", withMultiSender, scenarioDistributionPerSender},
-		{"HotDropListener", withMultiListener, scenarioHotDropListener},
+	matrixRunner := func(cells []cell, fn func(*testing.T, Backend, int, int)) func(*testing.T, Backend) {
+		return func(t *testing.T, b Backend) {
+			t.Helper()
+			for _, c := range cells {
+				c := c
+				name := fmt.Sprintf("N%dM%d", c.n, c.m)
+				t.Run(name, func(t *testing.T) {
+					fn(t, b, c.n, c.m)
+				})
+			}
+		}
+	}
+
+	return []scenarioCase{
+		{name: "NSenderMListener_Echo", scope: AnyBackend, run: matrixRunner(all, scenarioNMEcho)},
+		{name: "Distribution_PerListener", scope: AnyBackend, run: matrixRunner(withMultiListener, scenarioDistributionPerListener)},
+		{name: "Distribution_PerSender", scope: AnyBackend, run: matrixRunner(withMultiSender, scenarioDistributionPerSender)},
+		{name: "HotDropListener", scope: AnyBackend, run: matrixRunner(withMultiListener, scenarioHotDropListener)},
 		// Hot-add starts at M=1 and grows; running it across multiple
 		// (N) cells doesn't add a new failure mode, so it gets just
 		// one representative cell.
-		{"HotAddListener", []cell{{1, 1}}, scenarioHotAddListener},
+		{name: "HotAddListener", scope: AnyBackend, run: matrixRunner([]cell{{1, 1}}, scenarioHotAddListener)},
 		// Back-pressure only needs M=2 with MaxConnections=2 to
 		// exercise the slot logic; a second sender doesn't change
 		// the semaphore behaviour.
-		{"MaxConn_BackPressure", []cell{{1, 2}}, scenarioMaxConnBackPressure},
+		{name: "MaxConn_BackPressure", scope: AnyBackend, run: matrixRunner([]cell{{1, 2}}, scenarioMaxConnBackPressure)},
+		// Single-cell scenarios run directly with no N{n}M{m}
+		// sub-test wrapping.
+		{name: "ListenerRestart_Recovers", scope: AnyBackend, run: ScenarioListenerRestart_Recovers},
 	}
-
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			for _, c := range sc.cells {
-				name := fmt.Sprintf("N%dM%d", c.n, c.m)
-				t.Run(name, func(t *testing.T) {
-					sc.run(t, b, c.n, c.m)
-				})
-			}
-		})
-	}
-
-	// Single-cell scenarios that don't fit the N×M cell matrix run
-	// directly here.
-	t.Run("ListenerRestart_Recovers", func(t *testing.T) {
-		ScenarioListenerRestart_Recovers(t, b)
-	})
 }
 
 // scenarioNMEcho drives K parallel TCP echo flows distributed round-

@@ -2,6 +2,8 @@ package scenarios
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
@@ -42,47 +44,58 @@ import (
 // connection cost, not by amortised setup.
 func RunPerformanceScenarios(t *testing.T, b Backend) {
 	t.Helper()
-	scenarios := []struct {
-		name string
-		run  func(*testing.T, Backend)
-	}{
-		{"ConnectLatency_Serial_PortForward", ScenarioConnectLatency_Serial_PortForward},
-		{"ConnectLatency_Serial_SOCKS5", ScenarioConnectLatency_Serial_SOCKS5},
-		{"ShortSession_Serial", ScenarioShortSession_Serial},
+	runScenarioCases(t, b, performanceCases())
+}
+
+// performanceCases is the metadata-only registry of performance
+// scenarios. All entries are AnyBackend: per-backend thresholds are
+// applied inside each scenario via b.ConnectLatencyThreshold(),
+// b.RoundBudget(), etc., so the same scenario can run against both
+// without false alarms.
+//
+// BulkTransfer (10 MiB SHA-256) is registered here as a throughput-
+// sized parity gate, alongside the latency-sized scenarios.
+func performanceCases() []scenarioCase {
+	return []scenarioCase{
+		{name: "ConnectLatency_Serial_PortForward", scope: AnyBackend, run: ScenarioConnectLatency_Serial_PortForward},
+		{name: "ConnectLatency_Serial_SOCKS5", scope: AnyBackend, run: ScenarioConnectLatency_Serial_SOCKS5},
+		{name: "ConnectLatency_ColdStart_PortForward", scope: AnyBackend, run: ScenarioConnectLatency_ColdStart_PortForward},
+		{name: "ConnectLatency_ColdStart_SOCKS5", scope: AnyBackend, run: ScenarioConnectLatency_ColdStart_SOCKS5},
+		{name: "ShortSession_Serial", scope: AnyBackend, run: ScenarioShortSession_Serial},
+		{name: "BulkTransfer", scope: AnyBackend, run: ScenarioBulkTransfer},
 		// Parameterized echo-workload scenarios — see WorkloadShape doc below.
-		{"Serial_ConnPerRequestEcho_PortForward", ScenarioSerial_ConnPerRequestEcho_PortForward},
-		{"Serial_ConnReusedEcho_PortForward", ScenarioSerial_ConnReusedEcho_PortForward},
-		{"Serial_ConnPrewarmedEcho_PortForward", ScenarioSerial_ConnPrewarmedEcho_PortForward},
-		{"Parallel_ConnPerRequestEcho_PortForward", ScenarioParallel_ConnPerRequestEcho_PortForward},
-		{"Parallel_ConnReusedEcho_PortForward", ScenarioParallel_ConnReusedEcho_PortForward},
-		{"Parallel_ConnPrewarmedEcho_PortForward", ScenarioParallel_ConnPrewarmedEcho_PortForward},
-		{"Serial_ConnPerRequestEcho_SOCKS5", ScenarioSerial_ConnPerRequestEcho_SOCKS5},
-		{"Serial_ConnReusedEcho_SOCKS5", ScenarioSerial_ConnReusedEcho_SOCKS5},
-		{"Serial_ConnPrewarmedEcho_SOCKS5", ScenarioSerial_ConnPrewarmedEcho_SOCKS5},
-		{"Parallel_ConnPerRequestEcho_SOCKS5", ScenarioParallel_ConnPerRequestEcho_SOCKS5},
-		{"Parallel_ConnReusedEcho_SOCKS5", ScenarioParallel_ConnReusedEcho_SOCKS5},
-		{"Parallel_ConnPrewarmedEcho_SOCKS5", ScenarioParallel_ConnPrewarmedEcho_SOCKS5},
-		{"Parallel_ConnPrewarmedEcho_SOCKS5_MultiTarget", ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			sc.run(t, b)
-		})
+		{name: "Serial_ConnPerRequestEcho_PortForward", scope: AnyBackend, run: ScenarioSerial_ConnPerRequestEcho_PortForward},
+		{name: "Serial_ConnReusedEcho_PortForward", scope: AnyBackend, run: ScenarioSerial_ConnReusedEcho_PortForward},
+		{name: "Serial_ConnPrewarmedEcho_PortForward", scope: AnyBackend, run: ScenarioSerial_ConnPrewarmedEcho_PortForward},
+		{name: "Parallel_ConnPerRequestEcho_PortForward", scope: AnyBackend, run: ScenarioParallel_ConnPerRequestEcho_PortForward},
+		{name: "Parallel_ConnReusedEcho_PortForward", scope: AnyBackend, run: ScenarioParallel_ConnReusedEcho_PortForward},
+		{name: "Parallel_ConnPrewarmedEcho_PortForward", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_PortForward},
+		{name: "Serial_ConnPerRequestEcho_SOCKS5", scope: AnyBackend, run: ScenarioSerial_ConnPerRequestEcho_SOCKS5},
+		{name: "Serial_ConnReusedEcho_SOCKS5", scope: AnyBackend, run: ScenarioSerial_ConnReusedEcho_SOCKS5},
+		{name: "Serial_ConnPrewarmedEcho_SOCKS5", scope: AnyBackend, run: ScenarioSerial_ConnPrewarmedEcho_SOCKS5},
+		{name: "Parallel_ConnPerRequestEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnPerRequestEcho_SOCKS5},
+		{name: "Parallel_ConnReusedEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnReusedEcho_SOCKS5},
+		{name: "Parallel_ConnPrewarmedEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_SOCKS5},
+		{name: "Parallel_ConnPrewarmedEcho_SOCKS5_MultiTarget", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget},
 	}
 }
 
 // ScenarioConnectLatency_Serial_PortForward opens 10 serial
 // port-forward connections, each performing one 1-byte echo
 // round-trip, and asserts every iteration completes inside
-// b.ConnectLatencyThreshold(). The scenario logs per-iteration
-// elapsed time so a failure makes the offending iteration
-// obvious.
+// b.ConnectLatencyThreshold(). One additional untimed warm-up
+// dial precedes the measured loop so per-process cold-start
+// costs (notably the EntraTokenProvider's first credential
+// fetch — ~2-3 s observed against Entra ID) don't bleed into
+// the first measured iteration. The scenario logs the warm-up
+// elapsed for visibility and a per-iteration elapsed so a
+// failure makes the offending iteration obvious.
 //
-// Iteration count is fixed at 10. Walltime bounds at the current
-// 3 s thresholds:
-//   - Happy path: 10 × ~1 s rendezvous ≈ 10 s per scenario.
+// Measured iteration count is fixed at 10 (plus 1 warm-up).
+// Walltime bounds at the current 3 s thresholds:
+//   - Happy path: 11 × ~1 s rendezvous ≈ 11 s per scenario.
 //   - Threshold-only violation (operational success, elapsed too
-//     high): bounded by 10 × (threshold + connectSlack) ≈ 80 s
+//     high): bounded by 11 × (threshold + connectSlack) ≈ 88 s
 //     per scenario, since runSerialConnectLatency uses
 //     t.Errorf + continue on threshold violations and a
 //     successful iteration can use up to threshold+connectSlack
@@ -91,7 +104,7 @@ func RunPerformanceScenarios(t *testing.T, b Backend) {
 //     ≈ threshold + connectSlack ≈ 8 s via t.Fatalf.
 //
 // All three bounds keep the scenario well inside both the
-// per-test default timeout and the e2e job's 20 m envelope.
+// per-test default timeout and the e2e job's 60 m envelope.
 func ScenarioConnectLatency_Serial_PortForward(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
@@ -167,9 +180,21 @@ func ScenarioShortSession_Serial(t *testing.T, b Backend) {
 }
 
 // runSerialConnectLatency is the shared implementation of the two
-// ConnectLatency_Serial variants. Each iteration: dial (port-
-// forward TCP or SOCKS5 CONNECT) → write 1 byte → read 1 byte
-// echoed back → close. Asserts elapsed < threshold per iteration.
+// ConnectLatency_Serial variants. Each measured iteration: dial
+// (port-forward TCP or SOCKS5 CONNECT) → write 1 byte → read
+// 1 byte echoed back → close. Asserts elapsed < threshold per
+// measured iteration.
+//
+// A single warm-up dial precedes the measured loop. Its elapsed
+// is logged but neither threshold-asserted nor counted in the
+// measured iteration count. The warm-up absorbs per-process
+// cold-start costs that the steady-state scenario isn't trying
+// to characterize — most prominently the EntraTokenProvider's
+// first credential fetch, which observably adds ~2-3 s to the
+// first connection and exceeds the 3 s threshold on most runs
+// against Entra ID. Without the warm-up, ConnectLatency_Serial
+// flakes on Entra cells while reporting healthy steady-state
+// latency on every subsequent iteration.
 //
 // Failure-mode handling is deliberately split:
 //
@@ -180,7 +205,7 @@ func ScenarioShortSession_Serial(t *testing.T, b Backend) {
 //     because every subsequent iteration is likely to hit the
 //     same (threshold + connectSlack) ~ 8 s timeout — at 10
 //     iterations × 2 scenarios × 2 Azure auth cells that's a
-//     320 s failure-path burn against the 20 m e2e workflow
+//     320 s failure-path burn against the 60 m e2e workflow
 //     envelope. Fail fast.
 //   - Threshold violations (operational success, elapsed >=
 //     threshold) → t.Errorf + continue. These produce a
@@ -193,9 +218,10 @@ func ScenarioShortSession_Serial(t *testing.T, b Backend) {
 // dialWithRetry / dialSOCKS5WithRetry are intentionally not used —
 // the retry helpers exist to swallow first-dial transient races on
 // brand-new tunnels, but the Performance scenarios open exactly
-// one topology and then dial it 10 times in sequence. By
-// iteration 2 the relay is fully warm; failing on a real dial
-// error here is what we want to measure.
+// one topology, perform one untimed warm-up dial, and then dial
+// it 10 times in sequence. By the first measured iteration the
+// relay is fully warm; failing on a real dial error here is what
+// we want to measure.
 func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	t.Helper()
 	threshold := b.ConnectLatencyThreshold()
@@ -214,6 +240,12 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	payload := []byte{0x42}
 	buf := make([]byte, 1)
 
+	warmupElapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, threshold)
+	if err != nil {
+		t.Fatalf("warmup: %v (elapsed=%v)", err, warmupElapsed)
+	}
+	t.Logf("ConnectLatency_Serial_%v warmup: %v (untimed, threshold %v)", mode, warmupElapsed, threshold)
+
 	for i := 0; i < iterations; i++ {
 		elapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, threshold)
 		if err != nil {
@@ -225,6 +257,92 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 		}
 		t.Logf("ConnectLatency_Serial_%v iter %d: %v (< %v)", mode, i, elapsed, threshold)
 	}
+}
+
+// ScenarioConnectLatency_ColdStart_PortForward opens exactly one
+// port-forward connection on a freshly-started sender, times the
+// full Dial → 1-byte write → 1-byte echo read → Close round-trip,
+// and asserts the elapsed wall time is less than
+// b.ColdStartLatencyThreshold(). It deliberately performs no warm-
+// up: the measured iteration is the first connection through the
+// sender, so per-process cold-start costs the steady-state scenario
+// excludes (most prominently the EntraTokenProvider's first OAuth2
+// token fetch) are inside the budget.
+//
+// This scenario is a regression alarm on first-connection latency.
+// The steady-state ConnectLatency_Serial_* scenarios discard one
+// untimed warm-up dial before measuring; if that warm-up dial
+// silently drifts from ~1 s to >20 s (e.g. a token-cache regression
+// or an Entra ID outage) the steady-state scenarios would keep
+// passing while operators would see catastrophic first-connection
+// latency. ColdStart guards exactly that path with a separate,
+// wider budget.
+//
+// Backends configure the budget via ColdStartLatencyThreshold; see
+// the Backend.ColdStartLatencyThreshold doc for the rationale on
+// the Azure value (covers both workload-identity-federation in CI
+// at ~1.3 s and `az` CLI shell-out locally at ~3.3 s).
+//
+// Failure-mode handling mirrors runSerialConnectLatency: operational
+// errors are t.Fatalf, threshold violations are t.Errorf. With only
+// one measured dial the distinction matters less than in the serial
+// case but the symmetry keeps log lines uniform between the two
+// scenario families.
+func ScenarioConnectLatency_ColdStart_PortForward(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	runColdStartConnectLatency(t, b, ModePortForward)
+}
+
+// ScenarioConnectLatency_ColdStart_SOCKS5 mirrors the port-forward
+// variant against a SOCKS5 proxy sender. The SOCKS5 handshake adds
+// tens of milliseconds on top of the relay rendezvous and OAuth2
+// token fetch; the same ColdStartLatencyThreshold applies because
+// the handshake cost is negligible relative to the cold-start
+// budget.
+func ScenarioConnectLatency_ColdStart_SOCKS5(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+	runColdStartConnectLatency(t, b, ModeSOCKS5)
+}
+
+// runColdStartConnectLatency is the shared implementation of the
+// two ConnectLatency_ColdStart variants. It builds a fresh topology,
+// performs exactly one timed dial through the cold sender, and
+// asserts the elapsed time is below b.ColdStartLatencyThreshold().
+//
+// Unlike runSerialConnectLatency, no warm-up dial precedes the
+// measurement — measuring the cold-start cost is the whole point.
+// The dial timeout and connection deadline both use
+// threshold + connectSlack so a regression surfaces as the explicit
+// elapsed >= threshold assertion rather than as an i/o timeout from
+// the deadline firing exactly at the threshold.
+func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
+	t.Helper()
+	threshold := b.ColdStartLatencyThreshold()
+	echo := StartPlainEcho(t)
+	opts := SetupOptions{
+		NumListeners:   1,
+		SenderMode:     mode,
+		AllowedTargets: []string{echo.Addr()},
+	}
+	if mode == ModePortForward {
+		opts.Target = echo.Addr()
+	}
+	tun := b.Setup(t, opts)
+
+	payload := []byte{0x42}
+	buf := make([]byte, 1)
+
+	elapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, threshold)
+	if err != nil {
+		t.Fatalf("cold-start dial: %v (elapsed=%v)", err, elapsed)
+	}
+	if elapsed >= threshold {
+		t.Errorf("cold-start connect latency %v >= threshold %v", elapsed, threshold)
+		return
+	}
+	t.Logf("ConnectLatency_ColdStart_%v: %v (< %v)", mode, elapsed, threshold)
 }
 
 // timeOneConnect opens one connection in the given mode, writes
@@ -829,4 +947,98 @@ func ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget(t *testing.T, b Backe
 		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
 		NumTargets: 4,
 	})
+}
+
+// BulkTransferBytes is the payload size ScenarioBulkTransfer streams
+// through the tunnel in each direction. 10 MiB is large enough to
+// exercise multiple TCP windows and the bridge's read/write loop
+// beyond the single-segment regime of the latency scenarios, yet
+// small enough to keep wall time bounded on Azure (where the per-
+// connection envelope is bandwidth-bound, currently ~14 Mbps).
+//
+// SHA-256 of the random payload is verified end-to-end; corruption
+// surfaces as a hash mismatch regardless of payload size, so the
+// signal does not require a multi-hundred-MB transfer.
+const BulkTransferBytes = 10 << 20
+
+// ScenarioBulkTransfer streams BulkTransferBytes of crypto/rand bytes
+// from the sender into a plain TCP echo target, reads them back, and
+// asserts SHA-256 parity. This catches in-flight corruption,
+// truncation, and reorder bugs that the small-payload echo scenarios
+// would miss, and exercises the per-connection throughput envelope of
+// each backend.
+//
+// scope=AnyBackend: mock completes in <1 s; Azure completes in
+// ~10-15 s per cell (one cell per auth axis value).
+func ScenarioBulkTransfer(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	conn, err := net.DialTimeout("tcp", tun.SenderAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+
+	// 2 minutes covers the worst-observed Azure single-stream
+	// throughput (~14 Mbps × 10 MiB ≈ 6 s) with margin for jitter.
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+
+	sentHash := make(chan [sha256.Size]byte, 1)
+	writeErr := make(chan error, 1)
+	go func() {
+		h := sha256.New()
+		chunk := make([]byte, 64*1024)
+		remaining := BulkTransferBytes
+		for remaining > 0 {
+			n := len(chunk)
+			if n > remaining {
+				n = remaining
+			}
+			if _, err := rand.Read(chunk[:n]); err != nil {
+				// Close conn so the reader unblocks immediately
+				// instead of waiting for the read deadline.
+				_ = conn.Close()
+				writeErr <- fmt.Errorf("rand.Read: %w", err)
+				return
+			}
+			h.Write(chunk[:n])
+			if err := writeFull(conn, chunk[:n]); err != nil {
+				_ = conn.Close()
+				writeErr <- fmt.Errorf("conn.Write: %w", err)
+				return
+			}
+			remaining -= n
+		}
+		var sum [sha256.Size]byte
+		copy(sum[:], h.Sum(nil))
+		writeErr <- nil
+		sentHash <- sum
+	}()
+
+	gotHash := sha256.New()
+	n, copyErr := io.CopyN(gotHash, conn, BulkTransferBytes)
+	// Always drain writeErr — the writer reports failure here
+	// rather than silently returning, so a write-side failure
+	// surfaces with its actual error instead of as a misleading
+	// reader timeout.
+	if err := <-writeErr; err != nil {
+		t.Fatalf("write side: %v", err)
+	}
+	if copyErr != nil {
+		t.Fatalf("read after %d bytes: %v", n, copyErr)
+	}
+	want := <-sentHash
+	if !bytes.Equal(want[:], gotHash.Sum(nil)) {
+		t.Fatal("SHA-256 mismatch: bulk transfer data corrupted")
+	}
+	t.Logf("transferred %d MiB intact", BulkTransferBytes>>20)
 }

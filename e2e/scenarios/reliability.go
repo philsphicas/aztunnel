@@ -1,6 +1,7 @@
 package scenarios
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -26,32 +27,57 @@ import (
 // green while that capability is missing.
 func RunReliabilityScenarios(t *testing.T, b Backend) {
 	t.Helper()
-	scenarios := []struct {
-		name string
-		run  func(*testing.T, Backend)
-	}{
-		{"ErrorPropagation_TargetRefused", ScenarioErrorPropagation_TargetRefused},
-		{"ErrorPropagation_TargetUnreachable", ScenarioErrorPropagation_TargetUnreachable},
-		{"ErrorPropagation_TargetDNSFailure", ScenarioErrorPropagation_TargetDNSFailure},
-		{"ErrorPropagation_TargetHangs", ScenarioErrorPropagation_TargetHangs},
-		{"SlowConsumer_BackPressure", ScenarioSlowConsumer_BackPressure},
-		{"HalfClose_RequestResponse", ScenarioHalfClose_RequestResponse},
-		{"SenderRetriesUntilListenerReady", ScenarioSenderRetriesUntilListenerReady},
-		{"Connect_NoListener_ErrorsCleanly", ScenarioConnect_NoListener_ErrorsCleanly},
-		{"NoListener_RetriesUntilListenerAppears", ScenarioNoListener_RetriesUntilListenerAppears},
-		{"AuthRejection_BadHyco", ScenarioAuthRejection_BadHyco},
-		{"AuthRejection_BadListenerSAS", ScenarioAuthRejection_BadListenerSAS},
-		{"AuthRejection_BadSenderSAS", ScenarioAuthRejection_BadSenderSAS},
-		// CrossClaim coverage lives in TestAzureOnly_CrossClaim;
-		// mock has no per-key Listen/Send direction so a scenario
-		// row here would skip on every backend and add noise to
-		// the matrix without testing anything new.
-		{"Allowlist_Reject", ScenarioAllowlist_Reject},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			sc.run(t, b)
-		})
+	runScenarioCases(t, b, reliabilityCases())
+}
+
+// reliabilityCases is the metadata-only registry of reliability
+// scenarios.
+//
+// Most entries are AnyBackend — the parity guarantee is what makes
+// the suite meaningful, and the mock backend implements the same
+// log shapes as Azure Relay for negative paths.
+//
+// AzureOnly entries:
+//   - AuthRejection_BadHyco: the mock's hyco model is dynamic, so
+//     the "nonexistent hyco" rejection shape only exists on the
+//     real namespace.
+//   - LongLivedConnection: validates Azure Relay's ~120s
+//     idle-connection timeout (documented at internal/relay/bridge.go)
+//     by holding a tunnel open across two keepalive intervals.
+//     Mock relay has no idle timeout, so the assertion would be a
+//     no-op on mock.
+func reliabilityCases() []scenarioCase {
+	return []scenarioCase{
+		{name: "ErrorPropagation_TargetRefused", scope: AnyBackend, run: ScenarioErrorPropagation_TargetRefused},
+		{name: "ErrorPropagation_TargetUnreachable", scope: AnyBackend, run: ScenarioErrorPropagation_TargetUnreachable},
+		{name: "ErrorPropagation_TargetDNSFailure", scope: AnyBackend, run: ScenarioErrorPropagation_TargetDNSFailure},
+		{name: "ErrorPropagation_TargetHangs", scope: AnyBackend, run: ScenarioErrorPropagation_TargetHangs},
+		{name: "SlowConsumer_BackPressure", scope: AnyBackend, run: ScenarioSlowConsumer_BackPressure},
+		{name: "HalfClose_RequestResponse", scope: AnyBackend, run: ScenarioHalfClose_RequestResponse},
+		{name: "SenderRetriesUntilListenerReady", scope: AnyBackend, run: ScenarioSenderRetriesUntilListenerReady},
+		{name: "Connect_NoListener_ErrorsCleanly", scope: AnyBackend, run: ScenarioConnect_NoListener_ErrorsCleanly},
+		{name: "NoListener_RetriesUntilListenerAppears", scope: AnyBackend, run: ScenarioNoListener_RetriesUntilListenerAppears},
+		{
+			name:   "AuthRejection_BadHyco",
+			scope:  AzureOnly,
+			reason: "mock relay's hyco model is dynamic; no nonexistent-hyco shape to provoke",
+			run:    ScenarioAuthRejection_BadHyco,
+		},
+		{name: "AuthRejection_BadListenerSAS", scope: AnyBackend, run: ScenarioAuthRejection_BadListenerSAS},
+		{name: "AuthRejection_BadSenderSAS", scope: AnyBackend, run: ScenarioAuthRejection_BadSenderSAS},
+		{
+			name:   "AuthRejection_CrossClaim",
+			scope:  AzureOnly,
+			reason: "mock relay uses one shared SAS key for both directions; per-key Listen vs Send claim enforcement is Azure-only",
+			run:    ScenarioAuthRejection_CrossClaim,
+		},
+		{name: "Allowlist_Reject", scope: AnyBackend, run: ScenarioAllowlist_Reject},
+		{
+			name:   "LongLivedConnection",
+			scope:  AzureOnly,
+			reason: "validates Azure Relay's ~120s idle-connection timeout via keepalive pings; mock relay has no idle timeout",
+			run:    ScenarioLongLivedConnection,
+		},
 	}
 }
 
@@ -1024,16 +1050,13 @@ func ScenarioNoListener_RetriesUntilListenerAppears(t *testing.T, b Backend) {
 }
 
 // ScenarioAuthRejection_BadHyco: listener bound to a nonexistent
-// hyco name on Azure must log a control-channel failure. Skipped
-// on mock because the mock relay's hyco model is dynamic — every
-// name is treated as valid pre-listener-attach (which is the
-// "no-listener" path, covered by other scenarios + by
-// TestMockEmulates_NoListenerReturns404).
+// hyco name on Azure must log a control-channel failure. The mock
+// relay's hyco model is dynamic — every name is treated as valid
+// pre-listener-attach (which is the "no-listener" path, covered by
+// other scenarios + by TestMockEmulates_NoListenerReturns404) — so
+// this case carries scope=AzureOnly in the reliability registry.
 func ScenarioAuthRejection_BadHyco(t *testing.T, b Backend) {
 	t.Helper()
-	if b.Name() != "azure" {
-		t.Skip("AuthRejection_BadHyco: mock relay's hyco model is dynamic; no nonexistent-hyco shape to provoke")
-	}
 	AssertNoLeaks(t)
 
 	h := b.SetupExpectingFailure(t, SetupOptions{
@@ -1150,4 +1173,109 @@ func assertNoTokenLeak(t *testing.T, output string) {
 	if strings.Contains(stripped, "sb-hc-token=") {
 		t.Errorf("output contains raw sb-hc-token (not redacted)")
 	}
+}
+
+// LongLivedIdleSleep is the wall-clock duration ScenarioLongLivedConnection
+// holds an established tunnel idle for. 130 s clears the documented
+// Azure Relay ~120 s idle-connection timeout (internal/relay/bridge.go)
+// with a 10 s margin, so a regression in the bridge's keepalive
+// pinger surfaces here as a write/read failure on the second echo.
+const LongLivedIdleSleep = 130 * time.Second
+
+// ScenarioLongLivedConnection opens a port-forward connection,
+// performs one echo round-trip, sleeps LongLivedIdleSleep (longer
+// than the Azure Relay idle timeout), then performs a second echo
+// round-trip on the SAME connection. Asserts the connection
+// survives — i.e. the bridge's WebSocket-ping keepalive kept the
+// data plane alive across the idle window.
+//
+// scope=AzureOnly via the reliability registry: the mock relay has
+// no idle timeout, so the assertion would be a no-op there.
+func ScenarioLongLivedConnection(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	conn, err := net.DialTimeout("tcp", tun.SenderAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+
+	echoRoundTrip := func(label string, payload []byte) {
+		t.Helper()
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		if err := writeFull(conn, payload); err != nil {
+			t.Fatalf("%s write: %v (keepalive pings may have failed)", label, err)
+		}
+		buf := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Fatalf("%s read: %v", label, err)
+		}
+		if !bytes.Equal(buf, payload) {
+			t.Fatalf("%s echo mismatch: got %q, want %q", label, buf, payload)
+		}
+	}
+
+	echoRoundTrip("before-idle", []byte("before-idle\n"))
+	t.Logf("idle for %s to test keepalive…", LongLivedIdleSleep)
+	time.Sleep(LongLivedIdleSleep)
+	echoRoundTrip("after-idle", []byte("after-idle\n"))
+}
+
+// ScenarioAuthRejection_CrossClaim asserts that a SAS key valid in
+// one direction is rejected when presented for the other direction
+// — i.e. the listener-direction key cannot be used to send, and
+// the sender-direction key cannot be used to listen. The token
+// signature itself is valid; the relay rejects it because the
+// claim does not authorize the action.
+//
+// AzureOnly: the mock relay uses one shared key for both
+// directions and so cannot distinguish Listen vs Send claims; per
+// the SetupExpectingFailure contract, the listener-side case
+// observes "control channel disconnected" on the listener log,
+// and the sender-side case observes "relay dial failed" on the
+// sender log.
+//
+// Cells whose Backend auth is not SAS (e.g. the entra cell) skip
+// at Setup time because the per-direction keys exist only on the
+// SAS hyco.
+func ScenarioAuthRejection_CrossClaim(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	t.Run("sender_uses_listener_key", func(t *testing.T) {
+		// Sender presents the listener-direction key; sender's
+		// relay dial must fail because the claim does not
+		// authorize the Send role.
+		h := b.SetupExpectingFailure(t, SetupOptions{
+			NumListeners:       1,
+			SenderMode:         ModePortForward,
+			Target:             "127.0.0.1:9999",
+			AllowedTargets:     []string{"127.0.0.1:9999"},
+			OverrideSenderAuth: &AuthOverride{UseOppositeSASDirection: true},
+		})
+		defer h.Close()
+		assertNoTokenLeak(t, h.SenderLogs())
+	})
+
+	t.Run("listener_uses_sender_key", func(t *testing.T) {
+		// Listener presents the sender-direction key; listener's
+		// control channel must fail because the claim does not
+		// authorize the Listen role.
+		h := b.SetupExpectingFailure(t, SetupOptions{
+			NumListeners:         1,
+			SenderMode:           ModePortForward,
+			OverrideListenerAuth: &AuthOverride{UseOppositeSASDirection: true},
+		})
+		defer h.Close()
+		assertNoTokenLeak(t, h.ListenerLogs())
+	})
 }

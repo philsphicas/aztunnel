@@ -4,10 +4,13 @@ package azure
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os/exec"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -128,9 +131,30 @@ func (b *azureBackend) Cell(values map[string]string) scenarios.Backend {
 // seconds, not hundreds of ms).
 //
 // Returns 3 s regardless of authName: both Entra and SAS hit the
-// same control-plane rendezvous path.
+// same control-plane rendezvous path for steady-state dials. Per-
+// auth cold-start cost is regression-protected separately via
+// ColdStartLatencyThreshold.
 func (*azureBackend) ConnectLatencyThreshold() time.Duration {
 	return 3 * time.Second
+}
+
+// ColdStartLatencyThreshold returns the per-backend ceiling for the
+// first connection through a freshly-started sender. The first
+// dial pays one-time costs the steady-state threshold excludes —
+// most prominently the EntraTokenProvider's initial OAuth2 token
+// fetch. The cost varies with the underlying TokenCredential the
+// operator's DefaultAzureCredential resolves to: workload identity
+// federation in CI runs ~1.3 s, `az` CLI shell-out locally runs
+// ~3.3 s; both are well inside the 6 s ceiling. SAS cells pay no
+// cold-start cost (HMAC signing is in-process) but share the same
+// threshold for simplicity.
+//
+// 6 s is intentionally wider than ConnectLatencyThreshold so the
+// scenario remains CI-stable across credential paths while still
+// catching multi-second regressions (e.g., a 10 s degradation in
+// Entra ID's token endpoint would still trip it).
+func (*azureBackend) ColdStartLatencyThreshold() time.Duration {
+	return 6 * time.Second
 }
 
 // Setup brings up the requested topology (NumListeners listeners and
@@ -232,6 +256,7 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 			Completed:           scrapeCounter(metricsAddr, "aztunnel_connections_total"),
 			Active:              scrapeGauge(metricsAddr, "aztunnel_active_connections"),
 			DialDurationSamples: scrapeHistogramCount(metricsAddr, "aztunnel_dial_duration_seconds"),
+			TokenFetchOK:        scrapeTokenFetchOK(metricsAddr),
 			Stop:                func() { proc.Stop(t) },
 			Logs:                func() string { return proc.logs.String() },
 		})
@@ -410,6 +435,28 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	if opts.OverrideListenerAuth == nil && opts.OverrideSenderAuth == nil && opts.OverrideHycoName == "" {
 		t.Fatalf("SetupExpectingFailure requires at least one override (ListenerAuth, SenderAuth, or HycoName)")
 	}
+	// Skip non-SAS cells BEFORE acquiring env: the per-direction
+	// keys exercised by UseOppositeSASDirection exist only on the
+	// SAS hyco, and acquireEnv may provision Azure resources via
+	// ARM that we do not want to pay for only to skip.
+	usesOppositeSAS := (opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.UseOppositeSASDirection) ||
+		(opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.UseOppositeSASDirection)
+	if usesOppositeSAS && b.authName != "sas" {
+		t.Skipf("UseOppositeSASDirection requires SAS auth; cell auth=%q", b.authName)
+	}
+	// Defense in depth: BadSASKey and UseOppositeSASDirection on
+	// the same override would race for precedence with no defined
+	// winner; no scenario today combines them.
+	if opts.OverrideListenerAuth != nil &&
+		opts.OverrideListenerAuth.BadSASKey != "" &&
+		opts.OverrideListenerAuth.UseOppositeSASDirection {
+		t.Fatalf("OverrideListenerAuth: BadSASKey and UseOppositeSASDirection are mutually exclusive")
+	}
+	if opts.OverrideSenderAuth != nil &&
+		opts.OverrideSenderAuth.BadSASKey != "" &&
+		opts.OverrideSenderAuth.UseOppositeSASDirection {
+		t.Fatalf("OverrideSenderAuth: BadSASKey and UseOppositeSASDirection are mutually exclusive")
+	}
 
 	env := b.acquireEnv(t)
 	auth := authFromEnv(t, env, b.authName)
@@ -420,8 +467,8 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 
 	// Resolve listener / sender SAS credentials with overrides
 	// applied. Entra-token overrides are not yet wired; the
-	// scope-gated CrossClaim scenario uses ListenerAuth/SenderAuth
-	// directly.
+	// CrossClaim scenario uses UseOppositeSASDirection (below) to
+	// swap valid SAS keys across the listener/sender boundary.
 	listenerSAS := auth.listenerSAS
 	senderSAS := auth.senderSAS
 	if opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.BadSASKey != "" {
@@ -434,6 +481,18 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 		senderSAS = &sasCredentials{
 			keyName: keyNameOr(auth.senderSAS, env.sasSenderKeyName),
 			key:     opts.OverrideSenderAuth.BadSASKey,
+		}
+	}
+	if opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.UseOppositeSASDirection {
+		listenerSAS = &sasCredentials{
+			keyName: env.sasSenderKeyName,
+			key:     env.sasSenderKey,
+		}
+	}
+	if opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.UseOppositeSASDirection {
+		senderSAS = &sasCredentials{
+			keyName: env.sasListenerKeyName,
+			key:     env.sasListenerKey,
 		}
 	}
 
@@ -634,4 +693,107 @@ func scrapeHistogramCount(addr, name string) func() uint64 {
 		text := scrapeMetricsBest(addr)
 		return uint64(sumMetric(text, name+"_count"))
 	}
+}
+
+// scrapeTokenFetchOK returns a closure that scrapes /metrics on
+// addr and returns one TokenFetchObservation per provider label
+// observed in aztunnel_token_fetch_total / _seconds_count filtered
+// to result="ok". Used by ScenarioTokenFetchMetric to assert that
+// exactly one provider was exercised and that the counter and
+// histogram count agree.
+func scrapeTokenFetchOK(addr string) func() []scenarios.TokenFetchObservation {
+	return func() []scenarios.TokenFetchObservation {
+		text := scrapeMetricsBest(addr)
+		return parseTokenFetchOK(text)
+	}
+}
+
+// parseTokenFetchOK scans a Prometheus text exposition for
+// aztunnel_token_fetch_total{provider=…,result="ok"} and the
+// matching aztunnel_token_fetch_seconds_count, returning one
+// observation per observed provider. Lines whose result label is
+// not "ok" are ignored.
+func parseTokenFetchOK(text string) []scenarios.TokenFetchObservation {
+	const (
+		counterFamily = "aztunnel_token_fetch_total"
+		histFamily    = "aztunnel_token_fetch_seconds_count"
+	)
+	counters := map[string]uint64{}
+	hists := map[string]uint64{}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, counterFamily+"{"):
+			if prov, val, ok := tokenFetchOKValue(line, counterFamily); ok {
+				counters[prov] += val
+			}
+		case strings.HasPrefix(line, histFamily+"{"):
+			if prov, val, ok := tokenFetchOKValue(line, histFamily); ok {
+				hists[prov] += val
+			}
+		}
+	}
+	if len(counters) == 0 && len(hists) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for p := range counters {
+		seen[p] = struct{}{}
+	}
+	for p := range hists {
+		seen[p] = struct{}{}
+	}
+	out := make([]scenarios.TokenFetchObservation, 0, len(seen))
+	providers := make([]string, 0, len(seen))
+	for p := range seen {
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+	for _, p := range providers {
+		out = append(out, scenarios.TokenFetchObservation{
+			Provider:       p,
+			CounterValue:   counters[p],
+			HistogramCount: hists[p],
+		})
+	}
+	return out
+}
+
+// tokenFetchOKValue parses a metric line that starts with
+// `<family>{`, returning the provider label, the trailing value, and
+// ok=true if the line carries result="ok" and parses cleanly. Lines
+// without a `result="ok"` label or without a provider label return
+// ok=false.
+func tokenFetchOKValue(line, family string) (provider string, value uint64, ok bool) {
+	if !strings.Contains(line, `result="ok"`) {
+		return "", 0, false
+	}
+	const marker = `provider="`
+	i := strings.Index(line, marker)
+	if i == -1 {
+		return "", 0, false
+	}
+	rest := line[i+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end == -1 {
+		return "", 0, false
+	}
+	provider = rest[:end]
+	parts := strings.Fields(line)
+	// Prometheus text format: `<metric>{labels} <value> [<timestamp>]`.
+	// Take parts[1] (the value), NOT parts[len-1] — the latter would
+	// silently swallow an optional trailing timestamp as the value and
+	// inflate the count by orders of magnitude. Today client_golang's
+	// Gather() does not emit timestamps, but the parser must not
+	// depend on that.
+	if len(parts) < 2 {
+		return "", 0, false
+	}
+	var v float64
+	if _, err := fmt.Sscanf(parts[1], "%f", &v); err != nil {
+		return "", 0, false
+	}
+	return provider, uint64(v), true
 }
