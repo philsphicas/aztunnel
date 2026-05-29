@@ -269,6 +269,24 @@ type AuthOverride struct {
 	// mock backend ignores it because the mock has no Entra
 	// validation path.
 	BadEntraToken string
+
+	// UseOppositeSASDirection, if true, replaces the SAS credentials
+	// with the valid keys from the OPPOSITE direction — i.e. on
+	// OverrideListenerAuth it supplies the sender-direction key as
+	// the listener's credentials, and vice versa on
+	// OverrideSenderAuth. Exercises the relay's per-key Listen vs
+	// Send claim enforcement: the SAS material itself authenticates
+	// successfully, but the claim does not authorize the action.
+	//
+	// Mutually exclusive with BadSASKey on the same override —
+	// setting both is a test-author error and Backends MUST fatal.
+	//
+	// Azure-only contract: the mock relay does not model per-key
+	// direction, so callers MUST scope the scenario to AzureOnly
+	// (or otherwise gate on backend) and the Azure backend MUST
+	// skip cells whose auth method is not SAS — the relevant key
+	// material exists only on the SAS hyco.
+	UseOppositeSASDirection bool
 }
 
 // FailureHandle is returned by Backend.SetupExpectingFailure. It

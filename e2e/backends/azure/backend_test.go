@@ -435,6 +435,28 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	if opts.OverrideListenerAuth == nil && opts.OverrideSenderAuth == nil && opts.OverrideHycoName == "" {
 		t.Fatalf("SetupExpectingFailure requires at least one override (ListenerAuth, SenderAuth, or HycoName)")
 	}
+	// Skip non-SAS cells BEFORE acquiring env: the per-direction
+	// keys exercised by UseOppositeSASDirection exist only on the
+	// SAS hyco, and acquireEnv may provision Azure resources via
+	// ARM that we do not want to pay for only to skip.
+	usesOppositeSAS := (opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.UseOppositeSASDirection) ||
+		(opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.UseOppositeSASDirection)
+	if usesOppositeSAS && b.authName != "sas" {
+		t.Skipf("UseOppositeSASDirection requires SAS auth; cell auth=%q", b.authName)
+	}
+	// Defense in depth: BadSASKey and UseOppositeSASDirection on
+	// the same override would race for precedence with no defined
+	// winner; no scenario today combines them.
+	if opts.OverrideListenerAuth != nil &&
+		opts.OverrideListenerAuth.BadSASKey != "" &&
+		opts.OverrideListenerAuth.UseOppositeSASDirection {
+		t.Fatalf("OverrideListenerAuth: BadSASKey and UseOppositeSASDirection are mutually exclusive")
+	}
+	if opts.OverrideSenderAuth != nil &&
+		opts.OverrideSenderAuth.BadSASKey != "" &&
+		opts.OverrideSenderAuth.UseOppositeSASDirection {
+		t.Fatalf("OverrideSenderAuth: BadSASKey and UseOppositeSASDirection are mutually exclusive")
+	}
 
 	env := b.acquireEnv(t)
 	auth := authFromEnv(t, env, b.authName)
@@ -445,8 +467,8 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 
 	// Resolve listener / sender SAS credentials with overrides
 	// applied. Entra-token overrides are not yet wired; the
-	// scope-gated CrossClaim scenario uses ListenerAuth/SenderAuth
-	// directly.
+	// CrossClaim scenario uses UseOppositeSASDirection (below) to
+	// swap valid SAS keys across the listener/sender boundary.
 	listenerSAS := auth.listenerSAS
 	senderSAS := auth.senderSAS
 	if opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.BadSASKey != "" {
@@ -459,6 +481,18 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 		senderSAS = &sasCredentials{
 			keyName: keyNameOr(auth.senderSAS, env.sasSenderKeyName),
 			key:     opts.OverrideSenderAuth.BadSASKey,
+		}
+	}
+	if opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.UseOppositeSASDirection {
+		listenerSAS = &sasCredentials{
+			keyName: env.sasSenderKeyName,
+			key:     env.sasSenderKey,
+		}
+	}
+	if opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.UseOppositeSASDirection {
+		senderSAS = &sasCredentials{
+			keyName: env.sasListenerKeyName,
+			key:     env.sasListenerKey,
 		}
 	}
 

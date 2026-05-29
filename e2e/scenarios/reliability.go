@@ -65,6 +65,12 @@ func reliabilityCases() []scenarioCase {
 		},
 		{name: "AuthRejection_BadListenerSAS", scope: AnyBackend, run: ScenarioAuthRejection_BadListenerSAS},
 		{name: "AuthRejection_BadSenderSAS", scope: AnyBackend, run: ScenarioAuthRejection_BadSenderSAS},
+		{
+			name:   "AuthRejection_CrossClaim",
+			scope:  AzureOnly,
+			reason: "mock relay uses one shared SAS key for both directions; per-key Listen vs Send claim enforcement is Azure-only",
+			run:    ScenarioAuthRejection_CrossClaim,
+		},
 		{name: "Allowlist_Reject", scope: AnyBackend, run: ScenarioAllowlist_Reject},
 		{
 			name:   "LongLivedConnection",
@@ -1206,7 +1212,7 @@ func ScenarioLongLivedConnection(t *testing.T, b Backend) {
 	echoRoundTrip := func(label string, payload []byte) {
 		t.Helper()
 		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-		if _, err := conn.Write(payload); err != nil {
+		if err := writeFull(conn, payload); err != nil {
 			t.Fatalf("%s write: %v (keepalive pings may have failed)", label, err)
 		}
 		buf := make([]byte, len(payload))
@@ -1222,4 +1228,54 @@ func ScenarioLongLivedConnection(t *testing.T, b Backend) {
 	t.Logf("idle for %s to test keepalive…", LongLivedIdleSleep)
 	time.Sleep(LongLivedIdleSleep)
 	echoRoundTrip("after-idle", []byte("after-idle\n"))
+}
+
+// ScenarioAuthRejection_CrossClaim asserts that a SAS key valid in
+// one direction is rejected when presented for the other direction
+// — i.e. the listener-direction key cannot be used to send, and
+// the sender-direction key cannot be used to listen. The token
+// signature itself is valid; the relay rejects it because the
+// claim does not authorize the action.
+//
+// AzureOnly: the mock relay uses one shared key for both
+// directions and so cannot distinguish Listen vs Send claims; per
+// the SetupExpectingFailure contract, the listener-side case
+// observes "control channel disconnected" on the listener log,
+// and the sender-side case observes "relay dial failed" on the
+// sender log.
+//
+// Cells whose Backend auth is not SAS (e.g. the entra cell) skip
+// at Setup time because the per-direction keys exist only on the
+// SAS hyco.
+func ScenarioAuthRejection_CrossClaim(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	t.Run("sender_uses_listener_key", func(t *testing.T) {
+		// Sender presents the listener-direction key; sender's
+		// relay dial must fail because the claim does not
+		// authorize the Send role.
+		h := b.SetupExpectingFailure(t, SetupOptions{
+			NumListeners:       1,
+			SenderMode:         ModePortForward,
+			Target:             "127.0.0.1:9999",
+			AllowedTargets:     []string{"127.0.0.1:9999"},
+			OverrideSenderAuth: &AuthOverride{UseOppositeSASDirection: true},
+		})
+		defer h.Close()
+		assertNoTokenLeak(t, h.SenderLogs())
+	})
+
+	t.Run("listener_uses_sender_key", func(t *testing.T) {
+		// Listener presents the sender-direction key; listener's
+		// control channel must fail because the claim does not
+		// authorize the Listen role.
+		h := b.SetupExpectingFailure(t, SetupOptions{
+			NumListeners:         1,
+			SenderMode:           ModePortForward,
+			OverrideListenerAuth: &AuthOverride{UseOppositeSASDirection: true},
+		})
+		defer h.Close()
+		assertNoTokenLeak(t, h.ListenerLogs())
+	})
 }

@@ -440,6 +440,15 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 	if opts.OverrideListenerAuth == nil && opts.OverrideSenderAuth == nil && opts.OverrideHycoName == "" {
 		t.Fatalf("SetupExpectingFailure requires at least one override (ListenerAuth, SenderAuth, or HycoName)")
 	}
+	// UseOppositeSASDirection exercises Azure's per-key claim
+	// enforcement, which the mock relay does not model (the mock
+	// has a single shared key for both directions). Scenarios that
+	// set this MUST scope to AzureOnly; the defensive skip here
+	// catches any future caller that forgets.
+	if (opts.OverrideListenerAuth != nil && opts.OverrideListenerAuth.UseOppositeSASDirection) ||
+		(opts.OverrideSenderAuth != nil && opts.OverrideSenderAuth.UseOppositeSASDirection) {
+		t.Skipf("UseOppositeSASDirection requires per-direction SAS keys not modelled by the mock relay")
+	}
 
 	host, clientOpts := startMockRelay(t, b.DelayProfile)
 

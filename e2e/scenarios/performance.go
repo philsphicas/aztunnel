@@ -993,6 +993,7 @@ func ScenarioBulkTransfer(t *testing.T, b Backend) {
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 
 	sentHash := make(chan [sha256.Size]byte, 1)
+	writeErr := make(chan error, 1)
 	go func() {
 		h := sha256.New()
 		chunk := make([]byte, 64*1024)
@@ -1003,22 +1004,37 @@ func ScenarioBulkTransfer(t *testing.T, b Backend) {
 				n = remaining
 			}
 			if _, err := rand.Read(chunk[:n]); err != nil {
+				// Close conn so the reader unblocks immediately
+				// instead of waiting for the read deadline.
+				_ = conn.Close()
+				writeErr <- fmt.Errorf("rand.Read: %w", err)
 				return
 			}
 			h.Write(chunk[:n])
-			if _, err := conn.Write(chunk[:n]); err != nil {
+			if err := writeFull(conn, chunk[:n]); err != nil {
+				_ = conn.Close()
+				writeErr <- fmt.Errorf("conn.Write: %w", err)
 				return
 			}
 			remaining -= n
 		}
 		var sum [sha256.Size]byte
 		copy(sum[:], h.Sum(nil))
+		writeErr <- nil
 		sentHash <- sum
 	}()
 
 	gotHash := sha256.New()
-	if n, err := io.CopyN(gotHash, conn, BulkTransferBytes); err != nil {
-		t.Fatalf("read after %d bytes: %v", n, err)
+	n, copyErr := io.CopyN(gotHash, conn, BulkTransferBytes)
+	// Always drain writeErr — the writer reports failure here
+	// rather than silently returning, so a write-side failure
+	// surfaces with its actual error instead of as a misleading
+	// reader timeout.
+	if err := <-writeErr; err != nil {
+		t.Fatalf("write side: %v", err)
+	}
+	if copyErr != nil {
+		t.Fatalf("read after %d bytes: %v", n, copyErr)
 	}
 	want := <-sentHash
 	if !bytes.Equal(want[:], gotHash.Sum(nil)) {

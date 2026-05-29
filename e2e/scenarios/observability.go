@@ -1102,7 +1102,7 @@ func ScenarioTokenFetchMetric(t *testing.T, b Backend) {
 	defer conn.Close() //nolint:errcheck // best-effort cleanup
 	payload := []byte("token-fetch-metric\n")
 	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
-	if _, err := conn.Write(payload); err != nil {
+	if err := writeFull(conn, payload); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	buf := make([]byte, len(payload))

@@ -65,8 +65,9 @@ func TestScenarioCases_AzureOnlyScopes(t *testing.T) {
 
 	wantAzureOnly := map[string]string{
 		// reliability
-		"AuthRejection_BadHyco": "reliability",
-		"LongLivedConnection":   "reliability",
+		"AuthRejection_BadHyco":    "reliability",
+		"AuthRejection_CrossClaim": "reliability",
+		"LongLivedConnection":      "reliability",
 		// observability
 		"TokenFetchMetric": "observability",
 	}
