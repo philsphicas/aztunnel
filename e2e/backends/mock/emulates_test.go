@@ -111,7 +111,7 @@ func TestMockEmulates_AcceptDropped_DialFailed(t *testing.T) {
 // a listener + sender topology) and result=error (separately
 // wrapped erroring provider).
 func TestMockEmulates_TokenFetchMetric(t *testing.T) {
-	host, clientOpts := startMockRelay(t, DefaultRendezvousDelay)
+	host, clientOpts := startMockRelay(t, server.DelayProfileDefault)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup

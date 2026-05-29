@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/coder/websocket"
 )
@@ -25,12 +24,21 @@ import (
 //     point handleAccept's defer treats listenerWS as taken.
 //   - If senderTook is never closed (timeout/error path), handleAccept's
 //     defer is responsible for closing listenerWS.
+//
+// paired is a separate timing barrier closed by handleAccept the
+// instant takePending succeeds — BEFORE handleAccept's lane-side
+// hopsResponse sleep. Sender's handleConnect waits on paired (rather
+// than on ready) so the sender's hopsResponse 101 transit runs in
+// parallel with handleAccept's own hopsResponse 101 transit, matching
+// the wire-observed dual-101 timing. paired is closed exactly once
+// (handleAccept owns it and never re-runs takePending).
 type pendingRendezvous struct {
 	senderWS *websocket.Conn
 
 	once       sync.Once
 	listenerWS *websocket.Conn // set only when claim() wins; nil if aborted
 	ready      chan struct{}   // closed by claim() OR abort()
+	paired     chan struct{}   // closed by handleAccept right after takePending
 	bridgeDone chan struct{}   // closed when handleConnect returns
 	senderTook chan struct{}   // closed by handleConnect just before bridging
 }
@@ -60,28 +68,43 @@ func (p *pendingRendezvous) abort() {
 }
 
 // handleConnect handles the sender's connect WebSocket. The flow:
-//  1. Pre-upgrade: verify ≥1 listener; else return HTTP 404 so
-//     DialWithRetry can back off.
-//  2. Upgrade the sender WS.
-//  3. Build the rendezvous URL.
-//  4. Register the pending entry BEFORE writing the accept message so a
-//     fast listener cannot race.
-//  5. Write accept to a chosen listener (round-robin). On write failure,
-//     fall back to the next listener until either success or no more
-//     listeners remain.
-//  6. Wait for the listener to dial within RendezvousTimeout. On
-//     timeout/failure, close the sender WS cleanly.
-//  7. Bridge.
+//  1. DelayProfile entry sleeps (DNS, handshake, WSGet) so the sender's
+//     SAS token "arrives" at the relay at the modeled wire time.
+//  2. AuthInternal + validateSAS — 401 on failure (pre-upgrade, with a
+//     hopsResponse leg paid before the body is written).
+//  3. tryReserve (per-entity cap) — 503 on failure.
+//  4. Build id + rendezvous URL.
+//  5. MatchMakeInternal + lookup listener controls. Empty → 404
+//     (matches Azure Relay's no-listener semantics; DialWithRetry retries).
+//  6. addPending BEFORE writing accept so handleAccept can never race
+//     the lookup.
+//  7. writeAccept on a chosen listener (per-call hopsAcceptFrame*L
+//     sleep). All listeners failed → 503.
+//  8. Wait for handleAccept to reach takePending (pending.paired). On
+//     RendezvousTimeout, 504 pre-upgrade.
+//  9. hopsResponse*S sleep — models the 101 transit to the sender,
+//     running in parallel with handleAccept's own response leg.
+//  10. Pre-Accept defensive re-check: if pending.ready has closed with
+//     listenerWS still nil, the listener's WS Accept failed; 503
+//     pre-upgrade rather than 101-then-close.
+//  11. websocket.Accept → 101 emitted.
+//  12. Wait for pending.ready (listener WS ready or aborted).
+//  13. Hand off ownership of listenerWS via close(senderTook); bridge.
 func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity string) {
-	if err := s.validateSAS(r); err != nil {
-		s.log.Warn("sender auth failed", "entity", entity, "remote", r.RemoteAddr, "error", err)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	ctx := r.Context()
+	p := s.delayProfile
+
+	// Pre-auth wire transit: DNS + TCP+TLS handshake + TLS Fin/WS GET.
+	if !sleepContext(ctx, p.DNSLookup+hopsHandshake*p.SLatency+hopsWSGet*p.SLatency) {
 		return
 	}
-	if !s.hub.hasControls(entity) {
-		// Match Azure Relay's "no listener" semantics. The aztunnel
-		// sender (DialWithRetry) retries on this status.
-		http.Error(w, "no active listener", http.StatusNotFound)
+	if !sleepContext(ctx, p.AuthInternal) {
+		return
+	}
+	if err := s.validateSAS(r); err != nil {
+		s.log.Warn("sender auth failed", "entity", entity, "remote", r.RemoteAddr, "error", err)
+		_ = sleepContext(ctx, hopsResponse*p.SLatency)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -90,43 +113,44 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity st
 	// also retries 503, so callers see this as transient backpressure.
 	if !s.hub.tryReserve(entity, s.cfg.MaxConnections) {
 		s.log.Warn("max connections cap reached", "entity", entity, "cap", s.cfg.MaxConnections)
+		_ = sleepContext(ctx, hopsResponse*p.SLatency)
 		http.Error(w, "too many concurrent rendezvous", http.StatusServiceUnavailable)
 		return
 	}
 	defer s.hub.release(entity)
 
-	senderWS, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		CompressionMode: websocket.CompressionDisabled,
-	})
-	if err != nil {
-		s.log.Warn("sender upgrade failed", "entity", entity, "error", err)
-		return
-	}
-	senderWS.SetReadLimit(bridgeReadLimit)
-	// We own the senderWS from here on. If anything below fails we must
-	// close it with a status code that the sender surfaces as an error
-	// rather than a hang.
-	closeWithErr := func(reason string) {
-		_ = senderWS.Close(websocket.StatusInternalError, reason)
-	}
-
 	id, err := newRendezvousID()
 	if err != nil {
 		s.log.Warn("rendezvous id failed", "error", err)
-		closeWithErr("server error")
+		_ = sleepContext(ctx, hopsResponse*p.SLatency)
+		http.Error(w, "server error", http.StatusInternalServerError)
 		return
 	}
-
 	rendezvousURL, err := s.rendezvousURL(r, entity, id)
 	if err != nil {
 		s.log.Warn("rendezvous URL build failed", "error", err)
-		closeWithErr("server error")
+		_ = sleepContext(ctx, hopsResponse*p.SLatency)
+		http.Error(w, "server error", http.StatusInternalServerError)
+		return
+	}
+
+	// MatchMakeInternal models the relay-side listener-routing cost.
+	// We snapshot after the sleep so a fast listener can't race; if
+	// no listener exists at this point we return 404 (Azure Relay's
+	// no-listener semantics; DialWithRetry retries on 404).
+	if !sleepContext(ctx, p.MatchMakeInternal) {
+		return
+	}
+	controls := s.hub.snapshotControls(entity)
+	if len(controls) == 0 {
+		_ = sleepContext(ctx, hopsResponse*p.SLatency)
+		http.Error(w, "no active listener", http.StatusNotFound)
 		return
 	}
 
 	pending := &pendingRendezvous{
-		senderWS:   senderWS,
 		ready:      make(chan struct{}),
+		paired:     make(chan struct{}),
 		bridgeDone: make(chan struct{}),
 		senderTook: make(chan struct{}),
 	}
@@ -136,20 +160,12 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity st
 	defer s.hub.removePending(entity, id)
 	defer close(pending.bridgeDone)
 
-	// Try each active listener in round-robin order until one accepts the
-	// write. We must not punt back to the sender's retry loop (DialWithRetry
-	// only retries pre-upgrade 404/503).
-	controls := s.hub.snapshotControls(entity)
-	if len(controls) == 0 {
-		s.log.Warn("no listeners at write time", "entity", entity)
-		closeWithErr("no listener available")
-		return
-	}
-
-	ctx := r.Context()
+	// Try each active listener in round-robin order until one accepts
+	// the write. Each writeAccept sleeps hopsAcceptFrame*L for the
+	// accept-frame transit before acquiring the control WS write lock.
 	var writeErr error
 	for _, c := range controls {
-		writeErr = c.writeAccept(ctx, rendezvousURL, id)
+		writeErr = c.writeAccept(ctx, p, rendezvousURL, id)
 		if writeErr == nil {
 			break
 		}
@@ -157,20 +173,76 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity st
 	}
 	if writeErr != nil {
 		s.log.Warn("all listeners failed accept write", "entity", entity)
-		closeWithErr("listener unavailable")
+		_ = sleepContext(ctx, hopsResponse*p.SLatency)
+		http.Error(w, "listener unavailable", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Wait for the listener to dial, with a timeout. RendezvousTimeout
-	// guards against a listener that received the accept message but
-	// never followed up. abort() also closes ready when the listener
-	// upgrade fails, so we wake immediately in that case.
+	// Wait for handleAccept to reach takePending (close(paired)).
+	// RendezvousTimeout guards against a listener that received the
+	// accept message but never followed up.
 	waitCtx, waitCancel := context.WithTimeout(ctx, s.cfg.RendezvousTimeout)
 	defer waitCancel()
 	select {
 	case <-waitCtx.Done():
 		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
-			s.log.Warn("rendezvous timeout", "entity", entity, "id", id)
+			s.log.Warn("rendezvous timeout (pre-101)", "entity", entity, "id", id)
+			_ = sleepContext(ctx, hopsResponse*p.SLatency)
+			http.Error(w, "rendezvous timeout", http.StatusGatewayTimeout)
+			return
+		}
+		return // client gone
+	case <-pending.paired:
+	}
+
+	// 101 transit leg to sender — runs in parallel with handleAccept's
+	// own response leg (the listener-side 101). Use waitCtx so that
+	// RendezvousTimeout is enforced through the 101 transit too; if
+	// the timeout fires here we abort with 504 rather than emitting
+	// 101 only to tear it down a moment later. Check the parent ctx
+	// first so a parent cancellation (client gone) doesn't get
+	// misreported as a rendezvous timeout.
+	if !sleepContext(waitCtx, hopsResponse*p.SLatency) {
+		if ctx.Err() == nil && errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+			s.log.Warn("rendezvous timeout (101 transit)", "entity", entity, "id", id)
+			http.Error(w, "rendezvous timeout", http.StatusGatewayTimeout)
+		}
+		return
+	}
+	// Pre-Accept defensive re-check: if pending.ready closed during
+	// the 101-transit sleep above AND listenerWS is nil, the
+	// listener's WS Accept failed on its side. Bail with 503
+	// pre-upgrade rather than emitting 101 just to close it.
+	select {
+	case <-pending.ready:
+		if pending.listenerWS == nil {
+			s.log.Warn("listener accept failed (pre-101)", "entity", entity, "id", id)
+			http.Error(w, "listener accept failed", http.StatusServiceUnavailable)
+			return
+		}
+	default:
+		// Listener's accept-dial still in flight; emit 101 and wait
+		// for ready below.
+	}
+
+	senderWS, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		CompressionMode: websocket.CompressionDisabled,
+	})
+	if err != nil {
+		s.log.Warn("sender upgrade failed", "entity", entity, "error", err)
+		return
+	}
+	senderWS.SetReadLimit(bridgeReadLimit)
+	pending.senderWS = senderWS
+	closeWithErr := func(reason string) {
+		_ = senderWS.Close(websocket.StatusInternalError, reason)
+	}
+
+	// Wait for listener WS to be ready (claim or abort).
+	select {
+	case <-waitCtx.Done():
+		if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+			s.log.Warn("rendezvous timeout (post-101)", "entity", entity, "id", id)
 			closeWithErr("rendezvous timeout")
 			return
 		}
@@ -195,7 +267,7 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity st
 	defer func() { _ = listenerWS.CloseNow() }()
 
 	s.log.Info("rendezvous bridge starting", "entity", entity, "id", id)
-	bridgeErr := bridgeWS(ctx, senderWS, listenerWS)
+	bridgeErr := bridgeWS(ctx, p, senderWS, listenerWS)
 	if bridgeErr != nil {
 		s.log.Debug("rendezvous bridge ended", "entity", entity, "id", id, "error", bridgeErr)
 	} else {
@@ -214,23 +286,40 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity st
 // a deferred guard closes the listener WS if and only if the sender
 // goroutine never took ownership (which can happen if the
 // RendezvousTimeout fires concurrently with the claim).
+//
+// DelayProfile timing:
+//  1. DNS + hopsHandshake*L + hopsWSGet*L before takePending (models
+//     the listener's accept-dial wire transit). No SAS validation:
+//     sb-hc-id IS the auth.
+//  2. close(paired) the instant takePending succeeds — this is the
+//     timing barrier the sender's handleConnect waits on so dual-101
+//     timing matches the wireshark captures.
+//  3. hopsResponse*L for the 101 transit back to the listener, then
+//     websocket.Accept.
 func (s *Server) handleAccept(w http.ResponseWriter, r *http.Request, entity, id string) {
-	// Fault injection: optionally sleep before completing the upgrade.
-	// Applied to every accept for the lifetime of the Server. Honors
-	// the request context so server shutdown is not blocked on a
-	// pending delay.
-	if d := time.Duration(s.faults.acceptDelay.Load()); d > 0 {
-		t := time.NewTimer(d)
-		select {
-		case <-t.C:
-		case <-r.Context().Done():
-			t.Stop()
-			return
-		}
+	ctx := r.Context()
+	p := s.delayProfile
+
+	// Pre-takePending wire transit. No AuthInternal: accept-dial has
+	// no sb-hc-token; sb-hc-id is the auth and is checked instantly
+	// against the pending map.
+	if !sleepContext(ctx, p.DNSLookup+hopsHandshake*p.LLatency+hopsWSGet*p.LLatency) {
+		return
 	}
 	pending := s.hub.takePending(entity, id)
 	if pending == nil {
+		_ = sleepContext(ctx, hopsResponse*p.LLatency)
 		http.Error(w, "unknown rendezvous id", http.StatusNotFound)
+		return
+	}
+	// Signal paired ASAP so the sender's handleConnect wakes up.
+	close(pending.paired)
+
+	// 101 transit leg to listener — runs in parallel with sender's
+	// own 101 transit in handleConnect.
+	if !sleepContext(ctx, hopsResponse*p.LLatency) {
+		// Context cancelled mid-sleep; abort so the sender wakes too.
+		pending.abort()
 		return
 	}
 

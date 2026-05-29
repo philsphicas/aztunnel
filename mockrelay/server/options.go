@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
-	"time"
 )
 
 // Option configures a Server constructed via NewServerForTesting. Each
@@ -29,13 +28,11 @@ type Option func(*Server) error
 //
 // Single-shot knobs (closeCodeOnAccept, closeControlOnRenew,
 // rejectControlDial) use Swap / CompareAndSwap so the first event
-// that observes the armed value also disarms it. Persistent knobs
-// (acceptDelay) use Load so they apply to every matching event.
+// that observes the armed value also disarms it.
 type faults struct {
 	closeCodeOnAccept   atomic.Int32 // 0 = disarmed, otherwise the WebSocket close code to emit
 	closeControlOnRenew atomic.Bool
 	rejectControlDial   atomic.Bool
-	acceptDelay         atomic.Int64 // nanoseconds; 0 = no delay
 }
 
 // WithCloseControlOnRenew makes the server close the listener's
@@ -122,25 +119,6 @@ func isSendableCloseCode(code int) bool {
 func WithRejectControlDial() Option {
 	return func(s *Server) error {
 		s.faults.rejectControlDial.Store(true)
-		return nil
-	}
-}
-
-// WithAcceptDelay sleeps for d before completing the WebSocket
-// upgrade on any accept-side (listener-rendezvous) dial. Unlike the
-// single-shot knobs, WithAcceptDelay applies to every accept for the
-// lifetime of the Server; tests should pair it with t.Cleanup or a
-// short-lived Server to avoid bleed-through.
-//
-// Negative durations are clamped to zero; zero disables the delay.
-// The sleep honors the inbound request context so server shutdown is
-// not blocked on a pending delay.
-func WithAcceptDelay(d time.Duration) Option {
-	return func(s *Server) error {
-		if d < 0 {
-			d = 0
-		}
-		s.faults.acceptDelay.Store(int64(d))
 		return nil
 	}
 }

@@ -37,6 +37,7 @@ func silentServer(t *testing.T, opts ...Option) *Server {
 func newTestPending() *pendingRendezvous {
 	return &pendingRendezvous{
 		ready:      make(chan struct{}),
+		paired:     make(chan struct{}),
 		bridgeDone: make(chan struct{}),
 		senderTook: make(chan struct{}),
 	}
@@ -226,50 +227,6 @@ func TestFaultInjection_RejectControlDial(t *testing.T) {
 	}
 }
 
-// TestFaultInjection_AcceptDelay verifies that the accept-side
-// upgrade is delayed by at least the configured duration. The delay
-// is intentionally measured against a lower bound only — scheduling
-// noise can only make the elapsed time larger, never smaller.
-func TestFaultInjection_AcceptDelay(t *testing.T) {
-	const delay = 150 * time.Millisecond
-	s := silentServer(t, WithAcceptDelay(delay))
-	srv := httptest.NewServer(s.Handler())
-	defer srv.Close()
-
-	const (
-		entity = "delay-entity"
-		id     = "abcdefabcdefabcdefabcdefabcdefab"
-	)
-	pending := newTestPending()
-	s.hub.addPending(entity, id, pending)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	start := time.Now()
-	ws := dialAccept(t, ctx, srv.URL, entity, id)
-	elapsed := time.Since(start)
-	t.Cleanup(func() {
-		// Unblock the handler's pending.bridgeDone wait so the server
-		// goroutine exits before httptest.Server.Close.
-		close(pending.bridgeDone)
-		_ = ws.CloseNow()
-	})
-
-	if elapsed < delay {
-		t.Errorf("upgrade took %v, want >= %v", elapsed, delay)
-	}
-
-	// Negative durations must clamp to zero (no fault).
-	s2 := silentServer(t)
-	if err := WithAcceptDelay(-1)(s2); err != nil {
-		t.Fatalf("WithAcceptDelay(-1) returned err: %v", err)
-	}
-	if got := s2.faults.acceptDelay.Load(); got != 0 {
-		t.Errorf("negative duration not clamped: acceptDelay = %d ns", got)
-	}
-}
-
 // TestFaultInjection_OptionsDontLeakToProduction verifies that the
 // production constructor (mockrelay/server.NewServer) leaves the
 // fault knobs at their zero values — nothing armed.
@@ -290,8 +247,8 @@ func TestFaultInjection_OptionsDontLeakToProduction(t *testing.T) {
 	if s.faults.rejectControlDial.Load() {
 		t.Errorf("rejectControlDial = true, want false")
 	}
-	if got := s.faults.acceptDelay.Load(); got != 0 {
-		t.Errorf("acceptDelay = %d ns, want 0", got)
+	if s.delayProfile != (DelayProfile{}) {
+		t.Errorf("delayProfile = %+v, want zero DelayProfile", s.delayProfile)
 	}
 
 	// Behavioural sanity: a normal control dial succeeds.
@@ -325,8 +282,8 @@ func TestFaultInjection_NewServerForTesting_NoOpts(t *testing.T) {
 	if s.faults.rejectControlDial.Load() {
 		t.Errorf("rejectControlDial = true, want false")
 	}
-	if got := s.faults.acceptDelay.Load(); got != 0 {
-		t.Errorf("acceptDelay = %d ns, want 0", got)
+	if s.delayProfile != (DelayProfile{}) {
+		t.Errorf("delayProfile = %+v, want zero DelayProfile", s.delayProfile)
 	}
 }
 

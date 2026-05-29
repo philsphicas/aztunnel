@@ -11,37 +11,40 @@ import (
 
 	"github.com/philsphicas/aztunnel/e2e/backends/mock"
 	"github.com/philsphicas/aztunnel/e2e/scenarios"
+	"github.com/philsphicas/aztunnel/mockrelay/server"
 )
 
-// TestMockFeature_DefaultRendezvousDelay verifies that a zero-value
-// MockBackend applies DefaultRendezvousDelay (~1 s) to each accept,
-// observable as a lower bound on the elapsed time for a single
-// sender → listener → target round-trip.
+// TestMockFeature_DefaultDelayProfile verifies that a MockBackend
+// configured with server.DelayProfileDefault applies the wire-faithful
+// per-step delays to each rendezvous, observable as a lower bound on
+// the elapsed time for a single sender → listener → target round-
+// trip.
 //
-// The assertion is a lower-bound only: scheduling noise can only
-// make the measured elapsed time longer, never shorter, so a >=
-// comparison against (DefaultRendezvousDelay - slack) is robust.
-func TestMockFeature_DefaultRendezvousDelay(t *testing.T) {
-	var b mock.MockBackend
+// We assert a generous lower bound that survives jitter while still
+// tripping any regression that silently disables the delay sleeps.
+func TestMockFeature_DefaultDelayProfile(t *testing.T) {
+	b := mock.MockBackend{DelayProfile: server.DelayProfileDefault}
 	elapsed := timeOneRoundTrip(t, &b)
-	wantAtLeast := mock.DefaultRendezvousDelay - 50*time.Millisecond
+	wantAtLeast := 300 * time.Millisecond
 	if elapsed < wantAtLeast {
-		t.Fatalf("round-trip took %v with default delay; want >= %v (DefaultRendezvousDelay - 50ms slack)",
+		t.Fatalf("round-trip took %v with DelayProfileDefault; want >= %v",
 			elapsed, wantAtLeast)
 	}
 }
 
-// TestMockFeature_NoRendezvousDelay verifies the NoRendezvousDelay
-// sentinel drops the per-accept delay back to the in-process
-// baseline (~6 ms), bounded by an upper threshold well below
-// DefaultRendezvousDelay so any accidental fall-through trips the
-// test.
-func TestMockFeature_NoRendezvousDelay(t *testing.T) {
-	b := mock.MockBackend{RendezvousDelay: mock.NoRendezvousDelay}
+// TestMockFeature_ZeroDelayProfile verifies the zero-value
+// MockBackend{} (zero DelayProfile) applies no synthetic per-step
+// delay, leaving rendezvous + bridge bounded by the in-process
+// baseline (single-digit ms).
+//
+// Upper bound is 500 ms — well below the DelayProfileDefault wall-clock
+// so any accidental fall-through to a non-zero profile trips the test.
+func TestMockFeature_ZeroDelayProfile(t *testing.T) {
+	var b mock.MockBackend
 	elapsed := timeOneRoundTrip(t, &b)
-	upperBound := mock.DefaultRendezvousDelay / 2
+	upperBound := 500 * time.Millisecond
 	if elapsed > upperBound {
-		t.Fatalf("round-trip took %v with NoRendezvousDelay; want < %v (DefaultRendezvousDelay/2)",
+		t.Fatalf("round-trip took %v with zero DelayProfile; want < %v",
 			elapsed, upperBound)
 	}
 }
