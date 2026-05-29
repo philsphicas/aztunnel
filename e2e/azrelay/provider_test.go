@@ -284,6 +284,30 @@ func TestPairToken_HycoNamesSkipEntraSurfacesEmpty(t *testing.T) {
 	}
 }
 
+// TestPairToken_HycoNamesSkipSASSurfacesEmpty mirrors the
+// SkipEntraSurfacesEmpty test for the symmetric SkipSAS case: when a
+// PairToken has a populated Result whose SASHycoName is empty,
+// HycoNames returns the empty sas name from the Result rather than
+// falling back to the suffix-derived synthetic name. Locks in
+// "result wins over suffix" for SkipSAS mode at the PairToken level.
+func TestPairToken_HycoNamesSkipSASSurfacesEmpty(t *testing.T) {
+	const suffix = "00112233aabb"
+	tok := &PairToken{
+		suffix: suffix,
+		result: &Result{
+			EntraHycoName: "e2e-entra-" + suffix,
+			SASHycoName:   "",
+		},
+	}
+	entra, sas := tok.HycoNames()
+	if entra != "e2e-entra-"+suffix {
+		t.Errorf("entra = %q, want %q", entra, "e2e-entra-"+suffix)
+	}
+	if sas != "" {
+		t.Errorf("sas = %q, want empty (Result wins over suffix)", sas)
+	}
+}
+
 // TestPairToken_TeardownSkipsEntraWhenResultEntraEmpty asserts that
 // Teardown invokes deleteFn exactly once (SAS only) when the Result
 // records SkipEntra (EntraHycoName empty), and that the count holds
@@ -316,6 +340,49 @@ func TestPairToken_TeardownSkipsEntraWhenResultEntraEmpty(t *testing.T) {
 	}
 	if len(capturedNames) != 1 || capturedNames[0] != "e2e-sas-"+suffix {
 		t.Errorf("captured names = %v, want [%q]", capturedNames, "e2e-sas-"+suffix)
+	}
+
+	if err := tok.Teardown(t.Context()); err != nil {
+		t.Fatalf("second teardown: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("after second teardown, deleteFn invoked %d times, want still 1", got)
+	}
+}
+
+// TestPairToken_TeardownSkipsSASWhenResultSASEmpty mirrors the
+// SkipEntra teardown test for the symmetric SkipSAS case: Teardown
+// invokes deleteFn exactly once (entra only) when the Result records
+// SkipSAS (SASHycoName empty), and the count holds across repeat
+// calls.
+func TestPairToken_TeardownSkipsSASWhenResultSASEmpty(t *testing.T) {
+	const suffix = "feedface1234"
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var capturedNames []string
+	tok := &PairToken{
+		suffix: suffix,
+		result: &Result{
+			EntraHycoName: "e2e-entra-" + suffix,
+			SASHycoName:   "",
+		},
+		deleteFn: func(ctx context.Context, name string) error {
+			calls.Add(1)
+			mu.Lock()
+			capturedNames = append(capturedNames, name)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	if err := tok.Teardown(t.Context()); err != nil {
+		t.Fatalf("first teardown: %v", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("deleteFn invoked %d times, want 1 (SkipSAS: entra only)", got)
+	}
+	if len(capturedNames) != 1 || capturedNames[0] != "e2e-entra-"+suffix {
+		t.Errorf("captured names = %v, want [%q]", capturedNames, "e2e-entra-"+suffix)
 	}
 
 	if err := tok.Teardown(t.Context()); err != nil {

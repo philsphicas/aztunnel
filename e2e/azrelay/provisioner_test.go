@@ -195,6 +195,25 @@ func TestProvisioner_HycoNamesPreProvision_SkipEntraElidesEntra(t *testing.T) {
 	}
 }
 
+func TestProvisioner_HycoNamesPreProvision_SkipSASElidesSAS(t *testing.T) {
+	// Symmetric to the SkipEntra mirror above: before Provision runs,
+	// a Provisioner with cfg.SkipSAS=true should report
+	// ("e2e-entra-<suffix>", "") — matching the shape callers will
+	// see post-Provision and avoiding a synthetic sas name for a hyco
+	// that will never be created.
+	p := &Provisioner{
+		cfg:    Config{SkipSAS: true},
+		suffix: "0123456789ab",
+	}
+	entra, sas := p.HycoNames()
+	if entra != "e2e-entra-0123456789ab" {
+		t.Errorf("entra = %q", entra)
+	}
+	if sas != "" {
+		t.Errorf("sas = %q, want empty (SkipSAS elides pre-Provision)", sas)
+	}
+}
+
 func TestProvisioner_HycoNamesPostProvision_SkipEntra(t *testing.T) {
 	p := &Provisioner{
 		suffix: "0123456789ab",
@@ -212,6 +231,49 @@ func TestProvisioner_HycoNamesPostProvision_SkipEntra(t *testing.T) {
 	}
 	if !HycoNamePattern.MatchString(sas) {
 		t.Errorf("sas name %q does not satisfy HycoNamePattern", sas)
+	}
+}
+
+func TestProvisioner_HycoNamesPostProvision_SkipSAS(t *testing.T) {
+	p := &Provisioner{
+		suffix: "0123456789ab",
+		result: &Result{
+			EntraHycoName: "e2e-entra-0123456789ab",
+			SASHycoName:   "",
+		},
+	}
+	entra, sas := p.HycoNames()
+	if entra != "e2e-entra-0123456789ab" {
+		t.Errorf("entra name = %q", entra)
+	}
+	if sas != "" {
+		t.Errorf("sas name = %q, want empty (SkipSAS mode)", sas)
+	}
+	if !HycoNamePattern.MatchString(entra) {
+		t.Errorf("entra name %q does not satisfy HycoNamePattern", entra)
+	}
+}
+
+// TestProvisioner_HycoNamesPostProvision_SkipBoth pins the
+// degenerate both-true case explicitly. Both SkipEntra and SkipSAS
+// true is permitted (mirroring how SkipEntra alone is permitted with
+// no validation pushback): Provision creates no hycos and HycoNames
+// returns ("", "") post-Provision. The choice is "no-op, not a
+// validation error" — symmetric with the existing
+// "SkipEntra unilaterally permitted" stance — and this test locks
+// it in so a future contributor adding validation for the both-true
+// case would observably break this assertion.
+func TestProvisioner_HycoNamesPostProvision_SkipBoth(t *testing.T) {
+	p := &Provisioner{
+		suffix: "0123456789ab",
+		result: &Result{
+			EntraHycoName: "",
+			SASHycoName:   "",
+		},
+	}
+	entra, sas := p.HycoNames()
+	if entra != "" || sas != "" {
+		t.Errorf("HycoNames = (%q, %q); want both empty (SkipEntra+SkipSAS degenerate no-op)", entra, sas)
 	}
 }
 
@@ -269,6 +331,32 @@ func TestResultEnvVars_EmptyEntraHycoName(t *testing.T) {
 	}
 	if got["E2E_SAS_HYCO_NAME"] != "e2e-sas-0123456789ab" {
 		t.Errorf("EnvVars[E2E_SAS_HYCO_NAME] = %q, want %q", got["E2E_SAS_HYCO_NAME"], "e2e-sas-0123456789ab")
+	}
+}
+
+// TestResultEnvVars_EmptySASHycoName mirrors the EmptyEntraHycoName
+// test for the symmetric SkipSAS case: Result.SASHycoName empty must
+// still emit the E2E_SAS_HYCO_NAME key with an empty value so
+// downstream consumers can reason about presence via
+// `SASHycoName != ""` without missing-key surprises.
+func TestResultEnvVars_EmptySASHycoName(t *testing.T) {
+	r := &Result{
+		RelayName:       "my-relay",
+		EntraHycoName:   "e2e-entra-0123456789ab",
+		SASHycoName:     "",
+		ListenerKeyName: "listener",
+		ListenerKey:     "lk",
+		SenderKeyName:   "sender",
+		SenderKey:       "sk",
+	}
+	got := r.EnvVars()
+	if v, ok := got["E2E_SAS_HYCO_NAME"]; !ok {
+		t.Fatal("EnvVars missing E2E_SAS_HYCO_NAME key (must be present even when empty)")
+	} else if v != "" {
+		t.Errorf("EnvVars[E2E_SAS_HYCO_NAME] = %q, want empty", v)
+	}
+	if got["E2E_ENTRA_HYCO_NAME"] != "e2e-entra-0123456789ab" {
+		t.Errorf("EnvVars[E2E_ENTRA_HYCO_NAME] = %q, want %q", got["E2E_ENTRA_HYCO_NAME"], "e2e-entra-0123456789ab")
 	}
 }
 
