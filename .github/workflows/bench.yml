@@ -31,6 +31,10 @@ on:
       - "internal/**"
       - "cmd/**"
       - "e2e/**"
+      # mockrelay is its own go.work module but is imported directly
+      # by e2e/backends/mock (see backend.go), so its source changes
+      # land in the binary that bench-mock measures.
+      - "mockrelay/**"
       - "go.mod"
       - "go.sum"
       - "go.work"
