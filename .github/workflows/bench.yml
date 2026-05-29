@@ -131,9 +131,12 @@ jobs:
               # indented `<file>.go:<line>:` log line so the skip
               # *reason* emitted by b.Skipf (which Go prints on the
               # line before the `--- SKIP` marker) reaches the
-              # summary.
+              # summary. Uses POSIX character classes
+              # ([[:space:]]/[^[:space:]]) rather than the GNU
+              # \s/\S extensions so the regex stays correct if the
+              # runner image ever switches to a non-GNU grep.
               echo '```'
-              grep -E '^(\s+\S+\.go:.*|Benchmark|PASS|FAIL|ok\s|---\s(FAIL|SKIP))' bench-out/mock.txt || tail -100 bench-out/mock.txt
+              grep -E '^([[:space:]]+[^[:space:]]+\.go:.*|Benchmark|PASS|FAIL|ok[[:space:]]|---[[:space:]](FAIL|SKIP))' bench-out/mock.txt || tail -100 bench-out/mock.txt
               echo '```'
             else
               echo "_no raw benchmark output — earlier step failed before benchmarks ran_"
@@ -356,9 +359,12 @@ jobs:
               # log. The indented `<file>.go:<line>:` pattern catches
               # the skip *reason* that go test prints on the line
               # before the `--- SKIP` marker (only emitted with
-              # -v — see the Makefile's bench-azure target).
+              # -v — see the Makefile's bench-azure target). Uses
+              # POSIX character classes ([[:space:]]/[^[:space:]])
+              # rather than GNU \s/\S extensions for runner-image
+              # portability.
               echo '```'
-              grep -E '^(\s+\S+\.go:.*|Benchmark|PASS|FAIL|ok\s|---\s(FAIL|SKIP))' bench-out/raw.txt || tail -100 bench-out/raw.txt
+              grep -E '^([[:space:]]+[^[:space:]]+\.go:.*|Benchmark|PASS|FAIL|ok[[:space:]]|---[[:space:]](FAIL|SKIP))' bench-out/raw.txt || tail -100 bench-out/raw.txt
               echo '```'
             else
               echo "_no raw benchmark output — earlier step failed before benchmarks ran_"

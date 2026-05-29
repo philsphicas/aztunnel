@@ -157,14 +157,15 @@ bench: ## Run mock e2e benchmarks once (override BENCH=, COUNT=, BENCHTIME=)
 # bench-azure runs the e2e benchmark suite against a real Azure
 # Relay namespace. Default knobs (COUNT=3, BENCHTIME=10x) are tuned
 # for the CI bench workflow's budget: each iteration is a real relay
-# round-trip (~1-2s on Azure today), so 10x per benchmark with 3
-# samples per cell yields ~10-15 minutes of actual benchmark time
-# across the registered sub-benches (see e2e/scenarios/bench.go's
-# benchmarkCases — Azure runs the four serial ones; the mock-only
-# ConcurrentConnect_N100 is skipped on this backend) while giving
-# benchstat enough data without amplifying namespace cost
-# disproportionately. Operators wanting tighter confidence intervals
-# can run locally with COUNT=6 BENCHTIME=20x and a longer timeout.
+# round-trip (~0.3-1.0s on Azure today, varies ~3x with namespace
+# latency), so 10x per benchmark with 3 samples per cell yields ~2
+# minutes of actual benchmark time across the registered sub-benches
+# (see e2e/scenarios/bench.go's benchmarkCases — Azure runs the four
+# serial ones; the mock-only ConcurrentConnect_N100 is skipped on
+# this backend) while giving benchstat enough data without
+# amplifying namespace cost disproportionately. Operators wanting
+# tighter confidence intervals can run locally with COUNT=6
+# BENCHTIME=20x and a longer timeout.
 # BENCH defaults to BenchmarkE2E_Azure (the single-mode suite);
 # override to run a specific benchmark.
 #
