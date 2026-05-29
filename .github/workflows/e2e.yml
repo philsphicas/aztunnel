@@ -22,6 +22,12 @@ jobs:
   e2e-mock:
     name: E2E (mock)
     runs-on: ubuntu-latest
+    # The mock backend does not need OIDC; explicitly drop
+    # id-token: write so PR-supplied code (`make build` /
+    # `make e2e-mock`) cannot mint an OIDC token using the
+    # workflow-level grant inherited from `permissions:` above.
+    permissions:
+      contents: read
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6

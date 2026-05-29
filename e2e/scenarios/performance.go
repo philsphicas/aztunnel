@@ -104,7 +104,7 @@ func performanceCases() []scenarioCase {
 //     ≈ threshold + connectSlack ≈ 8 s via t.Fatalf.
 //
 // All three bounds keep the scenario well inside both the
-// per-test default timeout and the e2e job's 40 m envelope.
+// per-test default timeout and the e2e job's 60 m envelope.
 func ScenarioConnectLatency_Serial_PortForward(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
@@ -205,7 +205,7 @@ func ScenarioShortSession_Serial(t *testing.T, b Backend) {
 //     because every subsequent iteration is likely to hit the
 //     same (threshold + connectSlack) ~ 8 s timeout — at 10
 //     iterations × 2 scenarios × 2 Azure auth cells that's a
-//     320 s failure-path burn against the 40 m e2e workflow
+//     320 s failure-path burn against the 60 m e2e workflow
 //     envelope. Fail fast.
 //   - Threshold violations (operational success, elapsed >=
 //     threshold) → t.Errorf + continue. These produce a
