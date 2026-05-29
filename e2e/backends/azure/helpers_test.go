@@ -111,8 +111,7 @@ func requireProvider(t testing.TB) *azrelay.Provider {
 //	func TestSomething(t *testing.T) {
 //	    t.Parallel()                            // FIRST
 //	    env := requireDedicatedHyco(t)          // THEN provision
-//	    auth := availableAuths(t, env)[0]
-//	    // ...
+//	    // ... use env ...
 //	}
 //
 // Go's testing package only releases a test to run in parallel with
@@ -277,59 +276,6 @@ func drainBenchLease() {
 			fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco pair %s/%s: %v\n", entra, sas, err)
 		}
 	}
-}
-
-// requireAuth skips the calling test if E2E_AUTH is set to a value that
-// excludes the given auth method ("entra" or "sas"). This is used by
-// tests that are intrinsically tied to a single auth method (e.g. the
-// SAS-specific TestSASKeyAuth, TestBadSASKey, TestBadSASKeySender,
-// TestWrongSASClaim) so a contributor running with E2E_AUTH=entra
-// genuinely skips the SAS suite instead of running SAS-only assertions
-// against unfiltered fixtures.
-func requireAuth(t testing.TB, name string) {
-	t.Helper()
-	filter := os.Getenv("E2E_AUTH")
-	switch filter {
-	case "", name:
-		return
-	case "entra", "sas":
-		t.Skipf("E2E_AUTH=%q excludes %q", filter, name)
-	default:
-		t.Fatalf("unsupported E2E_AUTH value %q; expected \"entra\", \"sas\", or \"\" (both)", filter)
-	}
-}
-
-// availableAuths returns auth configurations for each available method.
-// Tests can iterate over these to run against both Entra and SAS.
-// Set E2E_AUTH=entra or E2E_AUTH=sas to restrict to a single method.
-func availableAuths(t testing.TB, env *relayEnv) []authConfig {
-	t.Helper()
-	filter := os.Getenv("E2E_AUTH") // "", "entra", "sas"
-	switch filter {
-	case "", "entra", "sas":
-	default:
-		t.Fatalf("unsupported E2E_AUTH value %q; expected \"entra\", \"sas\", or \"\" (both)", filter)
-	}
-
-	var configs []authConfig
-	if env.hyco != "" && filter != "sas" {
-		configs = append(configs, authConfig{
-			name: "entra",
-			hyco: env.hyco,
-		})
-	}
-	if env.sasHyco != "" && env.sasListenerKeyName != "" && env.sasListenerKey != "" && env.sasSenderKeyName != "" && env.sasSenderKey != "" && filter != "entra" {
-		configs = append(configs, authConfig{
-			name:        "sas",
-			hyco:        env.sasHyco,
-			listenerSAS: &sasCredentials{keyName: env.sasListenerKeyName, key: env.sasListenerKey},
-			senderSAS:   &sasCredentials{keyName: env.sasSenderKeyName, key: env.sasSenderKey},
-		})
-	}
-	if len(configs) == 0 {
-		t.Skip("no auth configured (set E2E_AUTH=entra|sas or leave unset for both)")
-	}
-	return configs
 }
 
 // availableAuthNames returns the auth method names to exercise based

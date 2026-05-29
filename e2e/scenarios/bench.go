@@ -10,55 +10,11 @@ import (
 	"time"
 )
 
-// BackendScope restricts a sub-benchmark to a subset of backends.
-// Out-of-scope sub-benchmarks are skipped (b.Skipf) at registration
-// time so the scope decision is visible in the bench output rather
-// than hidden in an inline `if backend.Name() != "x"` inside the
-// sub-benchmark body.
-type BackendScope int
-
-const (
-	// AnyBackend runs the sub-benchmark on every backend.
-	AnyBackend BackendScope = iota
-	// MockOnly runs the sub-benchmark only when the backend is the
-	// in-process mock. Use when the sub-bench's signal depends on
-	// having no network jitter or shared-namespace contention — the
-	// mock isolates aztunnel CPU/goroutine cost cleanly, while the
-	// same sub-bench on Azure would be dominated by data-plane
-	// variance.
-	MockOnly
-	// AzureOnly runs the sub-benchmark only when the backend is the
-	// real Azure Relay. Reserved for sub-benches whose signal only
-	// exists on the real data plane (none today after the scope
-	// cleanup landed alongside this enum).
-	AzureOnly
-)
-
-func (s BackendScope) appliesTo(backendName string) bool {
-	switch s {
-	case AnyBackend:
-		return true
-	case MockOnly:
-		return backendName == "mock"
-	case AzureOnly:
-		return backendName == "azure"
-	default:
-		return false
-	}
-}
-
-func (s BackendScope) String() string {
-	switch s {
-	case AnyBackend:
-		return "any"
-	case MockOnly:
-		return "mock-only"
-	case AzureOnly:
-		return "azure-only"
-	default:
-		return fmt.Sprintf("unknown(%d)", int(s))
-	}
-}
+// BackendScope, AnyBackend, MockOnly, AzureOnly, appliesTo, and
+// String are defined in scope.go alongside scenarioCase so both the
+// bench registry (this file) and the scenario registries
+// (RunCoreScenarios, RunReliabilityScenarios, RunObservabilityScenarios,
+// RunPerformanceScenarios, RunTopologyScenarios) share the same enum.
 
 // benchCase is one entry in the benchmark registry. Split out as a
 // named struct (rather than an anonymous struct literal inside

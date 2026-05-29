@@ -25,26 +25,33 @@ import (
 // log capture so the parity claim stays honest.
 func RunObservabilityScenarios(t *testing.T, b Backend) {
 	t.Helper()
-	scenarios := []struct {
-		name string
-		run  func(*testing.T, Backend)
-	}{
-		{"BridgeID_Correlation", ScenarioBridgeID_Correlation},
-		{"ControlSessionID_OnConnectedLine", ScenarioControlSessionID_OnConnectedLine},
-		{"SenderLogsCode_OnConnectFailure", ScenarioSenderLogsCode_OnConnectFailure},
-		{"ListenerDialFailureLog_CarriesCode", ScenarioListenerDialFailureLog_CarriesCode},
-		{"BridgeCauseLogs", ScenarioBridgeCauseLogs},
-		{"BridgePerDirection_NormalClose", ScenarioBridgePerDirection_NormalClose},
-		{"Metrics_EndpointShape", ScenarioMetrics_EndpointShape},
-		{"Metrics_BothSidesConverge", ScenarioMetrics_BothSidesConverge},
-		{"Metrics_DialDuration", ScenarioMetrics_DialDuration},
-		{"ListenerID_PropagatesAndChangesOnRestart", ScenarioListenerID_PropagatesAndChangesOnRestart},
-		{"AcceptID_Saturation", ScenarioAcceptID_Saturation},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			sc.run(t, b)
-		})
+	runScenarioCases(t, b, observabilityCases())
+}
+
+// observabilityCases is the metadata-only registry of observability
+// scenarios. The cross-backend log-shape parity gate is what makes
+// the suite meaningful, so every entry is AnyBackend except
+// TokenFetchMetric — which exists only on Azure because the mock has
+// no Entra/SAS provider to fetch from.
+func observabilityCases() []scenarioCase {
+	return []scenarioCase{
+		{name: "BridgeID_Correlation", scope: AnyBackend, run: ScenarioBridgeID_Correlation},
+		{name: "ControlSessionID_OnConnectedLine", scope: AnyBackend, run: ScenarioControlSessionID_OnConnectedLine},
+		{name: "SenderLogsCode_OnConnectFailure", scope: AnyBackend, run: ScenarioSenderLogsCode_OnConnectFailure},
+		{name: "ListenerDialFailureLog_CarriesCode", scope: AnyBackend, run: ScenarioListenerDialFailureLog_CarriesCode},
+		{name: "BridgeCauseLogs", scope: AnyBackend, run: ScenarioBridgeCauseLogs},
+		{name: "BridgePerDirection_NormalClose", scope: AnyBackend, run: ScenarioBridgePerDirection_NormalClose},
+		{name: "Metrics_EndpointShape", scope: AnyBackend, run: ScenarioMetrics_EndpointShape},
+		{name: "Metrics_BothSidesConverge", scope: AnyBackend, run: ScenarioMetrics_BothSidesConverge},
+		{name: "Metrics_DialDuration", scope: AnyBackend, run: ScenarioMetrics_DialDuration},
+		{name: "ListenerID_PropagatesAndChangesOnRestart", scope: AnyBackend, run: ScenarioListenerID_PropagatesAndChangesOnRestart},
+		{name: "AcceptID_Saturation", scope: AnyBackend, run: ScenarioAcceptID_Saturation},
+		{
+			name:   "TokenFetchMetric",
+			scope:  AzureOnly,
+			reason: "exercises real Entra/SAS provider token fetch wiring; the mock relay does not fetch credentials",
+			run:    ScenarioTokenFetchMetric,
+		},
 	}
 }
 
@@ -1050,4 +1057,80 @@ func waitForLogSubstring(logs func() string, substr string, timeout time.Duratio
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
+}
+
+// ScenarioTokenFetchMetric drives one short echo round-trip through
+// the tunnel and asserts the sender's /metrics surface records the
+// token fetch:
+//   - aztunnel_token_fetch_total{provider=X,result="ok"} >= 1
+//   - aztunnel_token_fetch_seconds_count{provider=X,result="ok"} >= 1
+//   - histogram count equals counter (the observability wrapper
+//     records both per call, so divergence means one side wasn't
+//     wired)
+//   - exactly one provider observed (no token leak across providers)
+//
+// Provider is taken from the cell's auth axis (entra/sas); the
+// scenario does not need to know the provider name in advance —
+// Backend.Sender.TokenFetchOK reports observed providers via the
+// returned []TokenFetchObservation slice.
+//
+// scope=AzureOnly via the observability registry: the in-process
+// mock has no Entra/SAS provider to fetch from. The mock-side
+// emulation of the metric SHAPE lives in
+// TestMockEmulates_TokenFetchMetric.
+func ScenarioTokenFetchMetric(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	sender := tun.Senders[0]
+	if sender.TokenFetchOK == nil {
+		t.Skipf("backend=%q does not expose Sender.TokenFetchOK", b.Name())
+	}
+
+	conn, err := net.DialTimeout("tcp", tun.SenderAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+	payload := []byte("token-fetch-metric\n")
+	_ = conn.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Token fetch happens inside the sender on the dial path —
+	// metric scrape lags the round-trip by Prometheus collection
+	// granularity. Poll until we see at least one observation.
+	var observed []TokenFetchObservation
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		observed = sender.TokenFetchOK()
+		if len(observed) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if len(observed) != 1 {
+		t.Fatalf("got %d token-fetch providers, want exactly 1: %+v", len(observed), observed)
+	}
+	obs := observed[0]
+	if obs.CounterValue < 1 {
+		t.Errorf("token_fetch_total{provider=%q,result=\"ok\"} = %d, want >= 1", obs.Provider, obs.CounterValue)
+	}
+	if obs.HistogramCount != obs.CounterValue {
+		t.Errorf("histogram count %d != counter %d for provider=%q (wrapper must observe both per call)",
+			obs.HistogramCount, obs.CounterValue, obs.Provider)
+	}
 }

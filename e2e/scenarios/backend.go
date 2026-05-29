@@ -373,6 +373,20 @@ type Sender struct {
 	// nil and the scenario calls t.Skip.
 	DialDurationSamples func() uint64
 
+	// TokenFetchOK returns one TokenFetchObservation per
+	// (provider) label observed in the aztunnel_token_fetch_total
+	// and aztunnel_token_fetch_seconds_count metrics on this
+	// sender's /metrics surface, filtered to result="ok". Returns
+	// nil when no observations have been recorded yet.
+	//
+	// Used by ScenarioTokenFetchMetric (scope=AzureOnly) to assert
+	// that exactly one token-provider was used and that the counter
+	// and histogram counts agree. Optional: backends that do not
+	// fetch real credentials (the in-process mock) leave this nil;
+	// the scenario itself carries scope=AzureOnly so the mock skips
+	// it before dereferencing this field.
+	TokenFetchOK func() []TokenFetchObservation
+
 	// Stop drops this sender. Idempotent.
 	Stop func()
 
@@ -380,6 +394,27 @@ type Sender struct {
 	// joined by newlines. See Listener.Logs for usage and the
 	// optional-nil contract.
 	Logs func() string
+}
+
+// TokenFetchObservation is one (provider, counter, histogram-count)
+// triple observed on a sender's /metrics surface for a single
+// `provider` label with result="ok". Used by ScenarioTokenFetchMetric
+// to assert exactly one provider was exercised and that the counter
+// and histogram count agree (the wrapper observes both per call).
+type TokenFetchObservation struct {
+	// Provider is the value of the `provider` Prometheus label
+	// (e.g. "entra" or "sas") on the observed metric line.
+	Provider string
+
+	// CounterValue is the aztunnel_token_fetch_total{provider=…,
+	// result="ok"} value at the moment TokenFetchOK was called.
+	CounterValue uint64
+
+	// HistogramCount is the aztunnel_token_fetch_seconds_count{
+	// provider=…, result="ok"} value at the moment TokenFetchOK was
+	// called. Must equal CounterValue (the observability wrapper
+	// records both per token fetch).
+	HistogramCount uint64
 }
 
 // Tunnel is a running listener/sender/relay topology returned by

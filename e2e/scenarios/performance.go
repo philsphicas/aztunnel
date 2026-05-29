@@ -2,6 +2,8 @@ package scenarios
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net"
@@ -42,34 +44,39 @@ import (
 // connection cost, not by amortised setup.
 func RunPerformanceScenarios(t *testing.T, b Backend) {
 	t.Helper()
-	scenarios := []struct {
-		name string
-		run  func(*testing.T, Backend)
-	}{
-		{"ConnectLatency_Serial_PortForward", ScenarioConnectLatency_Serial_PortForward},
-		{"ConnectLatency_Serial_SOCKS5", ScenarioConnectLatency_Serial_SOCKS5},
-		{"ConnectLatency_ColdStart_PortForward", ScenarioConnectLatency_ColdStart_PortForward},
-		{"ConnectLatency_ColdStart_SOCKS5", ScenarioConnectLatency_ColdStart_SOCKS5},
-		{"ShortSession_Serial", ScenarioShortSession_Serial},
+	runScenarioCases(t, b, performanceCases())
+}
+
+// performanceCases is the metadata-only registry of performance
+// scenarios. All entries are AnyBackend: per-backend thresholds are
+// applied inside each scenario via b.ConnectLatencyThreshold(),
+// b.RoundBudget(), etc., so the same scenario can run against both
+// without false alarms.
+//
+// BulkTransfer (10 MiB SHA-256) is registered here as a throughput-
+// sized parity gate, alongside the latency-sized scenarios.
+func performanceCases() []scenarioCase {
+	return []scenarioCase{
+		{name: "ConnectLatency_Serial_PortForward", scope: AnyBackend, run: ScenarioConnectLatency_Serial_PortForward},
+		{name: "ConnectLatency_Serial_SOCKS5", scope: AnyBackend, run: ScenarioConnectLatency_Serial_SOCKS5},
+		{name: "ConnectLatency_ColdStart_PortForward", scope: AnyBackend, run: ScenarioConnectLatency_ColdStart_PortForward},
+		{name: "ConnectLatency_ColdStart_SOCKS5", scope: AnyBackend, run: ScenarioConnectLatency_ColdStart_SOCKS5},
+		{name: "ShortSession_Serial", scope: AnyBackend, run: ScenarioShortSession_Serial},
+		{name: "BulkTransfer", scope: AnyBackend, run: ScenarioBulkTransfer},
 		// Parameterized echo-workload scenarios — see WorkloadShape doc below.
-		{"Serial_ConnPerRequestEcho_PortForward", ScenarioSerial_ConnPerRequestEcho_PortForward},
-		{"Serial_ConnReusedEcho_PortForward", ScenarioSerial_ConnReusedEcho_PortForward},
-		{"Serial_ConnPrewarmedEcho_PortForward", ScenarioSerial_ConnPrewarmedEcho_PortForward},
-		{"Parallel_ConnPerRequestEcho_PortForward", ScenarioParallel_ConnPerRequestEcho_PortForward},
-		{"Parallel_ConnReusedEcho_PortForward", ScenarioParallel_ConnReusedEcho_PortForward},
-		{"Parallel_ConnPrewarmedEcho_PortForward", ScenarioParallel_ConnPrewarmedEcho_PortForward},
-		{"Serial_ConnPerRequestEcho_SOCKS5", ScenarioSerial_ConnPerRequestEcho_SOCKS5},
-		{"Serial_ConnReusedEcho_SOCKS5", ScenarioSerial_ConnReusedEcho_SOCKS5},
-		{"Serial_ConnPrewarmedEcho_SOCKS5", ScenarioSerial_ConnPrewarmedEcho_SOCKS5},
-		{"Parallel_ConnPerRequestEcho_SOCKS5", ScenarioParallel_ConnPerRequestEcho_SOCKS5},
-		{"Parallel_ConnReusedEcho_SOCKS5", ScenarioParallel_ConnReusedEcho_SOCKS5},
-		{"Parallel_ConnPrewarmedEcho_SOCKS5", ScenarioParallel_ConnPrewarmedEcho_SOCKS5},
-		{"Parallel_ConnPrewarmedEcho_SOCKS5_MultiTarget", ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			sc.run(t, b)
-		})
+		{name: "Serial_ConnPerRequestEcho_PortForward", scope: AnyBackend, run: ScenarioSerial_ConnPerRequestEcho_PortForward},
+		{name: "Serial_ConnReusedEcho_PortForward", scope: AnyBackend, run: ScenarioSerial_ConnReusedEcho_PortForward},
+		{name: "Serial_ConnPrewarmedEcho_PortForward", scope: AnyBackend, run: ScenarioSerial_ConnPrewarmedEcho_PortForward},
+		{name: "Parallel_ConnPerRequestEcho_PortForward", scope: AnyBackend, run: ScenarioParallel_ConnPerRequestEcho_PortForward},
+		{name: "Parallel_ConnReusedEcho_PortForward", scope: AnyBackend, run: ScenarioParallel_ConnReusedEcho_PortForward},
+		{name: "Parallel_ConnPrewarmedEcho_PortForward", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_PortForward},
+		{name: "Serial_ConnPerRequestEcho_SOCKS5", scope: AnyBackend, run: ScenarioSerial_ConnPerRequestEcho_SOCKS5},
+		{name: "Serial_ConnReusedEcho_SOCKS5", scope: AnyBackend, run: ScenarioSerial_ConnReusedEcho_SOCKS5},
+		{name: "Serial_ConnPrewarmedEcho_SOCKS5", scope: AnyBackend, run: ScenarioSerial_ConnPrewarmedEcho_SOCKS5},
+		{name: "Parallel_ConnPerRequestEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnPerRequestEcho_SOCKS5},
+		{name: "Parallel_ConnReusedEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnReusedEcho_SOCKS5},
+		{name: "Parallel_ConnPrewarmedEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_SOCKS5},
+		{name: "Parallel_ConnPrewarmedEcho_SOCKS5_MultiTarget", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget},
 	}
 }
 
@@ -940,4 +947,82 @@ func ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget(t *testing.T, b Backe
 		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
 		NumTargets: 4,
 	})
+}
+
+// BulkTransferBytes is the payload size ScenarioBulkTransfer streams
+// through the tunnel in each direction. 10 MiB is large enough to
+// exercise multiple TCP windows and the bridge's read/write loop
+// beyond the single-segment regime of the latency scenarios, yet
+// small enough to keep wall time bounded on Azure (where the per-
+// connection envelope is bandwidth-bound, currently ~14 Mbps).
+//
+// SHA-256 of the random payload is verified end-to-end; corruption
+// surfaces as a hash mismatch regardless of payload size, so the
+// signal does not require a multi-hundred-MB transfer.
+const BulkTransferBytes = 10 << 20
+
+// ScenarioBulkTransfer streams BulkTransferBytes of crypto/rand bytes
+// from the sender into a plain TCP echo target, reads them back, and
+// asserts SHA-256 parity. This catches in-flight corruption,
+// truncation, and reorder bugs that the small-payload echo scenarios
+// would miss, and exercises the per-connection throughput envelope of
+// each backend.
+//
+// scope=AnyBackend: mock completes in <1 s; Azure completes in
+// ~10-15 s per cell (one cell per auth axis value).
+func ScenarioBulkTransfer(t *testing.T, b Backend) {
+	t.Helper()
+	AssertNoLeaks(t)
+
+	echo := StartPlainEcho(t)
+	tun := b.Setup(t, SetupOptions{
+		NumListeners:   1,
+		SenderMode:     ModePortForward,
+		Target:         echo.Addr(),
+		AllowedTargets: []string{echo.Addr()},
+	})
+
+	conn, err := net.DialTimeout("tcp", tun.SenderAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck // best-effort cleanup
+
+	// 2 minutes covers the worst-observed Azure single-stream
+	// throughput (~14 Mbps × 10 MiB ≈ 6 s) with margin for jitter.
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+
+	sentHash := make(chan [sha256.Size]byte, 1)
+	go func() {
+		h := sha256.New()
+		chunk := make([]byte, 64*1024)
+		remaining := BulkTransferBytes
+		for remaining > 0 {
+			n := len(chunk)
+			if n > remaining {
+				n = remaining
+			}
+			if _, err := rand.Read(chunk[:n]); err != nil {
+				return
+			}
+			h.Write(chunk[:n])
+			if _, err := conn.Write(chunk[:n]); err != nil {
+				return
+			}
+			remaining -= n
+		}
+		var sum [sha256.Size]byte
+		copy(sum[:], h.Sum(nil))
+		sentHash <- sum
+	}()
+
+	gotHash := sha256.New()
+	if n, err := io.CopyN(gotHash, conn, BulkTransferBytes); err != nil {
+		t.Fatalf("read after %d bytes: %v", n, err)
+	}
+	want := <-sentHash
+	if !bytes.Equal(want[:], gotHash.Sum(nil)) {
+		t.Fatal("SHA-256 mismatch: bulk transfer data corrupted")
+	}
+	t.Logf("transferred %d MiB intact", BulkTransferBytes>>20)
 }

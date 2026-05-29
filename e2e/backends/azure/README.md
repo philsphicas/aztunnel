@@ -43,8 +43,6 @@ Optional toggles:
 | ----------------------------- | ----------------------------------------------------- |
 | `E2E_AUTH`                    | Pin to `entra` or `sas`; unset runs both.             |
 | `E2E_PROVISIONER_CONCURRENCY` | In-flight per-test hyco provisioning cap (default 4). |
-| `E2E_LARGE_TRANSFER`          | Set `1` to opt into the 100 MB transfer scenario.     |
-| `E2E_LONG_LIVED`              | Set `1` to opt into the >2 minute keepalive scenario. |
 
 ## SAS-only fallback
 

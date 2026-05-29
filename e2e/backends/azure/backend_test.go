@@ -4,10 +4,13 @@ package azure
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"os/exec"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -253,6 +256,7 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 			Completed:           scrapeCounter(metricsAddr, "aztunnel_connections_total"),
 			Active:              scrapeGauge(metricsAddr, "aztunnel_active_connections"),
 			DialDurationSamples: scrapeHistogramCount(metricsAddr, "aztunnel_dial_duration_seconds"),
+			TokenFetchOK:        scrapeTokenFetchOK(metricsAddr),
 			Stop:                func() { proc.Stop(t) },
 			Logs:                func() string { return proc.logs.String() },
 		})
@@ -655,4 +659,107 @@ func scrapeHistogramCount(addr, name string) func() uint64 {
 		text := scrapeMetricsBest(addr)
 		return uint64(sumMetric(text, name+"_count"))
 	}
+}
+
+// scrapeTokenFetchOK returns a closure that scrapes /metrics on
+// addr and returns one TokenFetchObservation per provider label
+// observed in aztunnel_token_fetch_total / _seconds_count filtered
+// to result="ok". Used by ScenarioTokenFetchMetric to assert that
+// exactly one provider was exercised and that the counter and
+// histogram count agree.
+func scrapeTokenFetchOK(addr string) func() []scenarios.TokenFetchObservation {
+	return func() []scenarios.TokenFetchObservation {
+		text := scrapeMetricsBest(addr)
+		return parseTokenFetchOK(text)
+	}
+}
+
+// parseTokenFetchOK scans a Prometheus text exposition for
+// aztunnel_token_fetch_total{provider=…,result="ok"} and the
+// matching aztunnel_token_fetch_seconds_count, returning one
+// observation per observed provider. Lines whose result label is
+// not "ok" are ignored.
+func parseTokenFetchOK(text string) []scenarios.TokenFetchObservation {
+	const (
+		counterFamily = "aztunnel_token_fetch_total"
+		histFamily    = "aztunnel_token_fetch_seconds_count"
+	)
+	counters := map[string]uint64{}
+	hists := map[string]uint64{}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(line, counterFamily+"{"):
+			if prov, val, ok := tokenFetchOKValue(line, counterFamily); ok {
+				counters[prov] += val
+			}
+		case strings.HasPrefix(line, histFamily+"{"):
+			if prov, val, ok := tokenFetchOKValue(line, histFamily); ok {
+				hists[prov] += val
+			}
+		}
+	}
+	if len(counters) == 0 && len(hists) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for p := range counters {
+		seen[p] = struct{}{}
+	}
+	for p := range hists {
+		seen[p] = struct{}{}
+	}
+	out := make([]scenarios.TokenFetchObservation, 0, len(seen))
+	providers := make([]string, 0, len(seen))
+	for p := range seen {
+		providers = append(providers, p)
+	}
+	sort.Strings(providers)
+	for _, p := range providers {
+		out = append(out, scenarios.TokenFetchObservation{
+			Provider:       p,
+			CounterValue:   counters[p],
+			HistogramCount: hists[p],
+		})
+	}
+	return out
+}
+
+// tokenFetchOKValue parses a metric line that starts with
+// `<family>{`, returning the provider label, the trailing value, and
+// ok=true if the line carries result="ok" and parses cleanly. Lines
+// without a `result="ok"` label or without a provider label return
+// ok=false.
+func tokenFetchOKValue(line, family string) (provider string, value uint64, ok bool) {
+	if !strings.Contains(line, `result="ok"`) {
+		return "", 0, false
+	}
+	const marker = `provider="`
+	i := strings.Index(line, marker)
+	if i == -1 {
+		return "", 0, false
+	}
+	rest := line[i+len(marker):]
+	end := strings.IndexByte(rest, '"')
+	if end == -1 {
+		return "", 0, false
+	}
+	provider = rest[:end]
+	parts := strings.Fields(line)
+	// Prometheus text format: `<metric>{labels} <value> [<timestamp>]`.
+	// Take parts[1] (the value), NOT parts[len-1] — the latter would
+	// silently swallow an optional trailing timestamp as the value and
+	// inflate the count by orders of magnitude. Today client_golang's
+	// Gather() does not emit timestamps, but the parser must not
+	// depend on that.
+	if len(parts) < 2 {
+		return "", 0, false
+	}
+	var v float64
+	if _, err := fmt.Sscanf(parts[1], "%f", &v); err != nil {
+		return "", 0, false
+	}
+	return provider, uint64(v), true
 }
