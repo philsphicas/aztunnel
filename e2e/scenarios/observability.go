@@ -171,26 +171,83 @@ func requireLogs(t *testing.T, tun *Tunnel) {
 	}
 }
 
-// bridgeIDForTarget scans logs for the first "connection requested"
-// line whose target field matches target and returns its bridge_id.
-// Empty string when no match. Anchoring on the deterministic
-// "connection requested" line avoids double-counting bridges that
-// emit multiple bridge_id-tagged lines (debug logs, bridge-end
-// logs, etc.).
+// bridgeIDForTarget returns the bridge_id minted by the sender for
+// the most recent successful relay rendezvous to target. It scans
+// for "connection requested" lines whose target matches and returns
+// the bridge_id of the last such line whose bridge_id also appears
+// on a "relay connected" log line. Empty string when no match.
+//
+// Filtering by "relay connected" is essential: when
+// dialSOCKS5WithRetry retries a transient relay-side drop, the
+// sender emits "connection requested" for both the abandoned
+// attempt and the successful retry, but only the successful
+// attempt's bridge_id round-trips through the listener. Returning
+// the abandoned bridge_id would then race the test against a
+// listener that never saw it. Both backends run the sender at
+// debug log level (see e2e/backends/azure/backend_test.go and
+// e2e/backends/mock/backend.go) so the "relay connected" signal
+// is reliably present.
+//
+// Anchoring on the deterministic "connection requested" line for
+// target selection avoids double-counting bridges that emit
+// multiple bridge_id-tagged lines (debug logs, bridge-end logs,
+// etc.).
+//
+// target is matched as a whole-field slog attribute rather than a
+// substring: a target of "127.0.0.1:4141" must not match a log
+// line carrying "target=127.0.0.1:41415". slog text encoding emits
+// the addr:port unquoted (no spaces inside) so splitting the line
+// on whitespace and looking for an exact "target=<value>" token is
+// both correct and cheap.
 func bridgeIDForTarget(logs, target string) string {
+	connected := connectedBridgeIDs(logs)
+	field := "target=" + target
+	var last string
 	for _, line := range strings.Split(logs, "\n") {
 		if !strings.Contains(line, `msg="connection requested"`) {
 			continue
 		}
-		if !strings.Contains(line, "target="+target) {
+		if !hasField(line, field) {
 			continue
 		}
 		m := bridgeIDRe.FindStringSubmatch(line)
-		if m != nil {
-			return m[1]
+		if m == nil {
+			continue
+		}
+		if _, ok := connected[m[1]]; !ok {
+			continue
+		}
+		last = m[1]
+	}
+	return last
+}
+
+// hasField reports whether line contains field as a whole
+// whitespace-separated token, not merely as a substring.
+func hasField(line, field string) bool {
+	for _, f := range strings.Fields(line) {
+		if f == field {
+			return true
 		}
 	}
-	return ""
+	return false
+}
+
+// connectedBridgeIDs returns the set of bridge_ids that have a
+// "relay connected" line in logs. Used by bridgeIDForTarget to
+// exclude bridges that dialSOCKS5WithRetry abandoned before the
+// relay rendezvous completed.
+func connectedBridgeIDs(logs string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, `msg="relay connected"`) {
+			continue
+		}
+		if m := bridgeIDRe.FindStringSubmatch(line); m != nil {
+			out[m[1]] = struct{}{}
+		}
+	}
+	return out
 }
 
 // listenerHasBridge reports whether the listener log stream contains
