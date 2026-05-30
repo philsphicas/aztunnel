@@ -9,6 +9,17 @@ make e2e-mock
 
 Runs anywhere Go runs. No subscription, no `az login`, no per-developer infra.
 
+By default `TestE2E_Mock` uses the wire-faithful `default` delay profile so
+timing thresholds calibrated against Azure also fire here. Override it for a
+single run with the `E2E_DELAY` environment variable, naming any profile from
+the registry in `mockrelay/server/delay_profile.go`:
+
+```bash
+E2E_DELAY=zero make e2e-mock   # no synthetic relay delay (fast)
+```
+
+An unrecognised name fails the test loudly and prints the known profile names.
+
 ## What it is
 
 `backend.go` exports `MockBackend`, an implementation of
