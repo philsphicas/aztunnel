@@ -500,6 +500,44 @@ func TestProfileRegistry_AllValid(t *testing.T) {
 	}
 }
 
+// TestDelayProfile_PredictedTimings asserts the predicted-timing
+// helpers match the documented hop formula, are zero for the zero
+// profile, and increase monotonically as a lane latency grows. These
+// feed the mock backend's latency-budget derivation, so a drift here
+// would silently mis-size e2e thresholds.
+func TestDelayProfile_PredictedTimings(t *testing.T) {
+	if got := DelayProfileZero.PredictedRendezvous(); got != 0 {
+		t.Errorf("zero PredictedRendezvous = %v, want 0", got)
+	}
+	if got := DelayProfileZero.PredictedBridgeEcho(); got != 0 {
+		t.Errorf("zero PredictedBridgeEcho = %v, want 0", got)
+	}
+
+	p := DelayProfileDefault
+	wantRendezvous := 2*p.DNSLookup +
+		(hopsHandshake+hopsWSGet)*p.SLatency +
+		(hopsHandshake+hopsWSGet+hopsAcceptFrame)*p.LLatency +
+		hopsResponse*max(p.SLatency, p.LLatency) +
+		p.AuthInternal + p.MatchMakeInternal
+	if got := p.PredictedRendezvous(); got != wantRendezvous {
+		t.Errorf("default PredictedRendezvous = %v, want %v", got, wantRendezvous)
+	}
+	if got, want := p.PredictedBridgeEcho(), 2*(p.SLatency+p.LLatency); got != want {
+		t.Errorf("default PredictedBridgeEcho = %v, want %v", got, want)
+	}
+
+	slow := p
+	slow.SLatency *= 2
+	if slow.PredictedRendezvous() <= p.PredictedRendezvous() {
+		t.Errorf("doubling SLatency did not increase PredictedRendezvous (%v vs %v)",
+			slow.PredictedRendezvous(), p.PredictedRendezvous())
+	}
+	if slow.PredictedBridgeEcho() <= p.PredictedBridgeEcho() {
+		t.Errorf("doubling SLatency did not increase PredictedBridgeEcho (%v vs %v)",
+			slow.PredictedBridgeEcho(), p.PredictedBridgeEcho())
+	}
+}
+
 // runAcceptEchoer reads accept frames from a listener control WS,
 // dials each rendezvous URL, and echoes every message. Used by the
 // tests that need a real bridge to pair on the listener side.

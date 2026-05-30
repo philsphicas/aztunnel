@@ -35,7 +35,9 @@ import (
 //     not. Kept loose (> delay/2) because rendezvous DelayProfile sleeps
 //     and CI scheduling add noise.
 func TestMockEmulates_EntraTokenAcquisitionDelay(t *testing.T) {
-	const acquireDelay = 450 * time.Millisecond
+	// Source the modelled acquisition cost from the default profile so
+	// this PoC and the production newTokenProvider path stay in lockstep.
+	acquireDelay := server.DelayProfileDefault.TokenAcquire
 	const dials = 6
 
 	host, clientOpts := startMockRelay(t, server.DelayProfileDefault)
