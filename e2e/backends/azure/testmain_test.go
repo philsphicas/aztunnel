@@ -150,11 +150,21 @@ func testMain(m *testing.M) int {
 	// was unset on entry, the setenv block above has already forced
 	// E2E_AUTH=sas, so this fallback only fires when both signals
 	// would have produced the same answer.)
+	//
+	// Entra-only mode signal (symmetric, simpler): when E2E_AUTH=entra
+	// (set by the CI matrix's entra job or by a developer pinning the
+	// axis locally), skip provisioning a SAS hyco. There is no
+	// .local.json EntraOnly counterpart today — SAS is always
+	// reachable when a namespace is configured, so the only signal
+	// for "entra-only" is the explicit env var.
 	skipEntra := false
+	skipSAS := false
 	v, isSet := os.LookupEnv("E2E_AUTH")
 	switch {
 	case isSet && v == "sas":
 		skipEntra = true
+	case isSet && v == "entra":
+		skipSAS = true
 	case !isSet:
 		if resolved.Local != nil && resolved.Local.SASOnly {
 			skipEntra = true
@@ -167,6 +177,7 @@ func testMain(m *testing.M) int {
 		Namespace:      resolved.RelayName,
 		Concurrency:    conc,
 		SkipEntra:      skipEntra,
+		SkipSAS:        skipSAS,
 	}
 
 	// Acquire the namespace SAS rule keys. The rules

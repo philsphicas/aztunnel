@@ -120,9 +120,12 @@ func DefaultClientOptions() *arm.ClientOptions {
 }
 
 // Provision creates a fresh hybrid-connection pair via Provisioner:
-// the SAS hyco unconditionally, and the entra hyco unless
-// Config.SkipEntra is true (in which case Result.EntraHycoName is
-// left empty). The returned PairToken's Result is stamped with the
+// the entra hyco unless Config.SkipEntra is true (in which case
+// Result.EntraHycoName is left empty) and the SAS hyco unless
+// Config.SkipSAS is true (in which case Result.SASHycoName is left
+// empty). With both SkipEntra and SkipSAS true, no hycos are
+// created and both name fields of the returned PairToken's Result
+// are empty. The returned PairToken's Result is stamped with the
 // namespace-scoped SAS rule key info from p.cfg.RunRules. Teardown
 // deletes whichever hycos were created; the permanent run-scoped
 // rules live on past every PairToken and are not torn down by
@@ -207,7 +210,8 @@ func (t *PairToken) Result() *Result {
 
 // HycoNames returns the (entra, sas) names this token holds. After a
 // successful Provision the names come from the recorded Result, so a
-// SkipEntra-mode token returns ("", "e2e-sas-<suffix>"). When no
+// SkipEntra-mode token returns ("", "e2e-sas-<suffix>") and a
+// SkipSAS-mode token returns ("e2e-entra-<suffix>", ""). When no
 // Result is set (tests that construct a PairToken with only a
 // suffix), HycoNames synthesises both names from the suffix.
 func (t *PairToken) HycoNames() (entra, sas string) {
@@ -218,10 +222,11 @@ func (t *PairToken) HycoNames() (entra, sas string) {
 }
 
 // Teardown deletes the hybrid connections recorded on this token
-// (the SAS hyco, and the entra hyco unless SkipEntra was set at
-// Provision time and left Result.EntraHycoName empty). Safe to call
-// multiple times: only the first call performs the deletes;
-// subsequent calls return the same error.
+// (the entra hyco unless SkipEntra was set at Provision time and
+// left Result.EntraHycoName empty, and the SAS hyco unless SkipSAS
+// was set at Provision time and left Result.SASHycoName empty).
+// Safe to call multiple times: only the first call performs the
+// deletes; subsequent calls return the same error.
 //
 // Teardown strips cancellation from ctx (via context.WithoutCancel)
 // so cleanup completes even when the test's ctx has been cancelled
@@ -260,8 +265,10 @@ func (t *PairToken) Teardown(ctx context.Context) error {
 				errs = append(errs, fmt.Errorf("delete %s: %w", entra, err))
 			}
 		}
-		if err := t.deleteFn(ctx, sas); err != nil {
-			errs = append(errs, fmt.Errorf("delete %s: %w", sas, err))
+		if sas != "" {
+			if err := t.deleteFn(ctx, sas); err != nil {
+				errs = append(errs, fmt.Errorf("delete %s: %w", sas, err))
+			}
 		}
 		if len(errs) > 0 {
 			t.teardownErr = errors.Join(errs...)
