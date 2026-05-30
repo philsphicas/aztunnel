@@ -30,9 +30,9 @@ func RunObservabilityScenarios(t *testing.T, b Backend) {
 
 // observabilityCases is the metadata-only registry of observability
 // scenarios. The cross-backend log-shape parity gate is what makes
-// the suite meaningful, so every entry is AnyBackend except
-// TokenFetchMetric — which exists only on Azure because the mock has
-// no Entra/SAS provider to fetch from.
+// the suite meaningful, so every entry is AnyBackend — including
+// TokenFetchMetric, which the mock now satisfies via its {sas, entra}
+// auth axis and per-sender token-fetch metrics.
 func observabilityCases() []scenarioCase {
 	return []scenarioCase{
 		{name: "BridgeID_Correlation", scope: AnyBackend, run: ScenarioBridgeID_Correlation},
@@ -46,12 +46,7 @@ func observabilityCases() []scenarioCase {
 		{name: "Metrics_DialDuration", scope: AnyBackend, run: ScenarioMetrics_DialDuration},
 		{name: "ListenerID_PropagatesAndChangesOnRestart", scope: AnyBackend, run: ScenarioListenerID_PropagatesAndChangesOnRestart},
 		{name: "AcceptID_Saturation", scope: AnyBackend, run: ScenarioAcceptID_Saturation},
-		{
-			name:   "TokenFetchMetric",
-			scope:  AzureOnly,
-			reason: "exercises real Entra/SAS provider token fetch wiring; the mock relay does not fetch credentials",
-			run:    ScenarioTokenFetchMetric,
-		},
+		{name: "TokenFetchMetric", scope: AnyBackend, run: ScenarioTokenFetchMetric},
 	}
 }
 
@@ -1074,9 +1069,11 @@ func waitForLogSubstring(logs func() string, substr string, timeout time.Duratio
 // Backend.Sender.TokenFetchOK reports observed providers via the
 // returned []TokenFetchObservation slice.
 //
-// scope=AzureOnly via the observability registry: the in-process
-// mock has no Entra/SAS provider to fetch from. The mock-side
-// emulation of the metric SHAPE lives in
+// scope=AnyBackend: both the Azure backend and the in-process mock
+// (whose {sas, entra} auth axis wraps its providers with
+// relay.WithMetrics) expose Sender.TokenFetchOK. A backend that leaves
+// TokenFetchOK nil skips. The mock's lower-level wrapper coverage
+// (including the result="error" path) lives in
 // TestMockEmulates_TokenFetchMetric.
 func ScenarioTokenFetchMetric(t *testing.T, b Backend) {
 	t.Helper()
