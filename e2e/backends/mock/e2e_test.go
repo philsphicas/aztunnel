@@ -7,7 +7,6 @@ import (
 
 	"github.com/philsphicas/aztunnel/e2e/backends/mock"
 	"github.com/philsphicas/aztunnel/e2e/scenarios"
-	"github.com/philsphicas/aztunnel/mockrelay/server"
 )
 
 // TestE2E_Mock runs the shared e2e scenarios against the in-process
@@ -19,8 +18,11 @@ import (
 // DelayProfileDefault is the recommended profile for e2e-style runs:
 // it approximates the wireshark-observed wall-clock shape from real
 // Azure Relay captures so timing thresholds calibrated against Azure
-// also fire against the mock.
+// also fire against the mock. Override the profile for a single run
+// with the E2E_DELAY environment variable (e.g. `E2E_DELAY=zero`); see
+// delayProfileFromEnv and the mockrelay profile registry for the set
+// of selectable names.
 func TestE2E_Mock(t *testing.T) {
-	b := mock.MockBackend{DelayProfile: server.DelayProfileDefault}
+	b := mock.MockBackend{DelayProfile: delayProfileFromEnv(t)}
 	scenarios.RunAllScenarios(t, &b)
 }

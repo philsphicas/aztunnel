@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -432,6 +434,70 @@ func TestDelayProfile_AuthFailurePaysLane(t *testing.T) {
 		(hopsHandshake+hopsWSGet+hopsResponse)*fastProfile.LLatency +
 		fastProfile.AuthInternal
 	withinTolerance(t, "401 auth-fail lane", elapsed, predicted, predicted+500*time.Millisecond)
+}
+
+// TestProfileRegistry_KnownNames asserts the registry resolves its
+// canonical names to the expected profiles and that ProfileNames
+// returns them sorted. Adding a profile to the registry should extend
+// — not break — these expectations.
+func TestProfileRegistry_KnownNames(t *testing.T) {
+	cases := map[string]DelayProfile{
+		"zero":    DelayProfileZero,
+		"default": DelayProfileDefault,
+	}
+	for name, want := range cases {
+		got, err := ProfileByName(name)
+		if err != nil {
+			t.Fatalf("ProfileByName(%q): unexpected error %v", name, err)
+		}
+		if got != want {
+			t.Errorf("ProfileByName(%q) = %+v, want %+v", name, got, want)
+		}
+	}
+
+	names := ProfileNames()
+	if !sort.StringsAreSorted(names) {
+		t.Errorf("ProfileNames() not sorted: %v", names)
+	}
+	for name := range cases {
+		if !slices.Contains(names, name) {
+			t.Errorf("ProfileNames() %v missing %q", names, name)
+		}
+	}
+}
+
+// TestProfileByName_UnknownIsLoud asserts an unregistered name yields
+// an error naming the bad input and listing the known profiles, so a
+// typo at a selection site fails loudly rather than silently picking
+// the wrong timing model.
+func TestProfileByName_UnknownIsLoud(t *testing.T) {
+	_, err := ProfileByName("does-not-exist")
+	if err == nil {
+		t.Fatalf("ProfileByName(unknown): expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "does-not-exist") {
+		t.Errorf("error %q does not name the unknown profile", err.Error())
+	}
+	for _, name := range ProfileNames() {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q does not list known profile %q", err.Error(), name)
+		}
+	}
+}
+
+// TestProfileRegistry_AllValid asserts every registered profile passes
+// WithDelayProfile validation, so a future profile with a negative
+// field is caught by this unit test rather than at e2e selection time.
+func TestProfileRegistry_AllValid(t *testing.T) {
+	for _, name := range ProfileNames() {
+		p, err := ProfileByName(name)
+		if err != nil {
+			t.Fatalf("ProfileByName(%q): %v", name, err)
+		}
+		if err := p.validate(); err != nil {
+			t.Errorf("registered profile %q fails validation: %v", name, err)
+		}
+	}
 }
 
 // runAcceptEchoer reads accept frames from a listener control WS,
