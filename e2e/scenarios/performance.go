@@ -235,6 +235,7 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 		opts.Target = echo.Addr()
 	}
 	tun := b.Setup(t, opts)
+	dumpConnectLatencyLogsOnFail(t, tun)
 
 	const iterations = 10
 	payload := []byte{0x42}
@@ -256,6 +257,53 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 			continue
 		}
 		t.Logf("ConnectLatency_Serial_%v iter %d: %v (< %v)", mode, i, elapsed, threshold)
+	}
+}
+
+// dumpConnectLatencyLogsOnFail registers a t.Cleanup that prints the
+// captured sender and listener logs for every process in the tunnel,
+// but only when the scenario has failed. The ConnectLatency_Serial
+// scenarios' dominant failure mode against real Azure Relay is a
+// single multi-second connect stall (one iteration spiking from
+// ~750 ms steady-state to >3 s, or past the 8 s i/o-timeout deadline
+// on the SOCKS5 variant). Without the binary logs that stall is
+// undiagnosable from CI output — it could be a client-side dial
+// retry / control-channel reconnect or pure Azure tail latency, and
+// the test output alone cannot distinguish them. Dumping on failure
+// makes the next occurrence actionable.
+//
+// Registering a single failure-gated cleanup (rather than dumping at
+// each failing assertion) keeps successful runs silent and emits at
+// most one dump even when multiple iterations breach the threshold;
+// Logs() returns the cumulative buffer, so one dump captures the
+// whole run. Backends that do not wire log capture (Logs == nil)
+// contribute nothing.
+func dumpConnectLatencyLogsOnFail(t *testing.T, tun *Tunnel) {
+	t.Helper()
+	t.Cleanup(func() {
+		if t.Failed() {
+			dumpTunnelLogs(t, tun)
+		}
+	})
+}
+
+// dumpTunnelLogs prints the captured sender and listener logs for
+// every process in the tunnel, skipping nil handles and backends that
+// did not wire log capture (Logs == nil). It is unconditional; the
+// failure gate lives in dumpConnectLatencyLogsOnFail's cleanup.
+func dumpTunnelLogs(t *testing.T, tun *Tunnel) {
+	t.Helper()
+	for i, s := range tun.Senders {
+		if s == nil || s.Logs == nil {
+			continue
+		}
+		t.Logf("--- sender[%d] logs ---\n%s", i, s.Logs())
+	}
+	for i, l := range tun.Listeners {
+		if l == nil || l.Logs == nil {
+			continue
+		}
+		t.Logf("--- listener[%d] logs ---\n%s", i, l.Logs())
 	}
 }
 
@@ -330,6 +378,7 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 		opts.Target = echo.Addr()
 	}
 	tun := b.Setup(t, opts)
+	dumpConnectLatencyLogsOnFail(t, tun)
 
 	payload := []byte{0x42}
 	buf := make([]byte, 1)
