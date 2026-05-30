@@ -397,12 +397,12 @@ type Sender struct {
 	// sender's /metrics surface, filtered to result="ok". Returns
 	// nil when no observations have been recorded yet.
 	//
-	// Used by ScenarioTokenFetchMetric (scope=AzureOnly) to assert
-	// that exactly one token-provider was used and that the counter
-	// and histogram counts agree. Optional: backends that do not
-	// fetch real credentials (the in-process mock) leave this nil;
-	// the scenario itself carries scope=AzureOnly so the mock skips
-	// it before dereferencing this field.
+	// Used by ScenarioTokenFetchMetric to assert that exactly one
+	// token-provider was used and that the counter and histogram
+	// counts agree. Optional: backends that do not wire token-fetch
+	// metrics leave this nil and the scenario skips. Both the Azure
+	// backend and the in-process mock (via its {sas, entra} auth axis)
+	// populate it.
 	TokenFetchOK func() []TokenFetchObservation
 
 	// Stop drops this sender. Idempotent.

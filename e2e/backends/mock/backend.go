@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -34,11 +35,29 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
+// Auth method names for the MockBackend auth axis. They mirror the
+// `provider` metric label values (relay.ProviderSAS / ProviderEntra)
+// so a cell's name and its token-fetch metric line up.
+const (
+	authSAS   = "sas"
+	authEntra = "entra"
+)
+
+// defaultEntraAcquireDelay is the synthetic cold token-acquisition
+// latency the entra cell models, approximating the AAD round trip a
+// real aztunnel process pays on its first dial. Calibrated against
+// observed Azure entra-vs-sas cold-start divergence (~450 ms).
+const defaultEntraAcquireDelay = 450 * time.Millisecond
+
 // MockBackend implements scenarios.Backend by standing up a mock
 // relay server + aztunnel listener(s) + aztunnel sender(s) all in the
 // same process. It is the fast, deterministic side of the mock-vs-
 // Azure conformance matrix and runs in the default
 // `go test ./mockrelay/...` job.
+//
+// The zero value runs SAS-only with no axis layer (what bench_test.go
+// wants). Construct via NewAuthAxisBackend to opt into the {sas, entra}
+// auth axis that mirrors the Azure backend's matrix.
 type MockBackend struct {
 	// DelayProfile parameterizes the synthetic per-step sleeps the
 	// mock relay applies on every leg of the rendezvous protocol.
@@ -51,28 +70,93 @@ type MockBackend struct {
 	// server.DelayProfileDefault so the mock approximates the
 	// wireshark-observed wall-clock shape.
 	DelayProfile server.DelayProfile
+
+	// axis is non-nil only on a factory backend (built by
+	// NewAuthAxisBackend); the harness enumerates it to render the
+	// auth sub-path layer. Cell-pinned backends carry axis == nil.
+	axis *mockAuthAxis
+
+	// authName is the auth method this (pinned) backend speaks:
+	// authSAS (the zero value / default) or authEntra. It selects the
+	// token provider built in newTokenProvider — and, for the entra
+	// cell, drives the modelled cold token-acquisition cost.
+	authName string
+
+	// entraAcquireDelay is the synthetic cold-acquisition latency the
+	// entra cell's fake credential sleeps on a cache miss. Zero means
+	// defaultEntraAcquireDelay.
+	entraAcquireDelay time.Duration
 }
 
-// Name returns the backend identifier (always "mock"). The harness
-// does not embed it in sub-test paths — MockBackend has no axes,
-// so scenarios run directly under the test entry point — but
-// scenarios and external callers may surface it in debug output.
+// mockAuthAxis is the scenarios.Axis the MockBackend varies over when
+// constructed via NewAuthAxisBackend. It mirrors the Azure backend's
+// authAxis so both backends render the same {sas, entra} sub-paths.
+type mockAuthAxis struct {
+	values []string
+}
+
+func (*mockAuthAxis) Name() string       { return "auth" }
+func (a *mockAuthAxis) Values() []string { return a.values }
+
+// NewAuthAxisBackend returns a factory MockBackend whose Axes() lists
+// the {sas, entra} auth methods and whose Cell(values) returns a fresh
+// backend pinned to values["auth"]. Use this from the e2e entry point
+// (TestE2E_Mock) so the mock runs the full scenario suite once per auth
+// method, mirroring the Azure backend's matrix. profile is carried
+// through to every pinned cell.
+func NewAuthAxisBackend(profile server.DelayProfile) *MockBackend {
+	return &MockBackend{
+		DelayProfile: profile,
+		axis:         &mockAuthAxis{values: []string{authSAS, authEntra}},
+	}
+}
+
+// Name returns the backend identifier (always "mock"). Factory
+// backends surface the auth dimension via the axis t.Run wrapping
+// rather than the name; scenarios and external callers may surface
+// the name in debug output.
 func (*MockBackend) Name() string { return "mock" }
 
-// Axes returns the matrix dimensions this backend varies over. The
-// mock has none — it only speaks SAS against an in-process server,
-// so the harness runs scenarios directly under the test entry point
-// with no axis sub-path layer.
-func (*MockBackend) Axes() []scenarios.Axis { return nil }
-
-// Cell returns the backend pinned to the cell described by values.
-// MockBackend has no axes so values must be empty; Cell returns the
-// receiver unchanged.
-func (m *MockBackend) Cell(values map[string]string) scenarios.Backend {
-	if len(values) != 0 {
-		panic("MockBackend.Cell: no axes, expected empty values")
+// Axes returns the matrix dimensions this backend varies over.
+// Factory backends (built by NewAuthAxisBackend) return the auth
+// axis; the zero value and pinned backends (returned from Cell)
+// return nil, so the harness runs scenarios directly under the entry
+// point with no axis sub-path layer.
+func (b *MockBackend) Axes() []scenarios.Axis {
+	if b.axis == nil {
+		return nil
 	}
-	return m
+	return []scenarios.Axis{b.axis}
+}
+
+// Cell returns a fresh *MockBackend pinned to the cell described by
+// values. Factory backends require values["auth"]; the zero value and
+// pinned backends (axis == nil) accept only an empty values map and
+// return a clone of the receiver. DelayProfile and entraAcquireDelay
+// are carried through to the pinned cell.
+func (b *MockBackend) Cell(values map[string]string) scenarios.Backend {
+	if b.axis == nil {
+		if len(values) != 0 {
+			panic("MockBackend.Cell: pinned backend accepts no axis values")
+		}
+		return &MockBackend{
+			DelayProfile:      b.DelayProfile,
+			authName:          b.authName,
+			entraAcquireDelay: b.entraAcquireDelay,
+		}
+	}
+	auth, ok := values["auth"]
+	if !ok {
+		panic("MockBackend.Cell: missing required axis key \"auth\"")
+	}
+	if len(values) != 1 {
+		panic("MockBackend.Cell: expected exactly one axis value (auth)")
+	}
+	return &MockBackend{
+		DelayProfile:      b.DelayProfile,
+		authName:          auth,
+		entraAcquireDelay: b.entraAcquireDelay,
+	}
 }
 
 // ConnectLatencyThreshold returns the per-backend connect-latency
@@ -88,12 +172,51 @@ func (*MockBackend) ConnectLatencyThreshold() time.Duration {
 }
 
 // ColdStartLatencyThreshold returns the per-backend ceiling for the
-// first connection through a freshly-started sender. The mock has
-// no per-process credential cache to warm — every dial pays the
-// same rendezvous delay regardless of order — so the cold-start
-// budget intentionally matches ConnectLatencyThreshold.
-func (*MockBackend) ColdStartLatencyThreshold() time.Duration {
+// first connection through a freshly-started sender. For the SAS cell
+// (and the axis-less zero value) the budget matches
+// ConnectLatencyThreshold: every dial pays the same rendezvous delay
+// regardless of order. The entra cell additionally pays a one-off
+// synthetic token-acquisition cost on that first dial (the modelled
+// AAD round trip, absorbed thereafter by the client token cache), so
+// its budget is widened to keep comfortable headroom over the cold
+// fetch on noisy CI.
+func (b *MockBackend) ColdStartLatencyThreshold() time.Duration {
+	if b.authName == authEntra {
+		return 5 * time.Second
+	}
 	return 3 * time.Second
+}
+
+// newTokenProvider builds a fresh token provider for one aztunnel
+// instance (one listener, sender, or connect invocation), wrapped to
+// record the aztunnel_token_fetch_* metrics on m under this cell's
+// provider label. Each call returns an INDEPENDENT provider so every
+// instance owns its own credential cache — mirroring separate aztunnel
+// processes, which is what makes the entra cell's per-process cold-start
+// cost visible (a shared provider would warm a sibling's cache and mask
+// it).
+//
+// SAS cell (and the zero value): a real relay.SASTokenProvider, which
+// re-signs locally per call (free). Entra cell: a real
+// relay.EntraTokenProvider backed by fakeEntraCredential, so the
+// production token cache is exercised end-to-end and the modelled
+// ~450 ms acquisition cost is paid only on the cold cache miss.
+func (b *MockBackend) newTokenProvider(m *metrics.Metrics) relay.TokenProvider {
+	switch b.authName {
+	case authEntra:
+		delay := b.entraAcquireDelay
+		if delay == 0 {
+			delay = defaultEntraAcquireDelay
+		}
+		inner, _ := newFakeEntraProvider(delay)
+		return relay.WithMetrics(inner, m, relay.ProviderEntra)
+	default: // authSAS or "" (zero value)
+		inner := &relay.SASTokenProvider{
+			KeyName: server.DefaultSASKeyName,
+			Key:     server.DefaultSASKey,
+		}
+		return relay.WithMetrics(inner, m, relay.ProviderSAS)
+	}
 }
 
 // Setup brings up the in-process topology described by opts and blocks
@@ -135,10 +258,6 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 	})
 
 	entity := mustEntityName(t)
-	tokenProvider := &relay.SASTokenProvider{
-		KeyName: server.DefaultSASKeyName,
-		Key:     server.DefaultSASKey,
-	}
 
 	tun := &scenarios.Tunnel{}
 
@@ -158,7 +277,7 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 		cfg := listener.Config{
 			Endpoint:       host,
 			EntityPath:     entity,
-			TokenProvider:  tokenProvider,
+			TokenProvider:  b.newTokenProvider(m),
 			ClientOptions:  clientOpts,
 			AllowList:      opts.AllowedTargets,
 			MaxConnections: opts.MaxConnections,
@@ -218,6 +337,7 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 	// MaxConnections.
 	startOneSender := func() *scenarios.Sender {
 		m := metrics.New()
+		senderTP := b.newTokenProvider(m)
 		logs := newCaptureBuffer()
 		senderLogger := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		sctx, scancel := context.WithCancel(ctx)
@@ -240,7 +360,7 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 				err = sender.PortForward(sctx, sender.PortForwardConfig{
 					Endpoint:      host,
 					EntityPath:    entity,
-					TokenProvider: tokenProvider,
+					TokenProvider: senderTP,
 					ClientOptions: clientOpts,
 					Target:        opts.Target,
 					BindAddress:   "127.0.0.1:0",
@@ -252,7 +372,7 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 				err = sender.SOCKS5Proxy(sctx, sender.SOCKS5Config{
 					Endpoint:      host,
 					EntityPath:    entity,
-					TokenProvider: tokenProvider,
+					TokenProvider: senderTP,
 					ClientOptions: clientOpts,
 					BindAddress:   "127.0.0.1:0",
 					Logger:        senderLogger,
@@ -287,6 +407,7 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 			Completed:           counterReader(m, "aztunnel_connections_total"),
 			Active:              gaugeReader(m, "aztunnel_active_connections"),
 			DialDurationSamples: histogramSampleCount(m, "aztunnel_dial_duration_seconds"),
+			TokenFetchOK:        tokenFetchOKReader(m),
 			Stop:                stop,
 			Logs:                logs.String,
 		}
@@ -308,7 +429,7 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 	}
 
 	if opts.SenderMode == scenarios.ModeConnect {
-		tun.SetOpenConnect(b.makeOpenConnect(ctx, &wg, host, entity, clientOpts, tokenProvider))
+		tun.SetOpenConnect(b.makeOpenConnect(ctx, &wg, host, entity, clientOpts, b.newTokenProvider))
 	}
 
 	return tun
@@ -320,12 +441,17 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 // ConnectClient bridges the OTHER ends of those pipes; closing it
 // cancels the sender's context, closes both pipes, and drains the
 // goroutine via the parent wg.
+//
+// newProvider builds the token provider for a single connect
+// invocation against that invocation's private metrics surface; it is
+// called once per OpenConnect so each connect "process" owns its own
+// credential cache (mirroring the per-instance contract in Setup).
 func (b *MockBackend) makeOpenConnect(
 	parentCtx context.Context,
 	wg *sync.WaitGroup,
 	host, entity string,
 	clientOpts relay.ClientOptions,
-	tokenProvider relay.TokenProvider,
+	newProvider func(*metrics.Metrics) relay.TokenProvider,
 ) func(t testing.TB, target string) scenarios.ConnectClient {
 	return func(t testing.TB, target string) scenarios.ConnectClient {
 		t.Helper()
@@ -348,17 +474,19 @@ func (b *MockBackend) makeOpenConnect(
 			defer close(done)
 			// sender.Connect dereferences cfg.Metrics.InstrumentedDial
 			// unconditionally despite the doc-comment claiming Metrics
-			// is optional. Pass a fresh metrics.New() per call.
+			// is optional. Pass a fresh metrics.New() per call and build
+			// this connect's provider against it.
+			cm := metrics.New()
 			exitErr = sender.Connect(ctx, sender.ConnectConfig{
 				Endpoint:      host,
 				EntityPath:    entity,
-				TokenProvider: tokenProvider,
+				TokenProvider: newProvider(cm),
 				ClientOptions: clientOpts,
 				Target:        target,
 				Stdin:         stdinR,
 				Stdout:        stdoutW,
 				Logger:        senderLogger,
-				Metrics:       metrics.New(),
+				Metrics:       cm,
 			})
 			// Close the stdout writer so Read on the other end
 			// returns EOF instead of blocking forever.
@@ -553,11 +681,17 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 	}
 
 	if opts.SenderMode == scenarios.ModeConnect {
-		// The test will drive the failure via Tunnel.OpenConnect.
+		// Auth-rejection scenarios pin the credential explicitly
+		// (good or deliberately-bad SAS) regardless of the cell's
+		// auth method — this path tests data-plane SAS validation,
+		// not provider selection, matching the Azure backend's
+		// BadSASKey handling. Wrap the fixed provider in a factory so
+		// every OpenConnect call reuses it.
 		return &mockFailureHandle{
 			listenerLogs: listenerLogs.String,
 			senderLogs:   senderLogs.String,
-			openConnect:  b.makeOpenConnect(ctx, &wg, host, entity, clientOpts, senderProvider),
+			openConnect: b.makeOpenConnect(ctx, &wg, host, entity, clientOpts,
+				func(*metrics.Metrics) relay.TokenProvider { return senderProvider }),
 		}
 	}
 
@@ -890,6 +1024,91 @@ func histogramSampleCount(m *metrics.Metrics, name string) func() uint64 {
 		}
 		return total
 	}
+}
+
+// tokenFetchOKReader returns a closure that reports one
+// scenarios.TokenFetchObservation per `provider` label observed with
+// result="ok" on m's registry, reading the counter
+// aztunnel_token_fetch_total and the histogram
+// aztunnel_token_fetch_seconds (its _count) for that sender. Returns
+// nil before any token fetch has been recorded, matching the optional-
+// nil contract on Sender.TokenFetchOK.
+//
+// Counter and histogram are read from a SINGLE Registry.Gather()
+// snapshot so a concurrent token fetch can never be seen half-applied
+// (counter incremented but histogram not, or vice versa); the
+// observability wrapper records both per call, so within one snapshot
+// they agree.
+func tokenFetchOKReader(m *metrics.Metrics) func() []scenarios.TokenFetchObservation {
+	const (
+		counterFamily = "aztunnel_token_fetch_total"
+		histFamily    = "aztunnel_token_fetch_seconds"
+	)
+	return func() []scenarios.TokenFetchObservation {
+		families, err := m.Registry.Gather()
+		if err != nil {
+			return nil
+		}
+		counters := map[string]uint64{}
+		hists := map[string]uint64{}
+		for _, f := range families {
+			switch f.GetName() {
+			case counterFamily:
+				for _, sample := range f.GetMetric() {
+					if !labelMatches(sample.GetLabel(), "result", "ok") {
+						continue
+					}
+					if c := sample.GetCounter(); c != nil {
+						counters[providerLabel(sample.GetLabel())] += uint64(c.GetValue())
+					}
+				}
+			case histFamily:
+				for _, sample := range f.GetMetric() {
+					if !labelMatches(sample.GetLabel(), "result", "ok") {
+						continue
+					}
+					if h := sample.GetHistogram(); h != nil {
+						hists[providerLabel(sample.GetLabel())] += h.GetSampleCount()
+					}
+				}
+			}
+		}
+		if len(counters) == 0 && len(hists) == 0 {
+			return nil
+		}
+		seen := map[string]struct{}{}
+		for p := range counters {
+			seen[p] = struct{}{}
+		}
+		for p := range hists {
+			seen[p] = struct{}{}
+		}
+		providers := make([]string, 0, len(seen))
+		for p := range seen {
+			providers = append(providers, p)
+		}
+		sort.Strings(providers)
+		out := make([]scenarios.TokenFetchObservation, 0, len(providers))
+		for _, p := range providers {
+			out = append(out, scenarios.TokenFetchObservation{
+				Provider:       p,
+				CounterValue:   counters[p],
+				HistogramCount: hists[p],
+			})
+		}
+		return out
+	}
+}
+
+// providerLabel returns the value of the `provider` label, or "" when
+// absent.
+func providerLabel(pairs []*dto.LabelPair) string {
+	for _, lp := range pairs {
+		if lp.GetName() == "provider" {
+			return lp.GetValue()
+		}
+	}
+	return ""
 }
 
 // captureBuffer is a goroutine-safe io.Writer used as the destination
