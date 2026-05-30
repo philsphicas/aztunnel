@@ -97,6 +97,24 @@ func requireProvider(t testing.TB) *azrelay.Provider {
 	return relayProvider
 }
 
+// hycoLabel renders a provisioned hyco set for logging, covering the
+// three auth modes the azrelay provider supports: a full entra+sas
+// pair, an Entra-only lease (E2E_AUTH=entra), and a SAS-only lease
+// (E2E_AUTH=sas). The mode is stated positively rather than as a
+// "skipped" side effect, and the entra-only and sas-only forms mirror
+// each other. Both names empty is degenerate and not expected to
+// reach a log site.
+func hycoLabel(entra, sas string) string {
+	switch {
+	case entra != "" && sas != "":
+		return fmt.Sprintf("pair %s, %s", entra, sas)
+	case entra != "":
+		return fmt.Sprintf("%s (Entra-only mode)", entra)
+	default:
+		return fmt.Sprintf("%s (SAS-only mode)", sas)
+	}
+}
+
 // requireDedicatedHyco provisions a fresh (entra, sas) hyco pair for
 // the calling test, registers a t.Cleanup that tears the pair down,
 // and returns its connection metadata in the legacy *relayEnv shape.
@@ -150,11 +168,7 @@ func requireDedicatedHyco(t testing.TB) *relayEnv {
 	}
 
 	entra, sas := tok.HycoNames()
-	if entra == "" {
-		t.Logf("provisioned dedicated hyco: %s (entra skipped, SAS-only mode)", sas)
-	} else {
-		t.Logf("provisioned dedicated hyco pair: %s, %s", entra, sas)
-	}
+	t.Logf("provisioned dedicated hyco %s", hycoLabel(entra, sas))
 
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), hycoTeardownTimeout)
@@ -163,11 +177,7 @@ func requireDedicatedHyco(t testing.TB) *relayEnv {
 			// Log only — the janitor will reap anything we miss,
 			// and failing the test on cleanup errors would mask
 			// the actual test outcome.
-			if entra == "" {
-				t.Logf("teardown dedicated hyco %s: %v", sas, err)
-			} else {
-				t.Logf("teardown dedicated hyco pair %s/%s: %v", entra, sas, err)
-			}
+			t.Logf("teardown dedicated hyco %s: %v", hycoLabel(entra, sas), err)
 		}
 	})
 
@@ -241,11 +251,7 @@ func leaseSharedHyco(tb testing.TB) *relayEnv {
 		tb.Fatalf("provision shared bench hyco pair: %v", err)
 	}
 	entra, sas := tok.HycoNames()
-	if entra == "" {
-		tb.Logf("leased shared bench hyco: %s (entra skipped, SAS-only mode)", sas)
-	} else {
-		tb.Logf("leased shared bench hyco pair: %s, %s", entra, sas)
-	}
+	tb.Logf("leased shared bench hyco %s", hycoLabel(entra, sas))
 	benchLeaseTok = tok
 	benchLeaseEnv = resultToEnv(tok.Result())
 	return benchLeaseEnv
@@ -270,11 +276,7 @@ func drainBenchLease() {
 	benchLeaseTok = nil
 	entra, sas := tok.HycoNames()
 	if err := tok.Teardown(ctx); err != nil {
-		if entra == "" {
-			fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco %s: %v\n", sas, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco pair %s/%s: %v\n", entra, sas, err)
-		}
+		fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco %s: %v\n", hycoLabel(entra, sas), err)
 	}
 }
 

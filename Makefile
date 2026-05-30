@@ -4,7 +4,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure vulncheck bench bench-azure check-installable help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-mock-fast e2e-mock-matrix e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure vulncheck bench bench-azure check-installable help
 
 .DEFAULT_GOAL := help
 
@@ -94,8 +94,14 @@ fmt-check: ## Check formatting (same as CI)
 # timeout still covers the whole job (checkout, build, azrelay,
 # backend) so the workflow envelope remains the outer cap if the
 # preceding steps consume too much of it. See golang/go#24929.
-e2e-mock: ## Run e2e scenarios against the in-process mock relay
+e2e-mock: ## Run e2e scenarios against the in-process mock relay (both auth methods, default delay profile)
 	cd e2e && go test -tags=e2e -timeout=20m -v ./backends/mock/...
+
+e2e-mock-fast: ## Run mock e2e as fast as possible: zero delay profile, no synthetic token-acquisition cost (both auth methods)
+	cd e2e && E2E_DELAY=zero go test -tags=e2e -timeout=20m -v ./backends/mock/...
+
+e2e-mock-matrix: ## Run mock e2e over the full auth x delay-profile matrix (both auth methods x every registered profile)
+	cd e2e && E2E_DELAY=all go test -tags=e2e -timeout=40m -v ./backends/mock/...
 
 e2e-azure: build ## Run e2e scenarios against a real Azure Relay namespace (configure via `make e2e-setup`)
 	@cd e2e && { \

@@ -9,16 +9,34 @@ make e2e-mock
 
 Runs anywhere Go runs. No subscription, no `az login`, no per-developer infra.
 
-By default `TestE2E_Mock` uses the wire-faithful `default` delay profile so
-timing thresholds calibrated against Azure also fire here. Override it for a
-single run with the `E2E_DELAY` environment variable, naming any profile from
-the registry in `mockrelay/server/delay_profile.go`:
+`TestE2E_Mock` runs over two independent, composable dimensions, mirroring the
+Azure backend:
+
+- **Auth method** (`E2E_AUTH`): unset runs both `sas` and `entra`; pin one with
+  `E2E_AUTH=sas` or `E2E_AUTH=entra`. The `entra` cell drives a real
+  `EntraTokenProvider` (backed by a fake credential) so the production token
+  cache is exercised end-to-end, and pays a one-off cold token-acquisition cost
+  on the first dial.
+- **Delay profile** (`E2E_DELAY`): unset uses the wire-faithful `default`
+  profile so timing thresholds calibrated against Azure also fire here. The
+  profile also owns the entra cold-acquisition cost (`TokenAcquire`), so the
+  `zero` profile is instant everywhere — entra included.
 
 ```bash
-E2E_DELAY=zero make e2e-mock   # no synthetic relay delay (fast)
+make e2e-mock                         # both auth methods × default profile
+make e2e-mock-fast                    # both auth methods × zero profile (fastest)
+make e2e-mock-matrix                  # both auth methods × every registered profile
+E2E_DELAY=zero make e2e-mock          # zero profile, no synthetic relay delay
+E2E_DELAY=all make e2e-mock           # fan out over every registered profile
+E2E_DELAY=zero,default make e2e-mock  # explicit profile subset
+E2E_AUTH=entra make e2e-mock          # pin the entra auth method
 ```
 
-An unrecognised name fails the test loudly and prints the known profile names.
+A dimension with a single value adds no sub-test layer; two or more nest
+scenarios under `TestE2E_Mock/<auth>/<profile>/<scenario>` (auth outermost).
+Per-profile latency thresholds scale with the profile's predicted cost, and the
+entra cold-start budget widens only when the profile models a token-acquisition
+cost. An unrecognised name fails the test loudly and prints the known names.
 
 ## What it is
 
@@ -38,13 +56,17 @@ exercised against Azure Relay.
 
 ## Files
 
-- `backend.go` — `MockBackend` and its `Setup`/`Cell`/`Axes` implementation.
+- `backend.go` — `MockBackend` and its `Setup`/`Cell`/`Axes` implementation,
+  including the composable auth + delay matrix (`NewMatrixBackend`).
 - `e2e_test.go` — `TestE2E_Mock`, runs `scenarios.RunAllScenarios`.
+- `env_test.go` — parses `E2E_AUTH` / `E2E_DELAY` into the matrix backend.
 - `bench_test.go` — `BenchmarkE2E_Mock`, runs `scenarios.RunAllBenchmarks`.
 - `emulates_test.go` — `TestMockEmulates_*` tests asserting wire-level parity
-  with Azure on specific scenarios (added in follow-up work).
+  with Azure on specific scenarios.
+- `entracred.go` / `entracred_test.go` — the fake Entra credential and the
+  `TestMockEmulates_EntraTokenAcquisitionDelay` cold-start proof.
 - `features_test.go` — `TestMockFeature_*` tests asserting mock-only knobs
-  (e.g. rendezvous-delay overrides; added in follow-up work).
+  (e.g. the delay-profile matrix wiring).
 
 ## Build tag
 

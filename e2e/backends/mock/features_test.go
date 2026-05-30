@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"slices"
 	"testing"
 	"time"
 
@@ -46,6 +47,97 @@ func TestMockFeature_ZeroDelayProfile(t *testing.T) {
 	if elapsed > upperBound {
 		t.Fatalf("round-trip took %v with zero DelayProfile; want < %v",
 			elapsed, upperBound)
+	}
+}
+
+// TestMockFeature_DelayMatrix verifies the matrix wiring a
+// NewMatrixBackend exposes to the harness when only the delay
+// dimension varies: a single "delay" axis whose values are the
+// requested profiles, a Cell() that pins each profile and reports no
+// further axes, and a per-profile latency threshold that scales above
+// the floor for a slow profile. It stands up no topology — it exercises
+// the Backend matrix contract directly.
+func TestMockFeature_DelayMatrix(t *testing.T) {
+	b := mock.NewMatrixBackend([]string{mock.AuthSAS}, []string{"zero", "default"})
+
+	axes := b.Axes()
+	if len(axes) != 1 || axes[0].Name() != "delay" {
+		t.Fatalf("expected a single \"delay\" axis, got %v", axes)
+	}
+	if got := axes[0].Values(); !slices.Equal(got, []string{"zero", "default"}) {
+		t.Fatalf("axis values = %v, want [zero default]", got)
+	}
+
+	// Each cell pins the named profile and advertises no further axes.
+	def := b.Cell(map[string]string{"delay": "default"})
+	pinned, ok := def.(*mock.MockBackend)
+	if !ok {
+		t.Fatalf("Cell returned %T, want *mock.MockBackend", def)
+	}
+	if pinned.Axes() != nil {
+		t.Errorf("pinned cell backend should report nil Axes(), got %v", pinned.Axes())
+	}
+
+	// A slow profile's derived threshold scales above the 3 s floor,
+	// proving the budget tracks the profile rather than a flat constant.
+	slow := mock.MockBackend{DelayProfile: server.DelayProfile{
+		SLatency: 2 * time.Second,
+		LLatency: 2 * time.Second,
+	}}
+	if got := slow.ConnectLatencyThreshold(); got <= 3*time.Second {
+		t.Errorf("slow-profile ConnectLatencyThreshold = %v, want > 3s (budget should scale)", got)
+	}
+}
+
+// TestMockFeature_AuthDelayMatrix verifies that NewMatrixBackend
+// composes the auth and delay dimensions: when both vary it advertises
+// two axes in the order [auth, delay] (auth outermost, mirroring the
+// Azure backend), Cell() pins both from the supplied keys, and a
+// single-valued dimension is pinned with no axis. It also checks the
+// entra cold-start budget carries headroom over the SAS budget when the
+// profile models a token-acquisition cost, and collapses to equality
+// under the zero profile.
+func TestMockFeature_AuthDelayMatrix(t *testing.T) {
+	b := mock.NewMatrixBackend([]string{mock.AuthSAS, mock.AuthEntra}, []string{"zero", "default"})
+
+	axes := b.Axes()
+	if len(axes) != 2 || axes[0].Name() != "auth" || axes[1].Name() != "delay" {
+		t.Fatalf("expected axes [auth delay], got %v", axes)
+	}
+	if got := axes[0].Values(); !slices.Equal(got, []string{mock.AuthSAS, mock.AuthEntra}) {
+		t.Fatalf("auth axis values = %v, want [sas entra]", got)
+	}
+
+	// A fully specified cell pins both dimensions and advertises none.
+	cell := b.Cell(map[string]string{"auth": mock.AuthEntra, "delay": "default"})
+	pinned, ok := cell.(*mock.MockBackend)
+	if !ok {
+		t.Fatalf("Cell returned %T, want *mock.MockBackend", cell)
+	}
+	if pinned.Axes() != nil {
+		t.Errorf("pinned cell should report nil Axes(), got %v", pinned.Axes())
+	}
+
+	// A single-valued auth dimension is pinned with no axis; only the
+	// delay axis remains.
+	delayOnly := mock.NewMatrixBackend([]string{mock.AuthEntra}, []string{"zero", "default"})
+	if axes := delayOnly.Axes(); len(axes) != 1 || axes[0].Name() != "delay" {
+		t.Fatalf("single-auth backend axes = %v, want [delay] only", axes)
+	}
+
+	// Entra's cold-start budget exceeds SAS's under a token-acquisition
+	// profile, but equals it under the zero profile (TokenAcquire == 0).
+	entraDefault := b.Cell(map[string]string{"auth": mock.AuthEntra, "delay": "default"}).(*mock.MockBackend)
+	sasDefault := b.Cell(map[string]string{"auth": mock.AuthSAS, "delay": "default"}).(*mock.MockBackend)
+	if entraDefault.ColdStartLatencyThreshold() <= sasDefault.ColdStartLatencyThreshold() {
+		t.Errorf("entra cold-start budget %v should exceed sas %v under default profile",
+			entraDefault.ColdStartLatencyThreshold(), sasDefault.ColdStartLatencyThreshold())
+	}
+	entraZero := b.Cell(map[string]string{"auth": mock.AuthEntra, "delay": "zero"}).(*mock.MockBackend)
+	sasZero := b.Cell(map[string]string{"auth": mock.AuthSAS, "delay": "zero"}).(*mock.MockBackend)
+	if entraZero.ColdStartLatencyThreshold() != sasZero.ColdStartLatencyThreshold() {
+		t.Errorf("entra %v and sas %v cold-start budgets should match under zero profile",
+			entraZero.ColdStartLatencyThreshold(), sasZero.ColdStartLatencyThreshold())
 	}
 }
 

@@ -15,11 +15,13 @@ e2e/
 
 ## Make targets
 
-| Target           | Backend     | Setup required                | Use when                                   |
-| ---------------- | ----------- | ----------------------------- | ------------------------------------------ |
-| `make e2e-mock`  | mock        | none                          | local iteration; CI sanity gate            |
-| `make e2e-azure` | Azure Relay | `make e2e-setup` + `az login` | smoke against the real relay control plane |
-| `make e2e`       | both        | both                          | full local validation before opening a PR  |
+| Target                 | Backend     | Setup required                | Use when                                            |
+| ---------------------- | ----------- | ----------------------------- | --------------------------------------------------- |
+| `make e2e-mock`        | mock        | none                          | local iteration; CI sanity gate (both auth methods) |
+| `make e2e-mock-fast`   | mock        | none                          | quickest mock signal: zero delay, no token cost     |
+| `make e2e-mock-matrix` | mock        | none                          | full auth × delay-profile matrix                    |
+| `make e2e-azure`       | Azure Relay | `make e2e-setup` + `az login` | smoke against the real relay control plane          |
+| `make e2e`             | both        | both                          | full local validation before opening a PR           |
 
 `make e2e` runs both targets. They share no infra (mock is in-process; Azure
 provisions per-test hycos), so `make -j2 e2e` runs them in parallel and finishes
@@ -27,15 +29,36 @@ in roughly the walltime of the slower backend.
 
 ### Environment knobs
 
-| Variable    | Backend | Values                                       | Effect                                                                                                                                                          |
-| ----------- | ------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `E2E_AUTH`  | Azure   | `entra`, `sas`, unset (both)                 | Pins the auth axis to one method.                                                                                                                               |
-| `E2E_DELAY` | mock    | a registered profile name, unset (`default`) | Selects the mockrelay synthetic-delay profile for `TestE2E_Mock`. Names come from the registry in `mockrelay/server/delay_profile.go` (e.g. `zero`, `default`). |
+| Variable    | Backend      | Values                                                               | Effect                                                                                                                                                                                                                                                                                                  |
+| ----------- | ------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `E2E_AUTH`  | Azure + mock | `entra`, `sas`, unset (both)                                         | Pins the auth axis to one method; unset runs both. For the mock, the `entra` cell additionally models the cold token-acquisition cost (see `E2E_DELAY`).                                                                                                                                                |
+| `E2E_DELAY` | mock         | unset (`default`), `all`, or a comma-separated list of profile names | Selects which mockrelay synthetic-delay profiles `TestE2E_Mock` runs. Names come from the registry in `mockrelay/server/delay_profile.go` (e.g. `zero`, `default`). Two or more profiles fan the suite out over a `delay` matrix axis. The `zero` profile also zeroes the entra token-acquisition cost. |
 
 ```bash
-# Run the mock scenarios with no synthetic relay delay:
+# Run the mock scenarios with no synthetic relay delay (and no entra
+# token-acquisition cost) — the fastest signal. Same as `make e2e-mock-fast`:
 E2E_DELAY=zero make e2e-mock
+
+# Fan the whole suite out over every registered profile (`make e2e-mock-matrix`):
+E2E_DELAY=all make e2e-mock
+
+# Run an explicit subset (sub-test paths gain a /<profile>/ layer):
+E2E_DELAY=zero,default make e2e-mock
+
+# Pin a single auth method (applies to both mock and Azure):
+E2E_AUTH=entra make e2e-mock
 ```
+
+`E2E_AUTH` and `E2E_DELAY` are independent dimensions that compose into one
+matrix: `TestE2E_Mock` runs once per (auth, delay) cell. A dimension with a
+single selected value (including the unset defaults — both auth methods, the
+`default` profile) adds no sub-test layer for that dimension, so
+`-run TestE2E_Mock/Performance/...` selectors keep matching. A dimension with two
+or more values nests scenarios under `TestE2E_Mock/<auth>/<profile>/<scenario>`
+(auth outermost, mirroring the Azure backend). Per-profile latency thresholds
+scale with the profile's predicted cost, so slower profiles don't mask
+regressions, and the entra cold-start budget widens only when the profile models
+a token-acquisition cost.
 
 ## Adding tests
 

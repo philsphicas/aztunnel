@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -37,17 +38,14 @@ import (
 
 // Auth method names for the MockBackend auth axis. They mirror the
 // `provider` metric label values (relay.ProviderSAS / ProviderEntra)
-// so a cell's name and its token-fetch metric line up.
+// so a cell's name and its token-fetch metric line up. They are
+// exported because the e2e entry point (env_test.go) and the feature
+// tests (features_test.go) live in the external mock_test package and
+// pin auth methods by name.
 const (
-	authSAS   = "sas"
-	authEntra = "entra"
+	AuthSAS   = "sas"
+	AuthEntra = "entra"
 )
-
-// defaultEntraAcquireDelay is the synthetic cold token-acquisition
-// latency the entra cell models, approximating the AAD round trip a
-// real aztunnel process pays on its first dial. Calibrated against
-// observed Azure entra-vs-sas cold-start divergence (~450 ms).
-const defaultEntraAcquireDelay = 450 * time.Millisecond
 
 // MockBackend implements scenarios.Backend by standing up a mock
 // relay server + aztunnel listener(s) + aztunnel sender(s) all in the
@@ -56,8 +54,9 @@ const defaultEntraAcquireDelay = 450 * time.Millisecond
 // `go test ./mockrelay/...` job.
 //
 // The zero value runs SAS-only with no axis layer (what bench_test.go
-// wants). Construct via NewAuthAxisBackend to opt into the {sas, entra}
-// auth axis that mirrors the Azure backend's matrix.
+// wants). Construct via NewMatrixBackend to fan over the {sas, entra}
+// auth axis and/or a delay-profile axis, mirroring the Azure backend's
+// matrix.
 type MockBackend struct {
 	// DelayProfile parameterizes the synthetic per-step sleeps the
 	// mock relay applies on every leg of the rendezvous protocol.
@@ -71,120 +70,220 @@ type MockBackend struct {
 	// wireshark-observed wall-clock shape.
 	DelayProfile server.DelayProfile
 
-	// axis is non-nil only on a factory backend (built by
-	// NewAuthAxisBackend); the harness enumerates it to render the
-	// auth sub-path layer. Cell-pinned backends carry axis == nil.
-	axis *mockAuthAxis
-
-	// authName is the auth method this (pinned) backend speaks:
-	// authSAS (the zero value / default) or authEntra. It selects the
-	// token provider built in newTokenProvider — and, for the entra
-	// cell, drives the modelled cold token-acquisition cost.
+	// authName is the auth method this backend speaks: AuthSAS (the
+	// zero value / default) or AuthEntra. It selects the token provider
+	// built in newTokenProvider; on the entra path the one-off cold
+	// token-acquisition cost is taken from DelayProfile.TokenAcquire.
 	authName string
 
-	// entraAcquireDelay is the synthetic cold-acquisition latency the
-	// entra cell's fake credential sleeps on a cache miss. Zero means
-	// defaultEntraAcquireDelay.
-	entraAcquireDelay time.Duration
+	// authAxis and delayAxis put this backend in factory mode for the
+	// dimension they describe: when non-nil, Axes() advertises that
+	// dimension and Cell() pins it per cell. They are set only by
+	// NewMatrixBackend, and only for a dimension that varies (more than
+	// one value). A single-valued dimension is pre-pinned into authName
+	// / DelayProfile and carries a nil axis, so it adds no sub-test
+	// layer. A directly-constructed MockBackend{...} has both nil and
+	// therefore no axes, so the historical pinned usage (features_test,
+	// entracred_test, bench_test) is unchanged.
+	authAxis  *namedAxis
+	delayAxis *namedAxis
 }
 
-// mockAuthAxis is the scenarios.Axis the MockBackend varies over when
-// constructed via NewAuthAxisBackend. It mirrors the Azure backend's
-// authAxis so both backends render the same {sas, entra} sub-paths.
-type mockAuthAxis struct {
+// namedAxis is a scenarios.Axis with a fixed name and value set. The
+// mock backend uses one instance per matrix dimension it varies over
+// (auth, delay). The values are the cell keys the harness passes back
+// to Cell: auth-method names for the auth axis, registry profile names
+// for the delay axis.
+type namedAxis struct {
+	name   string
 	values []string
 }
 
-func (*mockAuthAxis) Name() string       { return "auth" }
-func (a *mockAuthAxis) Values() []string { return a.values }
+func (a *namedAxis) Name() string { return a.name }
 
-// NewAuthAxisBackend returns a factory MockBackend whose Axes() lists
-// the {sas, entra} auth methods and whose Cell(values) returns a fresh
-// backend pinned to values["auth"]. Use this from the e2e entry point
-// (TestE2E_Mock) so the mock runs the full scenario suite once per auth
-// method, mirroring the Azure backend's matrix. profile is carried
-// through to every pinned cell.
-func NewAuthAxisBackend(profile server.DelayProfile) *MockBackend {
-	return &MockBackend{
-		DelayProfile: profile,
-		axis:         &mockAuthAxis{values: []string{authSAS, authEntra}},
-	}
+// Values returns a defensive copy so callers (and the harness) cannot
+// mutate the axis's backing slice.
+func (a *namedAxis) Values() []string {
+	out := make([]string, len(a.values))
+	copy(out, a.values)
+	return out
 }
 
-// Name returns the backend identifier (always "mock"). Factory
-// backends surface the auth dimension via the axis t.Run wrapping
-// rather than the name; scenarios and external callers may surface
-// the name in debug output.
+// NewMatrixBackend returns a factory MockBackend that fans the e2e
+// scenario suite over the cartesian product of the named auth methods
+// and delay profiles. Use it from a test entry point (TestE2E_Mock) so
+// the mock runs the full suite once per (auth, delay) cell, mirroring
+// the Azure backend's matrix.
+//
+// Each dimension is advertised as an axis only when it has more than
+// one value; a single-valued dimension is pinned directly (into
+// authName or DelayProfile) and adds no sub-test layer. So
+// NewMatrixBackend([]string{AuthSAS}, []string{"default"}) is a fully
+// pinned backend with no axes, while NewMatrixBackend([]string{AuthSAS,
+// AuthEntra}, []string{"zero", "default"}) advertises both axes (auth
+// outermost, mirroring Azure) for four cells.
+//
+// Panics on an empty list, an unknown auth method, or an unregistered
+// profile — all caller bugs (the E2E_AUTH / E2E_DELAY entry point
+// validates input first).
+func NewMatrixBackend(authNames, delayNames []string) *MockBackend {
+	if len(authNames) == 0 {
+		panic("NewMatrixBackend: authNames must be non-empty")
+	}
+	if len(delayNames) == 0 {
+		panic("NewMatrixBackend: delayNames must be non-empty")
+	}
+	for _, a := range authNames {
+		if a != AuthSAS && a != AuthEntra {
+			panic("NewMatrixBackend: unknown auth method " + a)
+		}
+	}
+	for _, n := range delayNames {
+		if _, err := server.ProfileByName(n); err != nil {
+			panic("NewMatrixBackend: " + err.Error())
+		}
+	}
+
+	b := &MockBackend{}
+	if len(authNames) == 1 {
+		b.authName = authNames[0]
+	} else {
+		b.authAxis = &namedAxis{name: "auth", values: append([]string(nil), authNames...)}
+	}
+	if len(delayNames) == 1 {
+		// ProfileByName already validated this name above.
+		b.DelayProfile, _ = server.ProfileByName(delayNames[0])
+	} else {
+		b.delayAxis = &namedAxis{name: "delay", values: append([]string(nil), delayNames...)}
+	}
+	return b
+}
+
+// Name returns the backend identifier (always "mock"). The harness
+// fills sub-test paths from axis values rather than the name; scenarios
+// and external callers may still surface it in debug output.
 func (*MockBackend) Name() string { return "mock" }
 
-// Axes returns the matrix dimensions this backend varies over.
-// Factory backends (built by NewAuthAxisBackend) return the auth
-// axis; the zero value and pinned backends (returned from Cell)
-// return nil, so the harness runs scenarios directly under the entry
-// point with no axis sub-path layer.
+// Axes returns the matrix dimensions this backend varies over, in the
+// order [auth, delay] (auth outermost, mirroring the Azure backend). A
+// dimension pinned to a single value is omitted, so a fully pinned
+// backend returns nil and the harness runs scenarios directly under the
+// entry point with no axis sub-path layer.
 func (b *MockBackend) Axes() []scenarios.Axis {
-	if b.axis == nil {
-		return nil
+	var axes []scenarios.Axis
+	if b.authAxis != nil {
+		axes = append(axes, b.authAxis)
 	}
-	return []scenarios.Axis{b.axis}
+	if b.delayAxis != nil {
+		axes = append(axes, b.delayAxis)
+	}
+	return axes
 }
 
 // Cell returns a fresh *MockBackend pinned to the cell described by
-// values. Factory backends require values["auth"]; the zero value and
-// pinned backends (axis == nil) accept only an empty values map and
-// return a clone of the receiver. DelayProfile and entraAcquireDelay
-// are carried through to the pinned cell.
+// values. It reads exactly the keys for the axes this backend
+// advertises (see Axes): "auth" when the auth axis is live, "delay"
+// when the delay axis is live. Pinned dimensions are carried through
+// from the receiver. An axis-less backend accepts only an empty map and
+// returns a clone. Panics on a missing key, an unknown value, or an
+// unexpected number of values — all harness-contract violations.
 func (b *MockBackend) Cell(values map[string]string) scenarios.Backend {
-	if b.axis == nil {
-		if len(values) != 0 {
-			panic("MockBackend.Cell: pinned backend accepts no axis values")
+	cell := &MockBackend{
+		DelayProfile: b.DelayProfile,
+		authName:     b.authName,
+	}
+	want := 0
+	if b.authAxis != nil {
+		want++
+		v, ok := values["auth"]
+		if !ok {
+			panic(`MockBackend.Cell: missing required axis key "auth"`)
 		}
-		return &MockBackend{
-			DelayProfile:      b.DelayProfile,
-			authName:          b.authName,
-			entraAcquireDelay: b.entraAcquireDelay,
+		if v != AuthSAS && v != AuthEntra {
+			panic("MockBackend.Cell: unknown auth method " + v)
 		}
+		cell.authName = v
 	}
-	auth, ok := values["auth"]
-	if !ok {
-		panic("MockBackend.Cell: missing required axis key \"auth\"")
+	if b.delayAxis != nil {
+		want++
+		v, ok := values["delay"]
+		if !ok {
+			panic(`MockBackend.Cell: missing required axis key "delay"`)
+		}
+		p, err := server.ProfileByName(v)
+		if err != nil {
+			panic("MockBackend.Cell: " + err.Error())
+		}
+		cell.DelayProfile = p
 	}
-	if len(values) != 1 {
-		panic("MockBackend.Cell: expected exactly one axis value (auth)")
+	if len(values) != want {
+		panic(fmt.Sprintf("MockBackend.Cell: expected %d axis value(s), got %d", want, len(values)))
 	}
-	return &MockBackend{
-		DelayProfile:      b.DelayProfile,
-		authName:          auth,
-		entraAcquireDelay: b.entraAcquireDelay,
-	}
+	return cell
 }
 
-// ConnectLatencyThreshold returns the per-backend connect-latency
-// ceiling for the Performance suite. 3 s leaves comfortable headroom
-// for CI scheduling noise on any reasonable DelayProfile without
-// masking regressions of the order of seconds.
+// mockLatencyFloor is the minimum per-connection latency ceiling. It
+// keeps near-zero profiles stable against CI scheduling jitter; slower
+// profiles scale above it via mockLatencyBudget.
+const mockLatencyFloor = 3 * time.Second
+
+// mockLatencyBudget derives the per-connection latency ceiling for a
+// pinned profile. It is affine in the profile's predicted cost — one
+// cold rendezvous plus one bridge echo, the shape the ConnectLatency
+// scenarios measure (dial -> 1-byte echo) — so a slow profile gets a
+// proportionally larger budget that still trips on a real regression,
+// rather than a flat constant that would mask seconds-scale slowdowns.
+// The 3 s floor preserves the historical budget for the zero/default
+// profiles (both predict well under it).
 //
-// The mock returns one value regardless of cell — MockBackend has
-// no axes, and the DelayProfile field affects timing but is not
-// itself an axis the harness enumerates over.
-func (*MockBackend) ConnectLatencyThreshold() time.Duration {
-	return 3 * time.Second
+// Note: the workload scenarios' warm-request budget (roundBudget in
+// e2e/scenarios/performance.go) is a flat 500 ms per request and is
+// NOT derived from the profile; a profile whose PredictedBridgeEcho
+// exceeds that would need roundBudget made delay-aware. Both currently
+// registered profiles (zero, default) are well within it.
+func mockLatencyBudget(p server.DelayProfile) time.Duration {
+	predicted := p.PredictedRendezvous() + p.PredictedBridgeEcho()
+	budget := predicted*3/2 + 2*time.Second
+	if budget < mockLatencyFloor {
+		budget = mockLatencyFloor
+	}
+	return budget
+}
+
+// ConnectLatencyThreshold returns the per-connection connect-latency
+// ceiling for the Performance suite, derived from this backend's
+// pinned DelayProfile so the budget scales with the profile (see
+// mockLatencyBudget). A directly-constructed zero-profile backend
+// yields the 3 s floor — the historical value.
+func (b *MockBackend) ConnectLatencyThreshold() time.Duration {
+	return mockLatencyBudget(b.DelayProfile)
 }
 
 // ColdStartLatencyThreshold returns the per-backend ceiling for the
-// first connection through a freshly-started sender. For the SAS cell
-// (and the axis-less zero value) the budget matches
-// ConnectLatencyThreshold: every dial pays the same rendezvous delay
-// regardless of order. The entra cell additionally pays a one-off
-// synthetic token-acquisition cost on that first dial (the modelled
-// AAD round trip, absorbed thereafter by the client token cache), so
-// its budget is widened to keep comfortable headroom over the cold
-// fetch on noisy CI.
+// first connection through a freshly-started sender. The warm budget is
+// mockLatencyBudget (every dial pays the same rendezvous delay). The
+// entra path additionally pays a one-off cold token acquisition on that
+// first dial — the modelled AAD round trip in DelayProfile.TokenAcquire,
+// absorbed thereafter by the client token cache — so its budget is
+// widened by entraColdStartHeadroom. With the zero profile TokenAcquire
+// is 0, so entra and sas share the same (floored) cold-start budget,
+// keeping "zero means instant everywhere" intact.
 func (b *MockBackend) ColdStartLatencyThreshold() time.Duration {
-	if b.authName == authEntra {
-		return 5 * time.Second
+	budget := mockLatencyBudget(b.DelayProfile)
+	if b.authName == AuthEntra {
+		budget += entraColdStartHeadroom(b.DelayProfile)
 	}
-	return 3 * time.Second
+	return budget
+}
+
+// entraColdStartHeadroom is the extra cold-start ceiling the entra path
+// gets on top of the warm rendezvous budget, to keep comfortable
+// headroom over the modelled token acquisition on noisy CI. It scales
+// with the profile's TokenAcquire (4x the modelled fetch ~= 1.8 s for
+// the default profile's 450 ms, recovering the historical ~5 s entra
+// ceiling) and is exactly 0 for the zero profile.
+func entraColdStartHeadroom(p server.DelayProfile) time.Duration {
+	return 4 * p.TokenAcquire
 }
 
 // newTokenProvider builds a fresh token provider for one aztunnel
@@ -200,17 +299,14 @@ func (b *MockBackend) ColdStartLatencyThreshold() time.Duration {
 // re-signs locally per call (free). Entra cell: a real
 // relay.EntraTokenProvider backed by fakeEntraCredential, so the
 // production token cache is exercised end-to-end and the modelled
-// ~450 ms acquisition cost is paid only on the cold cache miss.
+// DelayProfile.TokenAcquire cost is paid only on the cold cache miss
+// (zero for the zero profile, so entra is then instant too).
 func (b *MockBackend) newTokenProvider(m *metrics.Metrics) relay.TokenProvider {
 	switch b.authName {
-	case authEntra:
-		delay := b.entraAcquireDelay
-		if delay == 0 {
-			delay = defaultEntraAcquireDelay
-		}
-		inner, _ := newFakeEntraProvider(delay)
+	case AuthEntra:
+		inner, _ := newFakeEntraProvider(b.DelayProfile.TokenAcquire)
 		return relay.WithMetrics(inner, m, relay.ProviderEntra)
-	default: // authSAS or "" (zero value)
+	default: // AuthSAS or "" (zero value)
 		inner := &relay.SASTokenProvider{
 			KeyName: server.DefaultSASKeyName,
 			Key:     server.DefaultSASKey,

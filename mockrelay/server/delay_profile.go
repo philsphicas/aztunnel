@@ -33,6 +33,17 @@ import (
 //     and the response being emitted that is NOT explained by lane
 //     transit: SAS-token validation for AuthInternal, listener lookup
 //     plus cross-relay-node dispatch for MatchMakeInternal.
+//
+//   - Client-side credential cost (TokenAcquire). The one-off cold
+//     token-acquisition latency a real aztunnel process pays the first
+//     time it fetches an Entra token (the AAD round trip), absorbed
+//     thereafter by the client token cache. It is NOT a relay-side
+//     sleep — the mock relay server ignores it — but it lives here so a
+//     single profile owns all synthetic wall-clock: the zero profile is
+//     instant everywhere (including the entra cold start) and a
+//     wire-faithful profile models the real cold-start premium. The SAS
+//     path pays nothing (it re-signs locally), so this field is read
+//     only on the entra path.
 type DelayProfile struct {
 	// SLatency is the one-way wire transit time between the sender
 	// and the relay. Used to model TCP+TLS+WS upgrade hops on the
@@ -69,6 +80,17 @@ type DelayProfile struct {
 	// in addition to AuthInternal (the two costs sum in handleConnect
 	// because matchmake happens after auth).
 	MatchMakeInternal time.Duration
+
+	// TokenAcquire models the one-off cold Entra token-acquisition
+	// latency (the AAD round trip a real aztunnel process pays the
+	// first time it fetches a token, absorbed thereafter by the client
+	// token cache). Unlike the other fields this is a CLIENT-side cost,
+	// not a relay-side sleep: the mock relay server never reads it. It
+	// is consumed only by the e2e harness on the entra auth path, so a
+	// single profile owns all synthetic wall-clock — zero is instant
+	// everywhere, default models the real cold-start premium. The SAS
+	// path re-signs locally and pays nothing.
+	TokenAcquire time.Duration
 }
 
 // Hop accounting constants. The decomposition comes from wireshark
@@ -104,6 +126,7 @@ var DelayProfileDefault = DelayProfile{
 	DNSLookup:         40 * time.Millisecond,
 	AuthInternal:      10 * time.Millisecond,
 	MatchMakeInternal: 50 * time.Millisecond,
+	TokenAcquire:      450 * time.Millisecond,
 }
 
 // registry is the single source of truth mapping canonical profile
@@ -144,6 +167,31 @@ func ProfileNames() []string {
 	return names
 }
 
+// PredictedRendezvous returns the synthetic wall-clock this profile
+// adds to a single cold hyco rendezvous (listener already attached):
+// both fresh DNS lookups, the sender and listener lane transits, the
+// shared response leg, and the relay-internal auth + matchmake costs.
+// It is the synthetic-delay component only — the in-process baseline
+// (~6 ms) is not included. The decomposition follows the hop
+// accounting above; see docs/internals/sequences/ for the wireshark
+// basis. For the zero profile this is zero.
+func (p DelayProfile) PredictedRendezvous() time.Duration {
+	return 2*p.DNSLookup +
+		(hopsHandshake+hopsWSGet)*p.SLatency +
+		(hopsHandshake+hopsWSGet+hopsAcceptFrame)*p.LLatency +
+		hopsResponse*max(p.SLatency, p.LLatency) +
+		p.AuthInternal + p.MatchMakeInternal
+}
+
+// PredictedBridgeEcho returns the synthetic wall-clock this profile
+// adds to one request→reply round-trip through an already-established
+// bridge. Each bridge message in flight pays one one-way lane transit
+// (SLatency + LLatency), so an echo costs two. Excludes the in-process
+// baseline. For the zero profile this is zero.
+func (p DelayProfile) PredictedBridgeEcho() time.Duration {
+	return 2 * (p.SLatency + p.LLatency)
+}
+
 // WithDelayProfile arms the per-lane synthetic-delay model. The zero
 // profile applies no delay anywhere — pass DelayProfileDefault (or
 // build your own) for fidelity. Only effective when set via
@@ -178,6 +226,7 @@ func (p DelayProfile) validate() error {
 		{"DNSLookup", p.DNSLookup},
 		{"AuthInternal", p.AuthInternal},
 		{"MatchMakeInternal", p.MatchMakeInternal},
+		{"TokenAcquire", p.TokenAcquire},
 	} {
 		if f.d < 0 {
 			return fmt.Errorf("%s must be non-negative, got %v", f.name, f.d)
