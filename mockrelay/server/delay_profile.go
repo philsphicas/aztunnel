@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -102,6 +104,44 @@ var DelayProfileDefault = DelayProfile{
 	DNSLookup:         40 * time.Millisecond,
 	AuthInternal:      10 * time.Millisecond,
 	MatchMakeInternal: 50 * time.Millisecond,
+}
+
+// registry is the single source of truth mapping canonical profile
+// names to DelayProfiles. Selection sites — the E2E_DELAY env toggle,
+// docs, and any future CLI or test-matrix axis — resolve through
+// ProfileByName / ProfileNames rather than referencing the package
+// vars directly, so adding a profile is a one-line change here that
+// every consumer picks up automatically. Keep keys lowercase and
+// hyphen-free so they read cleanly as env-var values and sub-test
+// path segments.
+var registry = map[string]DelayProfile{
+	"zero":    DelayProfileZero,
+	"default": DelayProfileDefault,
+}
+
+// ProfileByName returns the named profile from the registry. The error
+// names the unknown profile and lists the known names (sorted) so a
+// typo at a selection site fails loudly instead of silently selecting
+// the wrong timing model.
+func ProfileByName(name string) (DelayProfile, error) {
+	p, ok := registry[name]
+	if !ok {
+		return DelayProfile{}, fmt.Errorf("unknown delay profile %q; known profiles: %s",
+			name, strings.Join(ProfileNames(), ", "))
+	}
+	return p, nil
+}
+
+// ProfileNames returns the registered profile names in sorted order.
+// Drives stable error messages and lets docs or a test-matrix axis
+// enumerate the profiles from the single registry source of truth.
+func ProfileNames() []string {
+	names := make([]string, 0, len(registry))
+	for n := range registry {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // WithDelayProfile arms the per-lane synthetic-delay model. The zero

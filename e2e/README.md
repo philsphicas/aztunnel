@@ -25,6 +25,18 @@ e2e/
 provisions per-test hycos), so `make -j2 e2e` runs them in parallel and finishes
 in roughly the walltime of the slower backend.
 
+### Environment knobs
+
+| Variable    | Backend | Values                                       | Effect                                                                                                                                                          |
+| ----------- | ------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `E2E_AUTH`  | Azure   | `entra`, `sas`, unset (both)                 | Pins the auth axis to one method.                                                                                                                               |
+| `E2E_DELAY` | mock    | a registered profile name, unset (`default`) | Selects the mockrelay synthetic-delay profile for `TestE2E_Mock`. Names come from the registry in `mockrelay/server/delay_profile.go` (e.g. `zero`, `default`). |
+
+```bash
+# Run the mock scenarios with no synthetic relay delay:
+E2E_DELAY=zero make e2e-mock
+```
+
 ## Adding tests
 
 Use the testing-discipline taxonomy below to pick where a new test lives.
