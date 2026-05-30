@@ -36,6 +36,17 @@ Then connect normally:
 psql -h 127.0.0.1 -p 5432 -U myuser mydb
 ```
 
+> **Fast connection setup**: new TCP connections to the forwarded port
+> share a persistent multiplexed relay session, established lazily on the
+> first connection. The first connection still pays the ~1–2 second
+> rendezvous; subsequent connections that reuse an already-established
+> mux session complete in milliseconds (just one smux stream open over
+> the persistent session). With `--mux-sessions > 1`, concurrent traffic
+> can lazily grow the pool, and the first connection on each new session
+> pays a rendezvous too. See
+> [stream multiplexing](../mux.md) for details and tuning knobs
+> (`--mux-sessions`, `--no-mux`).
+
 ## Understanding `--bind`
 
 The `--bind` flag controls where the sender listens for local connections.

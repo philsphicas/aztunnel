@@ -21,6 +21,7 @@ Tunnel TCP connections through [Azure Relay Hybrid Connections](https://learn.mi
 - **Port forward** — bind a local port and forward connections to a fixed remote target
 - **SOCKS5 proxy** — run a local SOCKS5 server for dynamic target selection
 - **SSH ProxyCommand** — bridge stdin/stdout for use with `ssh -o ProxyCommand`
+- **Stream multiplexing** — port-forward and SOCKS5 multiplex many TCP sessions over a single persistent relay WebSocket. The relay rendezvous is dialed lazily on the first connection that needs one (and on every additional session when `--mux-sessions > 1` is required by concurrent load), so each new session's first connection still pays the full rendezvous; subsequent connections that reuse an already-established mux session drop from seconds to milliseconds. See [docs/mux.md](docs/mux.md).
 - **Azure Arc support** — connect to Arc-enrolled machines through automatically provisioned relays
 - **Prometheus metrics** — optional `--metrics-addr` flag exposes connection, byte, and error metrics
 - **Allowlist enforcement** — restrict which targets the listener can reach (CIDR, host:port, wildcard)
@@ -210,6 +211,35 @@ If SSH listens on a non-standard port (e.g., 2222):
 aztunnel arc connect --resource-id /subscriptions/.../machines/myVM --port 2222
 ```
 
+## Stream multiplexing
+
+By default, `relay-sender port-forward` and `relay-sender socks5-proxy`
+multiplex many TCP sessions over a single persistent relay WebSocket. The
+relay rendezvous WebSocket is established **lazily on the first connection
+that needs one** — that first connection still pays the full ~1–2 second
+rendezvous, and any **subsequent connection that reuses an
+already-established mux session** drops to ~milliseconds (one smux stream
+open over the existing session). When `--mux-sessions > 1` is configured
+and concurrent traffic forces the pool to grow, each additional session is
+also dialed lazily on the first connection that needs it, so that first
+connection on each new session pays a rendezvous too.
+
+| Flag                          | Default | Notes                                               |
+| ----------------------------- | ------- | --------------------------------------------------- |
+| `--no-mux`                    | off     | Disable mux; use a fresh rendezvous per connection  |
+| `--mux-sessions N`            | `2`     | Cap on persistent rendezvous WebSockets             |
+| `--max-streams-per-session N` | `256`   | Per-session in-flight stream cap (hidden, advanced) |
+
+Sessions are rotated every 6 hours by default for fleet rebalancing
+across HA listeners. Empirical testing shows Azure Relay does not tear
+down sender WebSockets at SAS token expiry, so rotation is purely
+defensive — not a correctness requirement. Older listeners that don't
+speak the multiplexed protocol fall back to per-connection rendezvous
+automatically.
+
+See [docs/mux.md](docs/mux.md) for sizing guidance, rotation behaviour,
+multi-listener affinity caveats, and metrics.
+
 ## CLI reference
 
 ```
@@ -250,12 +280,16 @@ Flags:
 aztunnel relay-sender port-forward <host:port> [flags]
 
 Flags:
-  --relay string       Azure Relay namespace name
+  --relay string           Azure Relay namespace name
   --hyco string            Hybrid connection name
   -b, --bind string        Local bind address:port (default "127.0.0.1:0")
   --gateway                Bind to 0.0.0.0 instead of 127.0.0.1
   --tcp-keepalive duration TCP keepalive interval (default 30s)
+  --no-mux                 Disable stream multiplexing; use a fresh relay rendezvous per connection
+  --mux-sessions int       Maximum persistent relay rendezvous WebSockets (default 2)
 ```
+
+See [docs/mux.md](docs/mux.md) for details on stream multiplexing.
 
 ### relay-sender socks5-proxy
 
@@ -263,12 +297,16 @@ Flags:
 aztunnel relay-sender socks5-proxy [flags]
 
 Flags:
-  --relay string       Azure Relay namespace name
+  --relay string           Azure Relay namespace name
   --hyco string            Hybrid connection name
   -b, --bind string        Local bind address:port (default "127.0.0.1:0")
   --gateway                Bind to 0.0.0.0 instead of 127.0.0.1
   --tcp-keepalive duration TCP keepalive interval (default 30s)
+  --no-mux                 Disable stream multiplexing; use a fresh relay rendezvous per connection
+  --mux-sessions int       Maximum persistent relay rendezvous WebSockets (default 2)
 ```
+
+See [docs/mux.md](docs/mux.md) for details on stream multiplexing.
 
 ### relay-sender connect
 
@@ -315,15 +353,20 @@ aztunnel relay-listener --relay my-ns --hyco my-hyco --metrics-addr :9090
 
 Metrics are served at `/metrics` on the specified address. When neither the flag nor the env var is set, no metrics server is started.
 
-| Metric                                 | Type      | Labels                        | Description                                       |
-| -------------------------------------- | --------- | ----------------------------- | ------------------------------------------------- |
-| `aztunnel_connections_total`           | counter   | `role`, `target`, `status`    | Total connections handled (success/error)         |
-| `aztunnel_connection_errors_total`     | counter   | `role`, `reason`              | Connection failures by reason                     |
-| `aztunnel_bytes_total`                 | counter   | `role`, `target`, `direction` | Bytes transferred through the relay tunnel        |
-| `aztunnel_active_connections`          | gauge     | `role`, `target`              | Currently active bridged connections              |
-| `aztunnel_control_channel_connected`   | gauge     | —                             | 1 if the listener control channel is up, 0 if not |
-| `aztunnel_connection_duration_seconds` | histogram | `role`, `target`              | Duration of completed connections                 |
-| `aztunnel_dial_duration_seconds`       | histogram | `role`                        | Time to establish outbound connections            |
+| Metric                                 | Type      | Labels                        | Description                                                                     |
+| -------------------------------------- | --------- | ----------------------------- | ------------------------------------------------------------------------------- |
+| `aztunnel_connections_total`           | counter   | `role`, `target`, `status`    | Total connections handled (success/error)                                       |
+| `aztunnel_connection_errors_total`     | counter   | `role`, `reason`              | Connection failures by reason                                                   |
+| `aztunnel_bytes_total`                 | counter   | `role`, `target`, `direction` | Bytes transferred through the relay tunnel                                      |
+| `aztunnel_active_connections`          | gauge     | `role`, `target`              | Currently active bridged connections                                            |
+| `aztunnel_control_channel_connected`   | gauge     | —                             | 1 if the listener control channel is up, 0 if not                               |
+| `aztunnel_connection_duration_seconds` | histogram | `role`, `target`              | Duration of completed connections                                               |
+| `aztunnel_dial_duration_seconds`       | histogram | `role`                        | Time to establish outbound connections                                          |
+| `aztunnel_mux_sessions_active`         | gauge     | `role`                        | Currently active mux sessions (sender only)                                     |
+| `aztunnel_mux_stream_open_seconds`     | histogram | `role`                        | Pool admission + smux SYN (excludes per-stream envelope handshake; sender only) |
+| `aztunnel_mux_session_age_seconds`     | histogram | `role`                        | Age of a mux session at rotation or eviction (sender only)                      |
+| `aztunnel_mux_rotations_total`         | counter   | `role`, `reason`              | Mux session lifecycle exits (rotations and evictions) by reason (sender only)   |
+| `aztunnel_mux_pool_saturated_total`    | counter   | `role`                        | Callers that ctx-expired waiting on a mux slot (sender only)                    |
 
 Labels:
 
@@ -331,7 +374,7 @@ Labels:
 - **target**: destination address (e.g. `10.0.0.5:22`)
 - **status**: `success` or `error`
 - **direction**: `to_relay` (local endpoint → relay) or `from_relay` (relay → local endpoint)
-- **reason**: `dial_failed`, `dial_timeout`, `allowlist_rejected`, `relay_failed`, `envelope_error`, `auth_failed`
+- **reason**: `dial_failed`, `dial_timeout`, `allowlist_rejected`, `relay_failed`, `envelope_error`, `auth_failed`, `listener_at_capacity`, `mux_open_failed` (for `aztunnel_connection_errors_total`); `scheduled`, `force_after_grace`, `unsupported`, `pool_closed`, `open_failed` (for `aztunnel_mux_rotations_total`)
 
 Go runtime and process metrics are also included in the output.
 

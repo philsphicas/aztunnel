@@ -65,6 +65,8 @@ Relay Sender - Port Forward:
   -b, --bind string                 Local bind address:port (default "127.0.0.1:0")
       --gateway                     Bind to 0.0.0.0 instead of 127.0.0.1
       --tcp-keepalive duration      TCP keepalive interval (default 30s)
+      --no-mux                      Disable stream multiplexing (one relay rendezvous per connection)
+      --mux-sessions int            Max persistent relay rendezvous WebSockets (default 2)
 
 Relay Sender - Connect:
   Connect to the relay, tell the listener to dial host:port, then bridge
@@ -85,6 +87,8 @@ Relay Sender - SOCKS5 Proxy:
   -b, --bind string                 Local bind address:port (default "127.0.0.1:0")
       --gateway                     Bind to 0.0.0.0 instead of 127.0.0.1
       --tcp-keepalive duration      TCP keepalive interval (default 30s)
+      --no-mux                      Disable stream multiplexing (one relay rendezvous per connection)
+      --mux-sessions int            Max persistent relay rendezvous WebSockets (default 2)
 
 Arc Connect:
   Connect to an Azure Arc-enrolled machine through the automatically
@@ -128,6 +132,8 @@ Environment Variables:
   AZTUNNEL_KEY               SAS key value (optional, overrides Entra)
   AZTUNNEL_ARC_RESOURCE_ID   Arc resource ID (fallback for --resource-id)
   AZTUNNEL_METRICS_ADDR      Metrics server address (fallback for --metrics-addr)
+  AZTUNNEL_NO_MUX            Disable stream multiplexing (fallback for --no-mux)
+  AZTUNNEL_MUX_SESSIONS      Max persistent relay sessions (fallback for --mux-sessions)
 
 Examples:
   # Start a relay listener allowing only SSH and HTTPS targets

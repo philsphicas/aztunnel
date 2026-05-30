@@ -1,5 +1,22 @@
 // Package sender implements the relay-sender modes: port-forward,
 // socks5-proxy, and connect (stdin/stdout).
+//
+// The port-forward and socks5-proxy modes use a persistent multiplexed
+// session (smux over a single relay WebSocket) so that each new TCP session
+// becomes a cheap smux stream rather than a full Azure Relay rendezvous.
+// The mux session is dialed *lazily* on the first connection that needs
+// one — so the very first TCP session through the sender still pays the
+// full ~1-2 s rendezvous; subsequent connections that reuse an
+// already-established mux session drop to milliseconds. When MuxSessions
+// > 1 is configured and concurrent traffic forces the pool to grow, each
+// additional session is also dialed lazily on its first connection,
+// which pays a rendezvous too. Mux can be disabled per-config; the
+// listener-side accepts both protocols and the sender automatically
+// falls back to v1 if the listener it reaches doesn't speak v2
+// (mixed-version rolling deployments).
+//
+// The connect (stdin/stdout) mode is intentionally v1 only — it carries
+// exactly one connection, so multiplexing has no benefit.
 package sender
 
 import (
@@ -19,6 +36,17 @@ import (
 	"github.com/philsphicas/aztunnel/internal/relay"
 )
 
+// muxStreamAdmissionTimeout bounds the per-connection wait inside
+// MuxPool.OpenStream so a saturated pool cannot hang the goroutine
+// indefinitely on a process-level ctx (as used by the CLI port-forward
+// and socks5-proxy paths). Sized to give realistic burst traffic time
+// to land a slot while still surfacing genuine saturation through
+// aztunnel_mux_pool_saturated_total on caller-deadline expiry. The
+// envelope handshake and bridge phases run on the parent ctx so a
+// working stream lives as long as the client keeps the connection
+// open.
+const muxStreamAdmissionTimeout = 60 * time.Second
+
 // PortForwardConfig holds configuration for port-forward mode.
 type PortForwardConfig struct {
 	Endpoint      string
@@ -36,12 +64,35 @@ type PortForwardConfig struct {
 	// after the local app has closed its socket, producing ghost
 	// rendezvous when a listener eventually appears.
 	DialBudget time.Duration
+
 	// Ready, if non-nil, is invoked once after the local bind succeeds
 	// and before the accept loop starts. Tests use this to learn the
 	// chosen bind address (when BindAddress is :0) without having to
 	// probe with a real TCP dial that would consume a listener slot
 	// under MaxConnections. Production callers leave this nil.
 	Ready func(net.Addr)
+
+	// MuxDisabled forces the v1 per-connection path. Useful for debugging
+	// or environments with only v1-capable listeners (the pool also
+	// falls back automatically on listener rejection, but this flag skips
+	// the v2 attempt entirely).
+	MuxDisabled bool
+
+	// MuxSessions caps the number of persistent relay rendezvous
+	// WebSockets the sender holds open. Larger values may spread
+	// concurrent traffic across multiple HA listeners. Defaults to 1.
+	MuxSessions int
+
+	// MaxStreamsPerSession bounds in-flight streams per mux session;
+	// callers block (with ctx) when all sessions are at this cap and the
+	// pool is at MuxSessions. Defaults to 256.
+	MaxStreamsPerSession int
+
+	// MuxStreamHandshakeTimeout caps the per-stream envelope+response
+	// exchange. Must exceed the listener's --connect-timeout because
+	// the listener dials the target before writing the response.
+	// Zero falls back to the package default (60s).
+	MuxStreamHandshakeTimeout time.Duration
 }
 
 // PortForward starts a local TCP listener and forwards each connection
@@ -59,9 +110,37 @@ func PortForward(ctx context.Context, cfg PortForwardConfig) error {
 		return fmt.Errorf("listen %s: %w", cfg.BindAddress, err)
 	}
 	defer ln.Close() //nolint:errcheck // best-effort cleanup
-	cfg.Logger.Info("port-forward listening", "bind", ln.Addr(), "target", cfg.Target)
+	muxSessions := cfg.MuxSessions
+	if muxSessions <= 0 {
+		muxSessions = DefaultMuxSessions
+	}
+	maxStreamsPerSession := cfg.MaxStreamsPerSession
+	if maxStreamsPerSession <= 0 {
+		maxStreamsPerSession = DefaultMaxStreamsPerSession
+	}
+	cfg.Logger.Info("port-forward listening",
+		"bind", ln.Addr(), "target", cfg.Target,
+		"mux", !cfg.MuxDisabled,
+		"muxSessions", muxSessions,
+		"maxStreamsPerSession", maxStreamsPerSession,
+	)
 	if cfg.Ready != nil {
 		cfg.Ready(ln.Addr())
+	}
+
+	var pool *MuxPool
+	if !cfg.MuxDisabled {
+		pool = NewMuxPool(ctx, MuxPoolOptions{
+			Endpoint:             cfg.Endpoint,
+			EntityPath:           cfg.EntityPath,
+			TokenProvider:        cfg.TokenProvider,
+			ClientOptions:        cfg.ClientOptions,
+			Logger:               cfg.Logger,
+			Metrics:              cfg.Metrics,
+			MaxSessions:          cfg.MuxSessions,
+			MaxStreamsPerSession: cfg.MaxStreamsPerSession,
+		})
+		defer pool.Close()
 	}
 
 	go func() {
@@ -85,19 +164,119 @@ func PortForward(ctx context.Context, cfg PortForwardConfig) error {
 			// the bridge_id-bound logger; the returned error is
 			// surfaced for tests and metrics, not for top-level
 			// logging.
-			_ = forwardConnection(ctx, conn, cfg.Target, cfg)
+			_ = forwardConnection(ctx, conn, cfg.Target, cfg, pool)
 		}()
 	}
 }
 
-func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg PortForwardConfig) error {
-	// Set TCP keepalive on the incoming connection.
+func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg PortForwardConfig, pool *MuxPool) error {
 	relay.SetTCPKeepAlive(conn, cfg.TCPKeepAlive)
 
 	bridgeID := idgen.NewBridgeID()
 	logger := cfg.Logger.With("bridge_id", bridgeID)
 	logger.Info("connection requested", "target", target)
 
+	if pool != nil {
+		// Bound the mux open/admission wait so a saturated pool can't
+		// hang the goroutine indefinitely. The CLI passes the listener-
+		// loop ctx here (effectively process-level, no deadline), so
+		// without this an OpenStream blocked in the pool's
+		// notifyCh/select wait would never release if every session is
+		// at MaxStreamsPerSession AND the pool is at MaxSessions — and
+		// aztunnel_mux_pool_saturated_total would never fire because
+		// the ctx has no deadline. After OpenStream returns, the
+		// envelope handshake (capped by MuxStreamHandshakeTimeout) and
+		// the bridge use the parent ctx so a working stream lives as
+		// long as the client keeps it open.
+		admitCtx, admitCancel := context.WithTimeout(ctx, muxStreamAdmissionTimeout)
+		stream, err := pool.OpenStream(admitCtx)
+		// Capture the admission-ctx state BEFORE admitCancel() — once
+		// we cancel, admitCtx.Err() is always non-nil and useless for
+		// telling "admission expired / parent done" apart from
+		// "internal handshake/setup deadline fired on a sub-context".
+		admitDone := admitCtx.Err() != nil
+		admitCancel()
+		switch {
+		case err == nil:
+			defer stream.Close() //nolint:errcheck // best-effort cleanup
+			listenerID, err := sendEnvelopeOverStream(ctx, stream, target, bridgeID, cfg.MuxStreamHandshakeTimeout)
+			if err != nil {
+				logRejection(logger, target, listenerID, err)
+				cfg.Metrics.ConnectionError("sender", metrics.ReasonEnvelopeError)
+				return fmt.Errorf("mux envelope: %w", err)
+			}
+			logAccept(logger, target, listenerID)
+			result, bridgeErr := cfg.Metrics.TrackedStreamBridge(ctx, stream, conn, "sender", target)
+			attrs := []any{
+				"cause", result.EndCause,
+				"tcp_to_ws", result.Stats.TCPToWS,
+				"ws_to_tcp", result.Stats.WSToTCP,
+			}
+			if result.TCPToWS != nil {
+				attrs = append(attrs, "tcp_to_ws_err", result.TCPToWS)
+			}
+			if result.WSToTCP != nil {
+				attrs = append(attrs, "ws_to_tcp_err", result.WSToTCP)
+			}
+			if bridgeErr != nil {
+				errAttrs := append([]any{"error", bridgeErr}, attrs...)
+				logger.Warn("forward failed", errAttrs...)
+			} else {
+				logger.Debug("bridge ended", attrs...)
+			}
+			return bridgeErr
+		case errors.Is(err, ErrMuxUnsupported):
+			logger.Debug("mux unavailable, using v1 path", "target", target)
+			// fall through to v1
+		default:
+			// Filter what we record so we don't double-count or
+			// mislabel:
+			//   - context.Canceled/DeadlineExceeded BUT ONLY when
+			//     admitDone is true — admitCtx fired (admission
+			//     timeout) OR the parent ctx already cancelled
+			//     before we cancelled admitCtx ourselves. Either
+			//     way it's the caller giving up / real saturation,
+			//     not a connection error. (An *internal*
+			//     mux-handshake timeout also wraps
+			//     context.DeadlineExceeded but admitCtx was still
+			//     alive when OpenStream returned, so admitDone is
+			//     false and the error gets recorded.)
+			//   - ErrMuxPoolClosed (admitDone): the pool's
+			//     poolCtx fired during caller shutdown — same
+			//     class as ctx.Canceled, not a real failure.
+			//   - ErrMuxDialFailed: the underlying relay dial
+			//     failed and was already recorded by
+			//     MuxDialer.connectLocked (which calls
+			//     relay.DialWithRetry directly and emits
+			//     ConnectionError via DialReason itself, rather
+			//     than going through metrics.InstrumentedDial so
+			//     it can suppress parent-cancellation cases).
+			// Everything else is a genuine "we couldn't open a
+			// mux stream" (smux setup, handshake parse,
+			// listener rejection that isn't the v1-fallback
+			// marker, internal handshake timeout) — record as
+			// ReasonMuxOpenFailed.
+			callerCancelled := admitDone &&
+				(errors.Is(err, context.Canceled) ||
+					errors.Is(err, context.DeadlineExceeded) ||
+					errors.Is(err, ErrMuxPoolClosed))
+			if !callerCancelled && !errors.Is(err, ErrMuxDialFailed) {
+				cfg.Metrics.ConnectionError("sender", metrics.ReasonMuxOpenFailed)
+			}
+			logger.Warn("forward failed", "error", err)
+			return fmt.Errorf("open mux stream: %w", err)
+		}
+	}
+
+	return forwardConnectionV1(ctx, conn, target, cfg, bridgeID, logger)
+}
+
+// forwardConnectionV1 is the original per-connection rendezvous path. It
+// is used when mux is disabled by config or when the listener has been
+// observed to not support v2. The caller is expected to have already
+// minted a bridgeID and bound it on logger so logs from this path
+// share the same correlation key.
+func forwardConnectionV1(ctx context.Context, conn net.Conn, target string, cfg PortForwardConfig, bridgeID string, logger *slog.Logger) error {
 	// Per-connection dial budget caps retry duration so a stale
 	// local socket can't keep retrying indefinitely (issue #94).
 	// The bridge below intentionally uses the original ctx, not
@@ -148,7 +327,10 @@ func forwardConnection(ctx context.Context, conn net.Conn, target string, cfg Po
 	return bridgeErr
 }
 
-// sendEnvelopeAndCheck sends a ConnectEnvelope and reads the ConnectResponse.
+// sendEnvelopeAndCheck sends a v1 ConnectEnvelope as a WebSocket text
+// message and reads back the ConnectResponse. v1 uses WS message framing
+// (one envelope per message), so banner-overread is impossible.
+//
 // On a listener-side rejection (ConnectResponse.OK == false), the returned
 // error wraps a *connectRejected carrying both the human-readable message
 // and the machine-readable Code. Callers that need to surface the code to

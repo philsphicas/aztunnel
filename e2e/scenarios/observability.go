@@ -86,6 +86,17 @@ func ScenarioBridgeID_Correlation(t *testing.T, b Backend) {
 		SenderMode:     ModeSOCKS5,
 		AllowedTargets: []string{echo.Addr(), refused},
 		ConnectTimeout: 5 * time.Second,
+		// Pin v1: the per-bridge retry filter (bridgeIDForTarget
+		// requires a per-bridge "relay connected" log to anchor
+		// the canonical bridge_id, see senderLogsWithRetry in
+		// observability_test.go) is a v1-path log shape. On v2
+		// the relay dial fires once per mux session — not per
+		// stream — so "relay connected" never carries the
+		// stream's bridge_id, and bridgeIDForTarget returns ""
+		// for every bridge. The cross-side bridge_id correlation
+		// guarantee itself is identical on v1 and v2; only the
+		// retry-disambiguation mechanism is v1-coupled.
+		NoMux: true,
 	})
 	requireLogs(t, tun)
 
@@ -803,6 +814,16 @@ func ScenarioAcceptID_Saturation(t *testing.T, b Backend) {
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
 		MaxConnections: maxConns,
+		// Pin v1: the test contract is the control-loop's
+		// per-rendezvous accept semaphore ("MaxConnections
+		// drops past N concurrent accepts"). Under mux all N
+		// client TCP connections multiplex over a single mux
+		// session bound to one rendezvous; the listener's
+		// accept semaphore sees one accept regardless of N
+		// and never saturates. v1's per-connection rendezvous
+		// surfaces the accept-saturation events the test
+		// inspects (accept_dropped + reason=semaphore_full).
+		NoMux:          true,
 		SenderMode:     ModePortForward,
 		Target:         echo.Addr(),
 		AllowedTargets: []string{echo.Addr()},

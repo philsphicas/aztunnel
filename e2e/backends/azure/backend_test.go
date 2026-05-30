@@ -212,6 +212,9 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 		listenerArgs = append(listenerArgs, "--connect-timeout",
 			opts.ConnectTimeout.String())
 	}
+	if opts.ListenerRejectMux {
+		listenerArgs = append(listenerArgs, "--reject-mux")
+	}
 
 	spawnListener := func(t testing.TB) *scenarios.Listener {
 		t.Helper()
@@ -229,6 +232,17 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 	}
 
 	senderArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
+	if opts.NoMux {
+		senderArgs = append(senderArgs, "--no-mux")
+	}
+	if opts.MuxSessions > 0 {
+		senderArgs = append(senderArgs, "--mux-sessions",
+			strconv.Itoa(opts.MuxSessions))
+	}
+	if opts.MaxStreamsPerSession > 0 {
+		senderArgs = append(senderArgs, "--max-streams-per-session",
+			strconv.Itoa(opts.MaxStreamsPerSession))
+	}
 
 	listeners := make([]*scenarios.Listener, 0, opts.NumListeners)
 	for i := 0; i < opts.NumListeners; i++ {
@@ -505,6 +519,9 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	for _, target := range opts.AllowedTargets {
 		listenerArgs = append(listenerArgs, "--allow", target)
 	}
+	if opts.ListenerRejectMux {
+		listenerArgs = append(listenerArgs, "--reject-mux")
+	}
 
 	listenerLogs := func() string { return "" }
 	senderLogs := func() string { return "" }
@@ -521,7 +538,11 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	// Sender-side failure: bring up a healthy listener (if asked)
 	// then start the sender with bad creds and observe.
 	if opts.NumListeners > 0 {
-		lp := startListener(t, env, auth, "--metrics-addr", "127.0.0.1:0", "--log-level", "debug")
+		healthyListenerArgs := []string{"--metrics-addr", "127.0.0.1:0", "--log-level", "debug"}
+		if opts.ListenerRejectMux {
+			healthyListenerArgs = append(healthyListenerArgs, "--reject-mux")
+		}
+		lp := startListener(t, env, auth, healthyListenerArgs...)
 		listenerLogs = func() string { return lp.logs.String() }
 		waitForLog(t, lp, "control_started", 30*time.Second)
 	}
@@ -542,27 +563,39 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	// Port-forward or SOCKS5: start sender with bad creds, dial
 	// locally to trigger the relay dial, wait for the failure log.
 	var proc *aztunnelProcess
+	senderExtra := []string{}
+	if opts.NoMux {
+		senderExtra = append(senderExtra, "--no-mux")
+	}
+	if opts.MuxSessions > 0 {
+		senderExtra = append(senderExtra, "--mux-sessions", strconv.Itoa(opts.MuxSessions))
+	}
+	if opts.MaxStreamsPerSession > 0 {
+		senderExtra = append(senderExtra, "--max-streams-per-session", strconv.Itoa(opts.MaxStreamsPerSession))
+	}
 	switch opts.SenderMode {
 	case scenarios.ModePortForward:
 		target := opts.Target
 		if target == "" {
 			target = "127.0.0.1:9999"
 		}
-		proc = startAztunnelWithSAS(t, env, senderSAS,
+		args := append([]string{
 			"relay-sender", "port-forward", target,
 			"--relay", env.relayName,
 			"--hyco", hyco,
 			"--bind", "127.0.0.1:0",
 			"--log-level", "debug",
-		)
+		}, senderExtra...)
+		proc = startAztunnelWithSAS(t, env, senderSAS, args...)
 	case scenarios.ModeSOCKS5:
-		proc = startAztunnelWithSAS(t, env, senderSAS,
+		args := append([]string{
 			"relay-sender", "socks5-proxy",
 			"--relay", env.relayName,
 			"--hyco", hyco,
 			"--bind", "127.0.0.1:0",
 			"--log-level", "debug",
-		)
+		}, senderExtra...)
+		proc = startAztunnelWithSAS(t, env, senderSAS, args...)
 	}
 	senderLogs = func() string { return proc.logs.String() }
 

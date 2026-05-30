@@ -52,6 +52,24 @@ type BindFlags struct {
 	TCPKeepAlive time.Duration `name:"tcp-keepalive" help:"TCP keepalive interval." default:"30s"`
 }
 
+// MuxFlags holds stream-multiplexing flags shared across port-forward and
+// socks5-proxy. When mux is enabled (default), the sender establishes a
+// persistent relay WebSocket *lazily* on the first connection that needs
+// one — that first connection still pays the full ~1-2s rendezvous, and
+// subsequent connections that reuse an already-established mux session
+// are carried as logical smux streams that skip the per-connection
+// rendezvous. When `--mux-sessions > 1` is set and concurrent traffic
+// forces the pool to grow, each additional session is also dialed lazily
+// on its first connection, which pays a rendezvous too.
+// The sender automatically falls back to the v1 path if the listener does
+// not support v2.
+type MuxFlags struct {
+	NoMux                     bool          `name:"no-mux" env:"AZTUNNEL_NO_MUX" help:"Disable stream multiplexing; use a fresh relay rendezvous per connection. Slower but matches older versions exactly."`
+	MuxSessions               int           `name:"mux-sessions" env:"AZTUNNEL_MUX_SESSIONS" help:"Maximum number of persistent relay rendezvous WebSockets to maintain. Larger values may spread concurrent traffic across multiple HA listeners; Azure Relay listener selection is opaque, so empirical testing recommended." default:"2"`
+	MaxStreamsPerSession      int           `name:"max-streams-per-session" env:"AZTUNNEL_MAX_STREAMS_PER_SESSION" help:"Maximum concurrent streams per mux session before back-pressure kicks in. New connections wait for a slot; the port-forward and SOCKS5 paths cap that wait at an internal 60s mux admission timeout, after which the connection is dropped (and aztunnel_mux_pool_saturated_total increments)." default:"256" hidden:""`
+	MuxStreamHandshakeTimeout time.Duration `name:"mux-stream-handshake-timeout" env:"AZTUNNEL_MUX_STREAM_HANDSHAKE_TIMEOUT" help:"Per-stream envelope+response timeout. Must exceed the listener's --connect-timeout because the listener dials the target before writing the response." default:"60s" hidden:""`
+}
+
 // RelaySenderCmd is a grouping command for relay sender subcommands.
 type RelaySenderCmd struct {
 	PortForward PortForwardCmd `cmd:"" name:"port-forward" help:"Forward a local port through the relay to a specific target."`

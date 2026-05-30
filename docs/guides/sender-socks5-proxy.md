@@ -33,6 +33,19 @@ aztunnel relay-sender socks5-proxy \
 The proxy listens on `127.0.0.1:1080` and forwards each connection through
 Azure Relay to the listener, which dials the requested target.
 
+> **Fast connection setup**: connections through the SOCKS5 proxy share a
+> persistent multiplexed relay session, established lazily on the first
+> connection. The first proxied connection still pays the ~1–2 second
+> rendezvous; subsequent connections that reuse an already-established
+> mux session complete in milliseconds (just one smux stream open over
+> the persistent session). With `--mux-sessions > 1`, concurrent SOCKS
+> traffic can lazily grow the pool, and the first connection on each new
+> session pays a rendezvous too. This makes
+> interactive workloads (browser tabs, `kubectl`, bulk `curl`) feel
+> responsive after the first request. See
+> [stream multiplexing](../mux.md) for details and tuning knobs
+> (`--mux-sessions`, `--no-mux`).
+
 ## DNS resolution: `--socks5` vs `--socks5h`
 
 This matters. SOCKS5 clients can resolve DNS **locally** or pass the hostname

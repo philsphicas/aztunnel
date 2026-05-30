@@ -11,6 +11,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/willabides/kongplete v0.4.0
+	github.com/xtaci/smux v1.5.57
 )
 
 require (

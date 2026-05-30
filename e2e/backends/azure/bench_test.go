@@ -21,8 +21,8 @@ import (
 // benchstat name-matching across BASE and HEAD invocations of the
 // benchmark workflow. To exercise these from the repo root:
 //
-//   cd e2e && go test -tags=e2e -run='^$' -bench=. -benchmem \
-//     -count=1 -timeout=60m ./backends/azure/...
+//	cd e2e && go test -tags=e2e -run='^$' -bench=. -benchmem \
+//	  -count=1 -timeout=60m ./backends/azure/...
 //
 // (`make bench` runs only the mock-backend benchmarks; the Azure
 // benchmarks require a real namespace and the invocation above.)
@@ -49,4 +49,35 @@ func BenchmarkE2E_Azure(b *testing.B) {
 		acquireEnv: leaseSharedHyco,
 	}
 	scenarios.RunAllBenchmarks(b, f)
+}
+
+// BenchmarkE2E_Azure_MuxMatrix runs the shared e2e benchmark suite
+// twice — once with the sender's mux pool enabled (v2, the production
+// default) and once with --no-mux (v1, the pre-mux behaviour) — by
+// wrapping the backend with scenarios.WithMuxAxis. This is the
+// Azure-side counterpart to BenchmarkE2E_Mock's matrix run; together
+// they provide an apples-to-apples paired comparison that
+// `benchstat -filter='.name:/v1/'` vs `-filter='.name:/v2/'` can
+// summarise directly.
+//
+// Kept separate from BenchmarkE2E_Azure (which stays single-mode)
+// because the matrix doubles total Azure benchmark wall-clock time
+// and the CI bench workflow's default 60m timeout is already a tight
+// fit for the single-mode run on -benchtime=10x -count=5. Operators
+// who specifically want the mux numbers run this benchmark with a
+// longer timeout or smaller -count; the steady-state CI workflow
+// stays on BenchmarkE2E_Azure.
+//
+// Invocation:
+//
+//	go test -tags=e2e -run='^$' -bench=BenchmarkE2E_Azure_MuxMatrix \
+//	    -benchmem -count=5 -benchtime=10x -timeout=120m ./e2e/...
+func BenchmarkE2E_Azure_MuxMatrix(b *testing.B) {
+	requireProvider(b)
+	name := availableAuthNames(b)[0]
+	f := &azureBackend{
+		axis:       &authAxis{values: []string{name}},
+		acquireEnv: leaseSharedHyco,
+	}
+	scenarios.RunAllBenchmarks(b, scenarios.WithMuxAxis(f))
 }

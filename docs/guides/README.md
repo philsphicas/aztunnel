@@ -54,3 +54,10 @@ walks through the end-to-end setup.
 
 Common questions about aztunnel, including bgtask for background tasks,
 Entra ID vs SAS keys, hybrid connection design, and monitoring.
+
+## Reference
+
+| Page                                   | Description                                                                   |
+| -------------------------------------- | ----------------------------------------------------------------------------- |
+| [Stream multiplexing](../mux.md)       | How port-forward and SOCKS5 reuse one relay WebSocket for many TCP sessions   |
+| [Azure Relay Setup](../azure-setup.md) | Provisioning the relay namespace, hybrid connection, and SAS or Entra ID auth |
