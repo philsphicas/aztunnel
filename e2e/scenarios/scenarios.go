@@ -41,16 +41,6 @@ func RunAllScenarios(t *testing.T, b Backend) {
 	})
 }
 
-// RunAllBenchmarks is the *testing.B mirror of RunAllScenarios:
-// enumerates backend.Axes() once and calls RunBenchmarks inside
-// each cell.
-func RunAllBenchmarks(b *testing.B, backend Backend) {
-	b.Helper()
-	forEachBenchCell(b, backend.Axes(), func(b *testing.B, cell map[string]string) {
-		RunBenchmarks(b, backend.Cell(cell))
-	})
-}
-
 // RunCoreScenarios runs every single-flow e2e scenario against b as a
 // set of sub-tests under the caller's t. New scenarios get added here.
 //

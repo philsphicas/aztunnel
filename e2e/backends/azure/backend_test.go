@@ -41,17 +41,13 @@ import (
 // Listener / Sender accessor closures scrape on demand to satisfy
 // Completed() / Active() reads.
 //
-// Each Setup call acquires a relayEnv via acquireEnv. The two
-// strategies in tree:
+// Each Setup call acquires a relayEnv via acquireEnv:
 //
 //   - requireDedicatedHyco: provisions a fresh (entra, sas) hyco pair
 //     and registers a t.Cleanup that tears it down. Used by
 //     TestE2E_Azure so each scenario gets isolation between
 //     successive Setup calls — and so scenarios that call Setup
 //     twice (e.g. ScenarioErrorPropagation_*) hold disjoint hycos.
-//   - leaseSharedHyco: returns a process-shared, lazily-leased pair
-//     drained at TestMain exit. Used by BenchmarkE2E_Azure so
-//     benchstat runs do not pay per-sub-bench provisioning.
 type azureBackend struct {
 	axis       *authAxis
 	authName   string
@@ -77,7 +73,7 @@ func (a *authAxis) Values() []string { return a.values }
 // over the auth axis once.
 //
 // acquireEnv is fixed by the caller (requireDedicatedHyco for
-// scenario runs, leaseSharedHyco for benchmarks).
+// scenario runs).
 func newAzureBackendFactory(t testing.TB, acquireEnv func(testing.TB) *relayEnv) *azureBackend {
 	return &azureBackend{
 		axis:       &authAxis{values: availableAuthNames(t)},

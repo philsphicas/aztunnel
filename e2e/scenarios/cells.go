@@ -59,52 +59,11 @@ func enumerate(t *testing.T, axes []Axis, acc map[string]string, body func(*test
 	}
 }
 
-// forEachBenchCell mirrors forEachCell for *testing.B. It exists as
-// its own function because *testing.B's Run signature is incompatible
-// with *testing.T's at compile time; the body structure is otherwise
-// identical.
-func forEachBenchCell(b *testing.B, axes []Axis, body func(*testing.B, map[string]string)) {
-	b.Helper()
-	if len(axes) == 0 {
-		body(b, map[string]string{})
-		return
-	}
-	if err := validateAxisNames(axes); err != nil {
-		b.Fatalf("forEachBenchCell: %v", err)
-	}
-	enumerateBench(b, axes, map[string]string{}, body)
-}
-
-func enumerateBench(b *testing.B, axes []Axis, acc map[string]string, body func(*testing.B, map[string]string)) {
-	b.Helper()
-	if len(axes) == 0 {
-		cell := make(map[string]string, len(acc))
-		for k, v := range acc {
-			cell[k] = v
-		}
-		body(b, cell)
-		return
-	}
-	axis := axes[0]
-	values := axis.Values()
-	if len(values) == 0 {
-		b.Fatalf("axis %q has no values", axis.Name())
-	}
-	for _, v := range values {
-		v := v
-		b.Run(v, func(b *testing.B) {
-			acc[axis.Name()] = v
-			enumerateBench(b, axes[1:], acc, body)
-			delete(acc, axis.Name())
-		})
-	}
-}
-
 // validateAxisNames returns an error if any Axis.Name is empty or if
-// two axes share a name. The cell maps used by forEachCell /
-// forEachBenchCell are keyed by Axis.Name, so duplicates would
-// silently overwrite each other and collapse dimensions; empty names
-// produce unreadable cell maps and ambiguous Cell() contracts.
+// two axes share a name. The cell maps used by forEachCell are keyed
+// by Axis.Name, so duplicates would silently overwrite each other and
+// collapse dimensions; empty names produce unreadable cell maps and
+// ambiguous Cell() contracts.
 func validateAxisNames(axes []Axis) error {
 	seen := make(map[string]struct{}, len(axes))
 	for _, a := range axes {

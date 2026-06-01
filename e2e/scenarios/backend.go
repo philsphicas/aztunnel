@@ -57,10 +57,10 @@ type Axis interface {
 // SetupOptions and to tear it down cleanly via t.Cleanup.
 //
 // Setup takes testing.TB rather than *testing.T so the same backend
-// implementation is reachable from both tests (RunCoreScenarios,
-// RunTopologyScenarios) and benchmarks (RunBenchmarks). The only TB
-// methods used are Helper / Fatalf / Logf / Cleanup, all on the
-// shared interface.
+// implementation is reachable from every scenario suite
+// (RunCoreScenarios, RunTopologyScenarios, ...). The only TB methods
+// used are Helper / Fatalf / Logf / Cleanup, all on the shared
+// interface.
 type Backend interface {
 	// Name identifies the backend (e.g. "mock", "azure"). The harness
 	// does not embed it in sub-test paths — axis values fill that

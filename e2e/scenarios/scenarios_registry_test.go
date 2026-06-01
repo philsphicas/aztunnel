@@ -6,7 +6,7 @@ import (
 )
 
 // TestScenarioCases_RegistryShape asserts every Run*Scenarios
-// registry passes the same invariants as the bench registry:
+// registry holds the shared invariants:
 //
 //   - non-empty
 //   - no duplicate names within a registry
@@ -121,7 +121,7 @@ func TestScenarioCases_MockOnlyScopes(t *testing.T) {
 	} {
 		for _, sc := range cases {
 			if sc.scope == MockOnly {
-				t.Errorf("unexpected scope=MockOnly scenario %q in suite=%q — bench cases may be MockOnly (see benchmarkCases()) but scenarios should be either AnyBackend or AzureOnly",
+				t.Errorf("unexpected scope=MockOnly scenario %q in suite=%q — scenarios should be either AnyBackend or AzureOnly",
 					sc.name, suite)
 			}
 		}

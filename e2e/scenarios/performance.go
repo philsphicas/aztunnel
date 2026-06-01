@@ -15,10 +15,9 @@ import (
 )
 
 // RunPerformanceScenarios runs the timing-assertion scenarios
-// against b as sub-tests under the caller's t. These complement
-// the testing.B benchmarks in bench.go: same shape of work, but
-// expressed as testing.T so CI fails when wall time exceeds the
-// per-backend threshold.
+// against b as sub-tests under the caller's t. They express
+// connection-setup and short-session work as testing.T so CI fails
+// when wall time exceeds the per-backend threshold.
 //
 // Two scenarios assert per-iteration time against
 // ConnectLatencyThreshold; ShortSession_Serial is observation-only.
@@ -427,7 +426,7 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 func timeOneConnect(senderAddr, target string, mode SenderMode, payload, buf []byte, threshold time.Duration) (time.Duration, error) {
 	const connectSlack = 5 * time.Second
 	start := time.Now()
-	conn, err := benchDial(senderAddr, target, mode, threshold+connectSlack)
+	conn, err := dialSender(senderAddr, target, mode, threshold+connectSlack)
 	if err != nil {
 		return time.Since(start), err
 	}
@@ -448,6 +447,20 @@ func timeOneConnect(senderAddr, target string, mode SenderMode, payload, buf []b
 		return time.Since(start), err
 	}
 	return time.Since(start), nil
+}
+
+// dialSender opens a connection to the sender bind for the given mode.
+// For SOCKS5 it performs the CONNECT handshake to the supplied target;
+// for port-forward it returns the raw TCP connection.
+func dialSender(senderAddr, target string, mode SenderMode, timeout time.Duration) (net.Conn, error) {
+	switch mode {
+	case ModePortForward:
+		return net.DialTimeout("tcp", senderAddr, timeout)
+	case ModeSOCKS5:
+		return DialSOCKS5(senderAddr, target, timeout)
+	default:
+		return nil, fmt.Errorf("unknown SenderMode %v", mode)
+	}
 }
 
 // ============================================================================

@@ -5,14 +5,14 @@ import (
 	"testing"
 )
 
-// BackendScope restricts a registered case (scenario or benchmark) to
-// a subset of backends. Out-of-scope cases are skipped via t.Skipf /
-// b.Skipf at registration time so the scope decision is visible in
-// the test output rather than hidden in an inline `if b.Name() != "x"`
-// inside the case body.
+// BackendScope restricts a registered scenario to a subset of
+// backends. Out-of-scope cases are skipped via t.Skipf at
+// registration time so the scope decision is visible in the test
+// output rather than hidden in an inline `if b.Name() != "x"` inside
+// the case body.
 //
-// The same enum drives the bench registry (benchCase in bench.go) and
-// the scenario registries (scenarioCase below, used by Run*Scenarios).
+// The enum drives the scenario registries (scenarioCase below, used
+// by Run*Scenarios).
 type BackendScope int
 
 const (
@@ -66,7 +66,7 @@ func (s BackendScope) String() string {
 // scope restricts which backends run this case; out-of-scope
 // invocations are skipped via t.Skipf with `reason` rendered.
 // reason is required for non-AnyBackend scopes; ignored otherwise
-// (the bench/scenario registry pin tests enforce both invariants).
+// (the scenario registry pin tests enforce both invariants).
 type scenarioCase struct {
 	name   string
 	scope  BackendScope

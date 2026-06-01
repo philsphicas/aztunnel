@@ -60,7 +60,6 @@ exercised against Azure Relay.
   including the composable auth + delay matrix (`NewMatrixBackend`).
 - `e2e_test.go` — `TestE2E_Mock`, runs `scenarios.RunAllScenarios`.
 - `env_test.go` — parses `E2E_AUTH` / `E2E_DELAY` into the matrix backend.
-- `bench_test.go` — `BenchmarkE2E_Mock`, runs `scenarios.RunAllBenchmarks`.
 - `emulates_test.go` — `TestMockEmulates_*` tests asserting wire-level parity
   with Azure on specific scenarios.
 - `entracred.go` / `entracred_test.go` — the fake Entra credential and the

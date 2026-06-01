@@ -94,9 +94,8 @@ See `e2e/backends/mock/README.md` for mock (no setup; runs anywhere Go runs).
 
 - `e2e/scenarios/backend.go` defines the `Backend`, `Tunnel`, `Listener`,
   `Sender`, and `SetupOptions` types every scenario writes against.
-- `e2e/scenarios/scenarios.go` is the entry point: `RunAllScenarios(t, b)` and
-  `RunAllBenchmarks(b, backend)` iterate every scenario across the backend's
-  `Axes()`.
+- `e2e/scenarios/scenarios.go` is the entry point: `RunAllScenarios(t, b)`
+  iterates every scenario across the backend's `Axes()`.
 - `e2e/azrelay/` is the per-test hyco provisioner used by the Azure backend.
   CI calls it from `azure_backend_test.go`; setup commands call it from
   `e2e/infra/`.

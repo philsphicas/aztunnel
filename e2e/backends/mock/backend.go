@@ -53,16 +53,16 @@ const (
 // Azure conformance matrix and runs in the default
 // `go test ./mockrelay/...` job.
 //
-// The zero value runs SAS-only with no axis layer (what bench_test.go
-// wants). Construct via NewMatrixBackend to fan over the {sas, entra}
-// auth axis and/or a delay-profile axis, mirroring the Azure backend's
-// matrix.
+// The zero value runs SAS-only with no axis layer (what directly-
+// constructed callers want). Construct via NewMatrixBackend to fan
+// over the {sas, entra} auth axis and/or a delay-profile axis,
+// mirroring the Azure backend's matrix.
 type MockBackend struct {
 	// DelayProfile parameterizes the synthetic per-step sleeps the
 	// mock relay applies on every leg of the rendezvous protocol.
 	// The zero DelayProfile (i.e., the zero value of MockBackend)
 	// means no synthetic delay: rendezvous completes in the
-	// in-process baseline (~6 ms), which is what bench_test.go wants.
+	// in-process baseline (~6 ms).
 	//
 	// For e2e suites whose timing thresholds were calibrated against
 	// Azure Relay (e.g. e2e_test.go), set DelayProfile explicitly to
@@ -84,7 +84,7 @@ type MockBackend struct {
 	// / DelayProfile and carries a nil axis, so it adds no sub-test
 	// layer. A directly-constructed MockBackend{...} has both nil and
 	// therefore no axes, so the historical pinned usage (features_test,
-	// entracred_test, bench_test) is unchanged.
+	// entracred_test) is unchanged.
 	authAxis  *namedAxis
 	delayAxis *namedAxis
 }

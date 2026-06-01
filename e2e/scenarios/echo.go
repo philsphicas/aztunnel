@@ -28,8 +28,8 @@ type PlainEcho struct {
 // StartPlainEcho starts a plain echo server on a free localhost port.
 // It is stopped by t.Cleanup.
 //
-// Accepts testing.TB so it is callable from both *testing.T scenarios
-// and *testing.B benchmarks. Only Cleanup / Helper / Fatalf are used.
+// Accepts testing.TB so it is callable from every scenario suite.
+// Only Cleanup / Helper / Fatalf are used.
 func StartPlainEcho(t testing.TB) *PlainEcho {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

@@ -199,12 +199,6 @@ func testMain(m *testing.M) int {
 	fmt.Fprintf(os.Stderr, "==> e2e: run rules ready (listener=%s, sender=%s)\n",
 		rr.ListenerName, rr.SenderName)
 
-	// Drain the shared bench hyco lease on every exit path, including
-	// panics that the testing framework recovers from. The permanent
-	// SAS rules are not torn down here (they outlive the test
-	// invocation), so this is the only TestMain-level cleanup defer.
-	defer drainBenchLease()
-
 	cfg.RunRules = rr
 	p, err := azrelay.NewProvider(cfg)
 	if err != nil {
