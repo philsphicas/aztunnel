@@ -188,8 +188,8 @@ func requireDedicatedHyco(t testing.TB) *relayEnv {
 // resultToEnv converts an azrelay.Result (the per-pair metadata
 // returned by Provider.Provision) into the legacy *relayEnv shape
 // the existing helpers (startListener, startPortForwardSender, ...)
-// take. Shared by requireDedicatedHyco and leaseSharedHyco so the
-// field mapping cannot drift between the two acquisition paths.
+// take. Used by requireDedicatedHyco to map provisioned pair fields
+// into the env consumed by the rest of the suite.
 func resultToEnv(r *azrelay.Result) *relayEnv {
 	return &relayEnv{
 		relayName:          r.RelayName,
@@ -202,89 +202,11 @@ func resultToEnv(r *azrelay.Result) *relayEnv {
 	}
 }
 
-// benchLease holds the single process-wide hyco pair leased on the
-// first leaseSharedHyco call. drainBenchLease releases it after
-// m.Run returns. Concurrent leaseSharedHyco callers are serialised
-// by the mutex; in practice b.Run sub-benches inside a single
-// BenchmarkE2E_Azure run sequentially so the lock is uncontended
-// past the first call.
-var (
-	benchLeaseMu  sync.Mutex
-	benchLeaseEnv *relayEnv
-	benchLeaseTok *azrelay.PairToken
-	benchLeaseErr error
-)
-
-// leaseSharedHyco returns a process-shared (entra, sas) hyco pair
-// suitable for sub-benches that should NOT pay per-Setup provisioning
-// cost. The first call provisions the pair via the same Provider used
-// by requireDedicatedHyco; subsequent calls return the cached env.
-// drainBenchLease (called from testMain after m.Run) tears it down.
-//
-// Errors from the first Provision are sticky: every subsequent call
-// in the same process re-fatals with the cached error so retry loops
-// inside the bench framework do not silently mask a control-plane
-// failure that already burned wall-clock budget.
-//
-// Not registered with t.Cleanup — the lease is intentionally process-
-// scoped, not test-scoped, so multiple b.Run sub-benches can share
-// it. Safe to call from any benchmark goroutine.
-func leaseSharedHyco(tb testing.TB) *relayEnv {
-	tb.Helper()
-	p := requireProvider(tb)
-
-	benchLeaseMu.Lock()
-	defer benchLeaseMu.Unlock()
-
-	if benchLeaseEnv != nil {
-		return benchLeaseEnv
-	}
-	if benchLeaseErr != nil {
-		tb.Fatalf("lease shared bench hyco pair (cached error): %v", benchLeaseErr)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), hycoProvisionTimeout)
-	defer cancel()
-	tok, err := p.Provision(ctx)
-	if err != nil {
-		benchLeaseErr = err
-		tb.Fatalf("provision shared bench hyco pair: %v", err)
-	}
-	entra, sas := tok.HycoNames()
-	tb.Logf("leased shared bench hyco %s", hycoLabel(entra, sas))
-	benchLeaseTok = tok
-	benchLeaseEnv = resultToEnv(tok.Result())
-	return benchLeaseEnv
-}
-
-// drainBenchLease tears down the shared bench hyco pair, if any.
-// Called from testMain via defer after m.Run() so the lease is
-// released on every exit path including panics that the testing
-// framework recovers from. No-op when no benchmark called
-// leaseSharedHyco. Failures are logged to stderr — the janitor will
-// reap anything we leak, and the process is already exiting so
-// failing it on cleanup would provide no extra signal.
-func drainBenchLease() {
-	benchLeaseMu.Lock()
-	defer benchLeaseMu.Unlock()
-	if benchLeaseTok == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), hycoTeardownTimeout)
-	defer cancel()
-	tok := benchLeaseTok
-	benchLeaseTok = nil
-	entra, sas := tok.HycoNames()
-	if err := tok.Teardown(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "==> e2e: teardown shared bench hyco %s: %v\n", hycoLabel(entra, sas), err)
-	}
-}
-
 // availableAuthNames returns the auth method names to exercise based
 // on the E2E_AUTH filter, without binding to a specific env. Used by
 // callers that pick an authConfig only AFTER provisioning a fresh
-// hyco pair (e.g. TestE2E_Azure / BenchmarkE2E_Azure, which
-// build authConfig inside Backend.Setup via authFromEnv).
+// hyco pair (e.g. TestE2E_Azure, which builds authConfig inside
+// Backend.Setup via authFromEnv).
 //
 // Returns ["entra", "sas"] when E2E_AUTH is empty, ["entra"] when
 // E2E_AUTH=entra, ["sas"] when E2E_AUTH=sas. Any other value fails
