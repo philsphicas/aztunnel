@@ -81,6 +81,9 @@ func performanceCases() []scenarioCase {
 		// Real-usage workload shapes (customer fan-out).
 		{name: "Parallel_AsymmetricRespond_SOCKS5_FanOut", scope: AnyBackend, run: ScenarioParallel_AsymmetricRespond_SOCKS5_FanOut},
 		{name: "Parallel_ConnPerRequest_SOCKS5_DistinctTargets_N32", scope: AnyBackend, run: ScenarioParallel_ConnPerRequest_SOCKS5_DistinctTargets_N32},
+		// Streaming workload shapes (server-paced trickle).
+		{name: "Stream_Trickle_SOCKS5_FanOut", scope: AnyBackend, run: ScenarioStream_Trickle_SOCKS5_FanOut},
+		{name: "Stream_ConcurrentTrickle_SOCKS5_DistinctTargets", scope: AnyBackend, run: ScenarioStream_ConcurrentTrickle_SOCKS5_DistinctTargets},
 	}
 }
 
@@ -1324,6 +1327,54 @@ func ScenarioParallel_ConnPerRequest_SOCKS5_DistinctTargets_N32(t *testing.T, b 
 		RequestsPerConn: 1,
 		ReqSize:         1024, RespSize: 1024,
 		Mode: ModeSOCKS5, NumTargets: DistinctTargetFanOut,
+	})
+}
+
+// ----------------------------------------------------------------------------
+// Streaming workload shapes (server-paced trickle: gNMI-subscribe-like)
+// ----------------------------------------------------------------------------
+
+// Trickle shape constants size the long-lived streaming scenarios. 50
+// chunks of 4 KiB spaced 20 ms apart models a steady gNMI-subscribe-style
+// telemetry feed: a 1-second stream of small, regularly-paced updates.
+const (
+	TrickleChunks       = 50
+	TrickleGap          = 20 * time.Millisecond
+	TrickleChunkBytes   = 4 << 10
+	StreamFanOutTargets = 4
+	StreamFanOutWidth   = 8
+)
+
+// ScenarioStream_Trickle_SOCKS5_FanOut drives the server-paced trickle
+// shape: 8 concurrent long-lived streams fan out over 4 SOCKS5 targets,
+// each receiving 50 chunks of 4 KiB paced 20 ms apart. A start barrier
+// releases every stream simultaneously (after all have connected) so the
+// reported start latency, inter-chunk jitter, and completion fairness
+// reflect steady-state behavior under concurrent load rather than dial
+// ordering. Reports the streaming metric family, not RTT.
+func ScenarioStream_Trickle_SOCKS5_FanOut(t *testing.T, b Backend) {
+	runStreamWorkload(t, b, StreamShape{
+		Streams:          StreamFanOutWidth,
+		NumTargets:       StreamFanOutTargets,
+		TrickleInterval:  TrickleGap,
+		TrickleChunkSize: TrickleChunkBytes,
+		StreamChunks:     TrickleChunks,
+		Mode:             ModeSOCKS5,
+	})
+}
+
+// ScenarioStream_ConcurrentTrickle_SOCKS5_DistinctTargets runs one stream
+// per distinct target (8 streams, 8 targets), isolating cross-stream
+// fairness when no two streams share a downstream device. Same trickle
+// pacing as the fan-out variant.
+func ScenarioStream_ConcurrentTrickle_SOCKS5_DistinctTargets(t *testing.T, b Backend) {
+	runStreamWorkload(t, b, StreamShape{
+		Streams:          StreamFanOutWidth,
+		NumTargets:       StreamFanOutWidth,
+		TrickleInterval:  TrickleGap,
+		TrickleChunkSize: TrickleChunkBytes,
+		StreamChunks:     TrickleChunks,
+		Mode:             ModeSOCKS5,
 	})
 }
 

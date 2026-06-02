@@ -56,22 +56,49 @@ const wantSchema = "perfmatrix/v1"
 // duplicated on purpose: the JSONL artifact is the boundary, so the
 // reporter does not import the e2e scenarios package.
 type record struct {
-	Type      string            `json:"type"`
-	Schema    string            `json:"schema"`
-	Run       string            `json:"run,omitempty"`
-	Backend   string            `json:"backend"`
-	Axis      string            `json:"axis"`
-	Axes      map[string]string `json:"axes,omitempty"`
-	Scenario  string            `json:"scenario"`
-	Mode      string            `json:"mode"`
-	ColdP50Ns *int64            `json:"cold_p50_ns"`
-	WarmP50Ns *int64            `json:"warm_p50_ns"`
-	WarmP95Ns *int64            `json:"warm_p95_ns"`
-	ColdN     int               `json:"cold_n"`
-	WarmN     int               `json:"warm_n"`
-	SuccessN  int               `json:"success_n"`
-	AttemptN  int               `json:"attempt_n"`
-	WallNs    int64             `json:"wall_ns"`
+	Type     string            `json:"type"`
+	Schema   string            `json:"schema"`
+	Run      string            `json:"run,omitempty"`
+	Backend  string            `json:"backend"`
+	Axis     string            `json:"axis"`
+	Axes     map[string]string `json:"axes,omitempty"`
+	Scenario string            `json:"scenario"`
+	Mode     string            `json:"mode"`
+	// MetricFamily is "" (legacy RTT family) or "stream". Streaming rows
+	// leave the RTT fields null and carry the streaming fields below.
+	MetricFamily string `json:"metric_family,omitempty"`
+	ColdP50Ns    *int64 `json:"cold_p50_ns"`
+	WarmP50Ns    *int64 `json:"warm_p50_ns"`
+	WarmP95Ns    *int64 `json:"warm_p95_ns"`
+	ColdN        int    `json:"cold_n"`
+	WarmN        int    `json:"warm_n"`
+	SuccessN     int    `json:"success_n"`
+	AttemptN     int    `json:"attempt_n"`
+	WallNs       int64  `json:"wall_ns"`
+
+	// Streaming family (metric_family == "stream").
+	TTFBP50Ns          *int64 `json:"ttfb_p50_ns,omitempty"`
+	TTFBP95Ns          *int64 `json:"ttfb_p95_ns,omitempty"`
+	GapP95Ns           *int64 `json:"gap_p95_ns,omitempty"`
+	MaxStreamGapP95Ns  *int64 `json:"max_stream_gap_p95_ns,omitempty"`
+	MaxGapNs           *int64 `json:"max_gap_ns,omitempty"`
+	FinalChunkSpreadNs *int64 `json:"final_chunk_spread_ns,omitempty"`
+	CompletionSpreadNs *int64 `json:"completion_spread_ns,omitempty"`
+	GoodputBytesPerSec *int64 `json:"goodput_bytes_per_sec,omitempty"`
+	StreamN            int    `json:"stream_n,omitempty"`
+}
+
+// streamFamily is the metric_family value for streaming rows; the rtt
+// family is the empty string. recFamily normalizes the two so identity
+// keys and gating never confuse the families (an empty value from a
+// legacy v1 artifact is the rtt family).
+const streamFamily = "stream"
+
+func recFamily(r record) string {
+	if r.MetricFamily == "" {
+		return "rtt"
+	}
+	return r.MetricFamily
 }
 
 // runMeta is the "run" header record (one per source file). The reporter
@@ -130,16 +157,44 @@ func main() {
 		if _, ok := fm[*compareBy]; ok {
 			fail(fmt.Errorf("cannot filter on the compared dimension %q while --compare-by %q is set", *compareBy, *compareBy))
 		}
-		gs, err := renderCompare(os.Stdout, recs, *compareBy, base, cand)
-		if err != nil {
-			// A gate run with nothing to compare yet (e.g. the first ever
-			// nightly, before a baseline exists) is a skip, not a failure.
-			if *failOver > 0 && errors.Is(err, errNotEnoughRuns) {
-				fmt.Fprintf(os.Stderr, "perf-gate: %v — nothing to compare yet (skipping)\n", err)
+		// Compare each metric family independently: filtering, a stream-only
+		// artifact, or a mid-migration history can leave one family with too
+		// few runs while the other has a real comparison to gate. Attempt
+		// both before deciding to skip, so a streaming regression is never
+		// silently dropped because the RTT side happened to be sparse.
+		gs, rttErr := renderCompare(os.Stdout, recs, *compareBy, base, cand)
+		sgs, streamErr := renderStreamCompare(os.Stdout, recs, *compareBy, base, cand)
+
+		// errNotEnoughRuns / errNoStreamRows mean "nothing to compare yet"
+		// for that family — skippable. Any other error is fatal.
+		rttSkippable := rttErr != nil && errors.Is(rttErr, errNotEnoughRuns)
+		streamSkippable := streamErr != nil && (errors.Is(streamErr, errNoStreamRows) || errors.Is(streamErr, errNotEnoughRuns))
+		if rttErr != nil && !rttSkippable {
+			fail(rttErr)
+		}
+		if streamErr != nil && !streamSkippable {
+			fail(streamErr)
+		}
+
+		// Merge the streaming accounting into the shared gateStats only when
+		// the streaming comparison actually ran.
+		if streamErr == nil {
+			gs.streamPaired = sgs.streamPaired
+			gs.streamComparable = sgs.streamComparable
+			gs.streamRegressions = sgs.streamRegressions
+			gs.missingInCand = append(gs.missingInCand, sgs.missingInCand...)
+		}
+
+		// Neither family produced a comparison: a bootstrap gate run skips
+		// (exit 0); a plain compare surfaces the error.
+		if rttErr != nil && streamErr != nil {
+			if *failOver > 0 {
+				fmt.Fprintf(os.Stderr, "perf-gate: nothing to compare yet (skipping) — rtt: %v; stream: %v\n", rttErr, streamErr)
 				return
 			}
-			fail(err)
+			fail(rttErr)
 		}
+
 		if *failOver > 0 {
 			applyGate(gs, *failOver, *failMinAbs)
 		}
@@ -495,7 +550,7 @@ func canonicalAxesExcept(r record, skip string) string {
 // cellKey, which is how before/after comparison and latest-per-cell
 // collapsing match rows across runs.
 func cellKey(r record) string {
-	return r.Backend + "\x00" + canonicalAxes(r) + "\x00" + r.Scenario + "\x00" + r.Mode
+	return recFamily(r) + "\x00" + r.Backend + "\x00" + canonicalAxes(r) + "\x00" + r.Scenario + "\x00" + r.Mode
 }
 
 // distinctRuns returns the sorted-descending set of run ids present, so
@@ -584,7 +639,7 @@ func residualKey(r record, dim string) string {
 	case "run":
 		run = ""
 	}
-	return backend + "\x00" + canonicalAxesExcept(r, dim) + "\x00" + scenario + "\x00" + mode + "\x00" + run
+	return recFamily(r) + "\x00" + backend + "\x00" + canonicalAxesExcept(r, dim) + "\x00" + scenario + "\x00" + mode + "\x00" + run
 }
 
 // distinctDimValues returns the sorted-ascending set of non-empty values a
@@ -684,6 +739,31 @@ func sortRecs(recs []record) {
 }
 
 func renderTable(w io.Writer, recs []record) error {
+	var rtt, stream []record
+	for _, r := range recs {
+		if recFamily(r) == streamFamily {
+			stream = append(stream, r)
+		} else {
+			rtt = append(rtt, r)
+		}
+	}
+	if len(rtt) > 0 {
+		if err := renderRTTTable(w, rtt); err != nil {
+			return err
+		}
+	}
+	if len(stream) > 0 {
+		if len(rtt) > 0 {
+			_, _ = fmt.Fprintln(w)
+		}
+		if err := renderStreamReportTable(w, stream); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderRTTTable(w io.Writer, recs []record) error {
 	sortRecs(recs)
 	cols := axisColumns(recs)
 	warnMixedAxisKeys(w, recs, cols)
@@ -727,6 +807,60 @@ func renderTable(w io.Writer, recs []record) error {
 	return tw.Flush()
 }
 
+// renderStreamReportTable renders the streaming-family rows: start
+// latency, inter-chunk jitter, fairness spread, and goodput.
+func renderStreamReportTable(w io.Writer, recs []record) error {
+	sortRecs(recs)
+	cols := axisColumns(recs)
+	warnMixedAxisKeys(w, recs, cols)
+	showRun := len(distinctRuns(recs)) >= 2
+	_, _ = fmt.Fprintln(w, "PERF MATRIX (streaming; ttfb = first-chunk latency, spread = max−min across streams)")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+
+	header := []string{"backend"}
+	if len(cols) == 0 {
+		header = append(header, "axis")
+	} else {
+		header = append(header, cols...)
+	}
+	if showRun {
+		header = append(header, "run")
+	}
+	header = append(header, "scenario", "mode", "ttfb_p50", "ttfb_p95", "gap_p95", "max_gap", "final_spread", "goodput_KiB/s", "success", "wall")
+	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
+
+	for _, r := range recs {
+		cells := []string{dash(r.Backend)}
+		if len(cols) == 0 {
+			cells = append(cells, dash(r.Axis))
+		} else {
+			for _, k := range cols {
+				cells = append(cells, dash(r.Axes[k]))
+			}
+		}
+		if showRun {
+			cells = append(cells, dash(r.Run))
+		}
+		cells = append(cells,
+			r.Scenario, dash(r.Mode),
+			durOrDash(r.TTFBP50Ns), durOrDash(r.TTFBP95Ns), durOrDash(r.GapP95Ns),
+			durOrDash(r.MaxGapNs), durOrDash(r.FinalChunkSpreadNs),
+			goodputCell(r.GoodputBytesPerSec),
+			fmt.Sprintf("%d/%d", r.SuccessN, r.AttemptN), dur(r.WallNs),
+		)
+		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
+	}
+	return tw.Flush()
+}
+
+// goodputCell renders bytes/sec as KiB/s, or "-" when unmeasured.
+func goodputCell(bps *int64) string {
+	if bps == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.1f", float64(*bps)/1024)
+}
+
 // regression is one positive warm/cold p50 delta for a single cell, used
 // by the --fail-over gate. pct is the percent slowdown; absNs the absolute
 // p50 increase in nanoseconds.
@@ -738,11 +872,40 @@ type regression struct {
 
 // gateStats summarises a comparison for the --fail-over gate: how many
 // cells paired on both sides, which baseline cells the candidate dropped,
-// and every warm/cold p50 regression observed.
+// and every warm/cold p50 regression observed. The stream* fields carry
+// the streaming family's parallel accounting so the gate can fail
+// per-family (e.g. a stream comparison that paired cells but produced no
+// comparable streaming metric must not silently pass).
 type gateStats struct {
 	paired        int
 	missingInCand []string
 	regressions   []regression
+
+	streamPaired      int
+	streamComparable  int
+	streamRegressions []streamRegression
+}
+
+// streamRegression is one positive absolute increase of a gated streaming
+// metric (ttfb_p95 or final_chunk_spread) for a single cell. Streaming
+// metrics are gated on absolute deltas, not percentages, because an
+// injected trickle interval inflates the percentage denominator and would
+// hide an absolute fairness/latency regression.
+type streamRegression struct {
+	label string
+	absNs int64
+}
+
+// filterFamily returns the records whose normalized metric family equals
+// want ("rtt" or "stream").
+func filterFamily(recs []record, want string) []record {
+	out := make([]record, 0, len(recs))
+	for _, r := range recs {
+		if recFamily(r) == want {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // regressionPct returns the percent and absolute slowdown of cand over
@@ -782,6 +945,10 @@ func cellLabel(r record) string {
 // returned.
 func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (gateStats, error) {
 	var gs gateStats
+	// The rtt compare table only handles the RTT metric family; streaming
+	// rows are compared separately by renderStreamCompare with their own
+	// columns and gate.
+	recs = filterFamily(recs, "rtt")
 	base, err := resolveDimValue(dim, baseSel, recs)
 	if err != nil {
 		return gs, fmt.Errorf("baseline %q: %w", baseSel, err)
@@ -918,12 +1085,194 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 	return gs, nil
 }
 
+// errNoStreamRows signals that a comparison input carried no streaming
+// rows at all, so the streaming comparison is a clean no-op (not a gate
+// failure). The caller skips streaming when it sees this.
+var errNoStreamRows = errors.New("no streaming rows present")
+
+// renderStreamCompare matches streaming-family cells across two values of
+// a dimension and prints the streaming metrics side by side. It populates
+// the stream* fields of gateStats: streamPaired (cells matched on both
+// sides), streamComparable (paired cells with at least one gated metric
+// present on both sides), and streamRegressions (absolute increases of the
+// gated metrics ttfb_p95 and final_chunk_spread). Streaming metrics are
+// compared on absolute deltas, so an injected trickle interval can't
+// dilute a regression the way a percentage denominator would.
+func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (gateStats, error) {
+	var gs gateStats
+	recs = filterFamily(recs, streamFamily)
+	if len(recs) == 0 {
+		return gs, errNoStreamRows
+	}
+	base, err := resolveDimValue(dim, baseSel, recs)
+	if err != nil {
+		return gs, fmt.Errorf("baseline %q: %w", baseSel, err)
+	}
+	cand, err := resolveDimValue(dim, candSel, recs)
+	if err != nil {
+		return gs, fmt.Errorf("candidate %q: %w", candSel, err)
+	}
+	if base == cand {
+		return gs, fmt.Errorf("baseline and candidate resolve to the same %s %q", dim, base)
+	}
+
+	baseByCell := map[string]record{}
+	candByCell := map[string]record{}
+	cellOrder := []record{}
+	seen := map[string]bool{}
+	for _, r := range recs {
+		v, ok := dimValue(r, dim)
+		if !ok || (v != base && v != cand) {
+			continue
+		}
+		k := residualKey(r, dim)
+		if v == base {
+			baseByCell[k] = r
+		} else {
+			candByCell[k] = r
+		}
+		if !seen[k] {
+			seen[k] = true
+			cellOrder = append(cellOrder, r)
+		}
+	}
+	for k, br := range baseByCell {
+		if _, ok := candByCell[k]; ok {
+			gs.streamPaired++
+		} else {
+			gs.missingInCand = append(gs.missingInCand, cellLabel(br))
+		}
+	}
+
+	sortRecs(cellOrder)
+	cols := axisColumns(cellOrder)
+	namedAxes := len(cols) > 0
+	if isAxisDim(dim) {
+		cols = removeStr(cols, dim)
+	}
+	showBackend := dim != "backend"
+	showScenario := dim != "scenario"
+	showMode := dim != "mode"
+	showRun := dim != "run" && len(distinctRuns(cellOrder)) > 1
+
+	_, _ = fmt.Fprintf(w, "PERF COMPARE (streaming)  %s: baseline=%s  candidate=%s  (Δ = candidate−baseline; negative is faster/tighter)\n", dim, base, cand)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	var header []string
+	if showBackend {
+		header = append(header, "backend")
+	}
+	if namedAxes {
+		header = append(header, cols...)
+	} else if dim != "axis" {
+		header = append(header, "axis")
+	}
+	if showRun {
+		header = append(header, "run")
+	}
+	if showScenario {
+		header = append(header, "scenario")
+	}
+	if showMode {
+		header = append(header, "mode")
+	}
+	header = append(header,
+		"ttfb_p95_base", "ttfb_p95_cand", "ttfb_p95_Δ",
+		"finalspread_base", "finalspread_cand", "finalspread_Δ",
+		"goodput_base", "goodput_cand")
+	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
+
+	for _, c := range cellOrder {
+		k := residualKey(c, dim)
+		b, bok := baseByCell[k]
+		n, nok := candByCell[k]
+		var cells []string
+		if showBackend {
+			cells = append(cells, dash(c.Backend))
+		}
+		if namedAxes {
+			for _, key := range cols {
+				cells = append(cells, dash(c.Axes[key]))
+			}
+		} else if dim != "axis" {
+			cells = append(cells, dash(c.Axis))
+		}
+		if showRun {
+			cells = append(cells, dash(c.Run))
+		}
+		if showScenario {
+			cells = append(cells, c.Scenario)
+		}
+		if showMode {
+			cells = append(cells, dash(c.Mode))
+		}
+		bTTFB, nTTFB := ptrIf(bok, b.TTFBP95Ns), ptrIf(nok, n.TTFBP95Ns)
+		bSpread, nSpread := ptrIf(bok, b.FinalChunkSpreadNs), ptrIf(nok, n.FinalChunkSpreadNs)
+		cells = append(cells, absCompareTriplet(bTTFB, nTTFB)...)
+		cells = append(cells, absCompareTriplet(bSpread, nSpread)...)
+		cells = append(cells, goodputCell(ptrIf(bok, b.GoodputBytesPerSec)), goodputCell(ptrIf(nok, n.GoodputBytesPerSec)))
+		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
+
+		if bok && nok {
+			comparable := false
+			if abs, ok := absRegression(bTTFB, nTTFB); ok {
+				gs.streamRegressions = append(gs.streamRegressions, streamRegression{cellLabel(c) + " ttfb_p95", abs})
+			}
+			if bTTFB != nil && nTTFB != nil {
+				comparable = true
+			}
+			if abs, ok := absRegression(bSpread, nSpread); ok {
+				gs.streamRegressions = append(gs.streamRegressions, streamRegression{cellLabel(c) + " final_chunk_spread", abs})
+			}
+			if bSpread != nil && nSpread != nil {
+				comparable = true
+			}
+			if comparable {
+				gs.streamComparable++
+			}
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return gs, err
+	}
+	return gs, nil
+}
+
+// absRegression returns the absolute positive increase of cand over base,
+// with ok=true only when both are present and cand is actually larger (a
+// tighter/faster candidate is not a regression).
+func absRegression(base, cand *int64) (absNs int64, ok bool) {
+	if base == nil || cand == nil {
+		return 0, false
+	}
+	d := *cand - *base
+	if d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+// absCompareTriplet renders base, candidate, and the signed absolute delta
+// (as a duration) for one streaming metric.
+func absCompareTriplet(base, cand *int64) []string {
+	bc, cc := durOrDash(base), durOrDash(cand)
+	if base == nil || cand == nil {
+		return []string{bc, cc, "-"}
+	}
+	d := *cand - *base
+	sign := "+"
+	if d < 0 {
+		sign = "-"
+		d = -d
+	}
+	return []string{bc, cc, sign + dur(d)}
+}
+
 // gateVerdict is the pure decision behind applyGate: it returns the worst
 // warm/cold p50 regression that breaches BOTH the percent threshold and
 // the absolute floor (nil when none do), or an error when the comparison
 // paired no cells (the gate must never silently pass on nothing).
 func gateVerdict(gs gateStats, failOverPct float64, floor time.Duration) (*regression, error) {
-	if gs.paired == 0 {
+	if gs.paired == 0 && gs.streamPaired == 0 {
 		return nil, errors.New("no cells paired across baseline and candidate — nothing was compared")
 	}
 	var worst *regression
@@ -938,7 +1287,41 @@ func gateVerdict(gs gateStats, failOverPct float64, floor time.Duration) (*regre
 	return worst, nil
 }
 
-// applyGate enforces the --fail-over regression gate after a comparison.
+// streamGateFloorMin is the minimum absolute floor for the streaming gate.
+// Streaming fairness/latency metrics are noisier than RTT p50s, so even
+// when --fail-min-abs is set lower the streaming gate never trips below
+// this, to keep CI from flaking on sub-perceptible jitter.
+const streamGateFloorMin = 50 * time.Millisecond
+
+// streamGateVerdict is the streaming-family analogue of gateVerdict. It
+// returns the worst gated streaming regression (ttfb_p95 or
+// final_chunk_spread) whose absolute increase exceeds the floor, or an
+// error when streaming cells paired but none yielded a comparable gated
+// metric (a paired-but-uncomparable comparison must not silently pass).
+// When no streaming cells paired at all it returns (nil, nil): the
+// combined emptiness check lives in gateVerdict.
+func streamGateVerdict(gs gateStats, floor time.Duration) (*streamRegression, error) {
+	if gs.streamPaired == 0 {
+		return nil, nil
+	}
+	if gs.streamComparable == 0 {
+		return nil, errors.New("streaming cells paired but none carried a comparable gated metric (ttfb_p95 / final_chunk_spread) on both sides — nothing was gated")
+	}
+	if floor < streamGateFloorMin {
+		floor = streamGateFloorMin
+	}
+	var worst *streamRegression
+	for i := range gs.streamRegressions {
+		r := &gs.streamRegressions[i]
+		if time.Duration(r.absNs) > floor {
+			if worst == nil || r.absNs > worst.absNs {
+				worst = r
+			}
+		}
+	}
+	return worst, nil
+}
+
 // It exits non-zero when any paired warm/cold p50 cell regressed by more
 // than failOverPct AND by more than the failMinAbs duration floor (so a
 // large percent on a tiny baseline can't flake the gate). A comparison
@@ -958,13 +1341,40 @@ func applyGate(gs gateStats, failOverPct float64, failMinAbs string) {
 	if err != nil {
 		fail(fmt.Errorf("perf-gate: %w", err))
 	}
+	streamWorst, err := streamGateVerdict(gs, floor)
+	if err != nil {
+		fail(fmt.Errorf("perf-gate: %w", err))
+	}
+	failed := false
 	if worst != nil {
 		fmt.Fprintf(os.Stderr, "perf-gate: FAIL — %s regressed %+.1f%% (+%s), exceeding --fail-over %.1f%% / --fail-min-abs %s\n",
 			worst.label, worst.pct, time.Duration(worst.absNs).Round(time.Millisecond), failOverPct, floor)
+		failed = true
+	}
+	if streamWorst != nil {
+		streamFloor := floor
+		if streamFloor < streamGateFloorMin {
+			streamFloor = streamGateFloorMin
+		}
+		fmt.Fprintf(os.Stderr, "perf-gate: FAIL — %s regressed +%s (absolute), exceeding streaming floor %s\n",
+			streamWorst.label, time.Duration(streamWorst.absNs).Round(time.Millisecond), streamFloor)
+		failed = true
+	}
+	if failed {
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "perf-gate: OK — no warm/cold p50 regression beyond %.1f%% / %s across %d paired cell(s)\n",
-		failOverPct, floor, gs.paired)
+	if gs.paired > 0 {
+		fmt.Fprintf(os.Stderr, "perf-gate: OK — no warm/cold p50 regression beyond %.1f%% / %s across %d paired cell(s)\n",
+			failOverPct, floor, gs.paired)
+	}
+	if gs.streamPaired > 0 {
+		streamFloor := floor
+		if streamFloor < streamGateFloorMin {
+			streamFloor = streamGateFloorMin
+		}
+		fmt.Fprintf(os.Stderr, "perf-gate: OK — no streaming ttfb_p95/final_chunk_spread regression beyond %s across %d paired stream cell(s)\n",
+			streamFloor, gs.streamPaired)
+	}
 }
 
 // removeStr returns ss without the first occurrence of v.

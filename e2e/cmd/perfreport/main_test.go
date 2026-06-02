@@ -875,3 +875,185 @@ func headerLine(out string) string {
 }
 
 const rowAzureRun = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T120000.000Z-cccc","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
+
+// Streaming-family rows (metric_family="stream"). Old/new share a cell
+// across two runs so renderStreamCompare pairs them. ttfb_p95 jumps
+// 100ms->300ms (+200ms, a gated regression above the 50ms floor);
+// final_chunk_spread moves 50ms->60ms (+10ms, below the floor).
+const (
+	streamRowOld = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T100000.000Z-aaaa","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","ttfb_p50_ns":80000000,"ttfb_p95_ns":100000000,"gap_p95_ns":20000000,"max_gap_ns":30000000,"final_chunk_spread_ns":50000000,"completion_spread_ns":51000000,"goodput_bytes_per_sec":1500000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2000000000}`
+	streamRowNew = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T120000.000Z-bbbb","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","ttfb_p50_ns":85000000,"ttfb_p95_ns":300000000,"gap_p95_ns":22000000,"max_gap_ns":33000000,"final_chunk_spread_ns":60000000,"completion_spread_ns":61000000,"goodput_bytes_per_sec":1400000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2100000000}`
+	// streamRowNewNoGated repeats streamRowNew's cell but drops both gated
+	// metrics, so a pairing produces no comparable gated metric.
+	streamRowNewNoGated = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T120000.000Z-bbbb","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","gap_p95_ns":22000000,"max_gap_ns":33000000,"goodput_bytes_per_sec":1400000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2100000000}`
+)
+
+// streamGateStatsFor loads stream rows and runs renderStreamCompare,
+// mirroring gateStatsFor for the RTT family.
+func streamGateStatsFor(t *testing.T, rows ...string) gateStats {
+	t.Helper()
+	recs, _, err := load([]string{writeTemp(t, rows...)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs, err := renderStreamCompare(&strings.Builder{}, recs, "run", "previous", "latest")
+	if err != nil {
+		t.Fatalf("renderStreamCompare: %v", err)
+	}
+	return gs
+}
+
+func TestLoad_StreamAndRttShareCellWithoutDuplicate(t *testing.T) {
+	// rowRunOld (rtt) and a stream row in the same run/backend/axes/
+	// scenario/mode must coexist: the metric family separates their
+	// identity keys, so this is not a duplicate.
+	sameCellStream := strings.Replace(streamRowOld, `"scenario":"StreamS"`, `"scenario":"S"`, 1)
+	sameCellStream = strings.Replace(sameCellStream, `"mode":"SOCKS5"`, `"mode":"PortForward"`, 1)
+	if _, _, err := load([]string{writeTemp(t, rowRunOld, sameCellStream)}); err != nil {
+		t.Fatalf("rtt+stream same cell should coexist, got error: %v", err)
+	}
+}
+
+func TestRenderStreamCompare_PairsAndRegressions(t *testing.T) {
+	gs := streamGateStatsFor(t, streamRowOld, streamRowNew)
+	if gs.streamPaired != 1 {
+		t.Fatalf("streamPaired=%d want 1", gs.streamPaired)
+	}
+	if gs.streamComparable != 1 {
+		t.Fatalf("streamComparable=%d want 1", gs.streamComparable)
+	}
+	var ttfb *streamRegression
+	for i := range gs.streamRegressions {
+		if strings.HasSuffix(gs.streamRegressions[i].label, "ttfb_p95") {
+			ttfb = &gs.streamRegressions[i]
+		}
+	}
+	if ttfb == nil {
+		t.Fatalf("missing ttfb_p95 regression: %+v", gs.streamRegressions)
+	}
+	if ttfb.absNs != 200000000 {
+		t.Errorf("ttfb_p95 absNs=%d want 200000000", ttfb.absNs)
+	}
+}
+
+func TestStreamGateVerdict_TripsAboveFloor(t *testing.T) {
+	gs := streamGateStatsFor(t, streamRowOld, streamRowNew)
+	worst, err := streamGateVerdict(gs, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worst == nil {
+		t.Fatal("want a streaming regression to trip the gate")
+	}
+	if worst.absNs != 200000000 {
+		t.Errorf("worst absNs=%d want 200000000 (ttfb_p95)", worst.absNs)
+	}
+}
+
+func TestStreamGateVerdict_FinalSpreadBelowFloorPasses(t *testing.T) {
+	// A run whose only change is final_chunk_spread +10ms (< 50ms floor)
+	// and ttfb unchanged must not trip.
+	steady := strings.Replace(streamRowNew, `"ttfb_p95_ns":300000000`, `"ttfb_p95_ns":100000000`, 1)
+	gs := streamGateStatsFor(t, streamRowOld, steady)
+	worst, err := streamGateVerdict(gs, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worst != nil {
+		t.Errorf("want no trip below floor, got %+v", worst)
+	}
+}
+
+func TestStreamGateVerdict_PairedButNoComparableIsError(t *testing.T) {
+	gs := streamGateStatsFor(t, streamRowOld, streamRowNewNoGated)
+	if gs.streamPaired != 1 {
+		t.Fatalf("streamPaired=%d want 1", gs.streamPaired)
+	}
+	if gs.streamComparable != 0 {
+		t.Fatalf("streamComparable=%d want 0", gs.streamComparable)
+	}
+	if _, err := streamGateVerdict(gs, 50*time.Millisecond); err == nil {
+		t.Error("want error when stream cells paired but none comparable")
+	}
+}
+
+func TestStreamGateVerdict_NoStreamPairedIsNil(t *testing.T) {
+	worst, err := streamGateVerdict(gateStats{}, 50*time.Millisecond)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if worst != nil {
+		t.Errorf("want nil verdict when no stream cells paired, got %+v", worst)
+	}
+}
+
+func TestGateVerdict_StreamOnlyPairedIsNotEmptyError(t *testing.T) {
+	// When only streaming cells paired (rtt paired==0), gateVerdict must
+	// not report "nothing compared": the streaming side carries the gate.
+	gs := gateStats{streamPaired: 1, streamComparable: 1}
+	if _, err := gateVerdict(gs, 20, 50*time.Millisecond); err != nil {
+		t.Errorf("rtt gate should not error when streams paired: %v", err)
+	}
+}
+
+func TestRenderTable_MixedRttAndStreamSections(t *testing.T) {
+	recs, _, err := load([]string{writeTemp(t, rowRunOld, streamRowOld)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if err := renderTable(&b, recs); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "PERF MATRIX (client-side RTT") {
+		t.Errorf("missing RTT section:\n%s", out)
+	}
+	if !strings.Contains(out, "PERF MATRIX (streaming") {
+		t.Errorf("missing streaming section:\n%s", out)
+	}
+	if !strings.Contains(out, "ttfb_p95") || !strings.Contains(out, "goodput") {
+		t.Errorf("streaming section missing expected columns:\n%s", out)
+	}
+}
+
+func TestRenderStreamCompare_NoStreamRowsSkips(t *testing.T) {
+	recs, _, err := load([]string{writeTemp(t, rowRunOld, rowRunNew)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := renderStreamCompare(&strings.Builder{}, recs, "run", "previous", "latest"); !errors.Is(err, errNoStreamRows) {
+		t.Fatalf("want errNoStreamRows for rtt-only input, got %v", err)
+	}
+}
+
+// TestCompare_StreamOnlyArtifactStillGates locks the orchestration
+// invariant that a sparse/absent RTT family must not suppress the
+// streaming gate: a stream-only two-run artifact makes renderCompare
+// return the skippable errNotEnoughRuns, yet renderStreamCompare must
+// independently produce a gateable verdict (here a tripping regression).
+func TestCompare_StreamOnlyArtifactStillGates(t *testing.T) {
+	recs, _, err := load([]string{writeTemp(t, streamRowOld, streamRowNew)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// RTT side: nothing to compare (no rtt rows) -> skippable, not fatal.
+	if _, rttErr := renderCompare(&strings.Builder{}, recs, "run", "previous", "latest"); !errors.Is(rttErr, errNotEnoughRuns) {
+		t.Fatalf("rtt renderCompare err = %v, want errNotEnoughRuns", rttErr)
+	}
+	// Streaming side: pairs and trips the gate on its own.
+	sgs, sErr := renderStreamCompare(&strings.Builder{}, recs, "run", "previous", "latest")
+	if sErr != nil {
+		t.Fatalf("renderStreamCompare: %v", sErr)
+	}
+	if sgs.streamPaired != 1 {
+		t.Fatalf("streamPaired=%d want 1", sgs.streamPaired)
+	}
+	worst, err := streamGateVerdict(sgs, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worst == nil {
+		t.Fatal("stream-only artifact should still trip the gate")
+	}
+}
