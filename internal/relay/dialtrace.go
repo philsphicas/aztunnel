@@ -38,7 +38,6 @@ import (
 // rendezvous to the relay; a large tls localises it to the sender's
 // cold dial.
 type dialTrace struct {
-	start        time.Time
 	dnsStart     atomic.Int64
 	dnsDone      atomic.Int64
 	connectStart atomic.Int64
@@ -47,6 +46,7 @@ type dialTrace struct {
 	tlsDone      atomic.Int64
 	reqWritten   atomic.Int64
 	firstByte    atomic.Int64
+	gotConn      atomic.Bool
 	reused       atomic.Bool
 }
 
@@ -55,7 +55,7 @@ type dialTrace struct {
 // read once the dial returns. start should be captured immediately
 // before the dial so all deltas are relative to it.
 func newDialTrace(ctx context.Context, start time.Time) (context.Context, *dialTrace) {
-	dt := &dialTrace{start: start}
+	dt := &dialTrace{}
 	since := func() int64 { return int64(time.Since(start)) }
 	trace := &httptrace.ClientTrace{
 		DNSStart:     func(httptrace.DNSStartInfo) { dt.dnsStart.CompareAndSwap(0, since()) },
@@ -77,7 +77,7 @@ func newDialTrace(ctx context.Context, start time.Time) (context.Context, *dialT
 		},
 		WroteRequest:         func(httptrace.WroteRequestInfo) { dt.reqWritten.Store(since()) },
 		GotFirstResponseByte: func() { dt.firstByte.CompareAndSwap(0, since()) },
-		GotConn:              func(info httptrace.GotConnInfo) { dt.reused.Store(info.Reused) },
+		GotConn:              func(info httptrace.GotConnInfo) { dt.gotConn.Store(true); dt.reused.Store(info.Reused) },
 	}
 	return httptrace.WithClientTrace(ctx, trace), dt
 }
@@ -114,6 +114,11 @@ func (dt *dialTrace) log(ctx context.Context, logger *slog.Logger, msg string) {
 	if req, fb := dt.reqWritten.Load(), dt.firstByte.Load(); req > 0 && fb >= req {
 		attrs = append(attrs, slog.Duration("resp_wait", time.Duration(fb-req)))
 	}
-	attrs = append(attrs, slog.Bool("reused", dt.reused.Load()))
+	// reused is only meaningful when the GotConn hook actually fired;
+	// omit it otherwise so a partial trace (no hooks ran) doesn't
+	// misreport a fresh dial as a reused connection.
+	if dt.gotConn.Load() {
+		attrs = append(attrs, slog.Bool("reused", dt.reused.Load()))
+	}
 	logger.Debug(msg, attrs...)
 }
