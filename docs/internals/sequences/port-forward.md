@@ -199,8 +199,16 @@ but are loopback in this topology, so each is ≈ 0 ms.
 | Lane `l` one-way (Phase 0, 3, 4, 5 101)    | `LLatency`                                     |
 | Per-handler DNS lookup (Phase 0, 2, 4)     | `DNSLookup`                                    |
 | SAS-token validation (Phase 0 and Phase 2) | `AuthInternal`                                 |
+| Entra-token validation (Phase 0, Phase 2)  | `EntraValidate`                                |
 | Accept-message dispatch (Phase 3)          | `MatchMakeInternal`                            |
 | Phase 6 bridge forwarding                  | `SLatency + LLatency` (pipelined, per message) |
+
+The relay charges exactly one token-validation cost per token-bearing
+leg, chosen by the inbound token's shape: `EntraValidate` for an Entra
+(JWT) bearer token, `AuthInternal` for a SAS token. `EntraValidate`
+models the per-request "warm tax" the real Azure Relay control plane
+pays validating an Entra token on every connect, distinct from the
+one-off client-side acquisition cost (`TokenAcquire`).
 
 Pass `mockrelay/server.DelayProfileDefault` via
 `server.WithDelayProfile(...)` to make the mock pay wire-faithful

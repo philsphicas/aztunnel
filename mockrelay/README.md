@@ -134,8 +134,9 @@ aztunnel relay-listener \
 ```
 
 > Reminder: this is still a mock. Real production deployments need real
-> authentication; the SAS validation here only proves the client knows
-> a fixed dummy key.
+> authentication; the token validation here only proves the client
+> knows a fixed dummy key (SAS) or holds a JWT this mock itself signed
+> with that key (the fake Entra path) — neither is real identity.
 
 ## CLI flags
 
@@ -218,10 +219,14 @@ ports.
 This is a test fixture, not a production relay — file issues if you
 need any of the following:
 
-- **SAS validation only.** The relay accepts any SAS token signed with
-  the configured key (default: a hard-coded dev key). It does NOT check
-  the audience (`sr`) against the request URL, so a token signed for
-  one entity is accepted for any entity. Anyone who can reach the
+- **Dummy-key auth only.** The relay accepts any SAS token signed with
+  the configured key (default: a hard-coded dev key), OR a JWT-shaped
+  bearer token it can verify with that same key via HS256 — a stand-in
+  for the Entra (OAuth2) path that lets the mock model the per-request
+  Entra validation cost. It is NOT real Entra validation (no RS256, no
+  AAD signing keys, no issuer/audience/scope checks). It also does NOT
+  check the audience (`sr`) against the request URL, so a token signed
+  for one entity is accepted for any entity. Anyone who can reach the
   relay's TCP port AND knows the key can listen or send for any entity.
   Rendezvous URLs carry a 128-bit random ID with a short timeout (30s
   default), but they are not cryptographically bound to a particular

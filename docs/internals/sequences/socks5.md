@@ -216,8 +216,13 @@ the rendezvous.
 | Lane `l` one-way (Phase 0, 3, 4, 5 101)    | `LLatency`                                     |
 | Per-handler DNS lookup (Phase 0, 2, 4)     | `DNSLookup`                                    |
 | SAS-token validation (Phase 0 and Phase 2) | `AuthInternal`                                 |
+| Entra-token validation (Phase 0, Phase 2)  | `EntraValidate`                                |
 | Accept-message dispatch (Phase 3)          | `MatchMakeInternal`                            |
 | Phase 6 and Phase 7 bridge forwarding      | `SLatency + LLatency` (pipelined, per message) |
+
+The relay charges one token-validation cost per token-bearing leg,
+selected by the inbound token's shape: `EntraValidate` for an Entra
+(JWT) bearer token, `AuthInternal` for a SAS token.
 
 Phase 6 (envelope / target dial / REP) and Phase 7 (payload) ride
 the established bridge, which is delay-modelled as a pipelined

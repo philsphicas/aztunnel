@@ -28,11 +28,14 @@ import (
 //     net.Dial calls, so every cold WebSocket upgrade (handleListen,
 //     handleConnect, handleAccept) pays a fresh A+AAAA resolution.
 //
-//   - Per-handler relay-internal costs (AuthInternal, MatchMakeInternal).
-//     These model the wedge between the request landing at the relay
-//     and the response being emitted that is NOT explained by lane
-//     transit: SAS-token validation for AuthInternal, listener lookup
-//     plus cross-relay-node dispatch for MatchMakeInternal.
+//   - Per-handler relay-internal costs (AuthInternal, EntraValidate,
+//     MatchMakeInternal). These model the wedge between the request
+//     landing at the relay and the response being emitted that is NOT
+//     explained by lane transit: token validation for AuthInternal
+//     (SAS) / EntraValidate (Entra JWT) — exactly one applies per
+//     token-bearing leg, chosen by the shape of the inbound token — and
+//     listener lookup plus cross-relay-node dispatch for
+//     MatchMakeInternal.
 //
 //   - Client-side credential cost (TokenAcquire). The one-off cold
 //     token-acquisition latency a real aztunnel process pays the first
@@ -67,17 +70,32 @@ type DelayProfile struct {
 	DNSLookup time.Duration
 
 	// AuthInternal models the relay-side cost of SAS-token validation
-	// (token parse + signature check + hub-routing-table lookup).
-	// Applied in handleListen and handleConnect, both of which carry
-	// a sb-hc-token query parameter. NOT applied in handleAccept —
-	// the accept-id is the auth there; no token is present.
+	// (token parse + HMAC signature check + hub-routing-table lookup).
+	// Applied in handleListen and handleConnect when the inbound
+	// sb-hc-token is a SAS token. NOT applied in handleAccept — the
+	// accept-id is the auth there; no token is present. The Entra path
+	// pays EntraValidate instead (never both).
 	AuthInternal time.Duration
+
+	// EntraValidate models the relay-side cost of validating an Entra
+	// (OAuth2 JWT) bearer token: signature/issuer/audience checks plus
+	// any directory introspection. Unlike AuthInternal it is the
+	// per-request cost the real Azure Relay control plane pays on EVERY
+	// token-bearing rendezvous leg under Entra auth — a recurring "warm
+	// tax" distinct from the one-off client-side TokenAcquire below.
+	//
+	// It is applied INSTEAD OF AuthInternal (not in addition) whenever
+	// the inbound sb-hc-token is JWT-shaped rather than a SAS token, in
+	// handleListen and handleConnect. The SAS path never pays it; the
+	// Entra path never pays AuthInternal. The value is the TOTAL Entra
+	// validation cost, not a delta over AuthInternal.
+	EntraValidate time.Duration
 
 	// MatchMakeInternal models the relay-side cost of locating the
 	// listener's control session, RPC-ing to the listener-owning
 	// relay node if needed, and constructing the accept frame to write
 	// onto the listener's control WS. Applied only in handleConnect,
-	// in addition to AuthInternal (the two costs sum in handleConnect
+	// in addition to the auth cost (the two costs sum in handleConnect
 	// because matchmake happens after auth).
 	MatchMakeInternal time.Duration
 
@@ -125,6 +143,7 @@ var DelayProfileDefault = DelayProfile{
 	LLatency:          30 * time.Millisecond,
 	DNSLookup:         40 * time.Millisecond,
 	AuthInternal:      10 * time.Millisecond,
+	EntraValidate:     150 * time.Millisecond,
 	MatchMakeInternal: 50 * time.Millisecond,
 	TokenAcquire:      450 * time.Millisecond,
 }
@@ -132,11 +151,14 @@ var DelayProfileDefault = DelayProfile{
 // Relay-placement profiles model where the sender and listener sit
 // relative to the relay by varying only the per-lane one-way transit
 // (SLatency/LLatency). The placement-independent costs — fresh DNS
-// resolution, SAS validation, and matchmake — are held at the
-// DelayProfileDefault values so the cold-vs-warm spread the perf matrix
-// renders (est ≈ establishment cost) isolates distance alone.
-// TokenAcquire is zero because these profiles are exercised on the SAS
-// path (no AAD round trip); pin E2E_AUTH=sas when sweeping them.
+// resolution, token validation (SAS and Entra), and matchmake — are
+// held at the DelayProfileDefault values so the cold-vs-warm spread the
+// perf matrix renders (est ≈ establishment cost) isolates distance
+// alone. TokenAcquire is left zero: the cold-token premium is an
+// auth-axis concern orthogonal to placement, and these cells are
+// primarily swept on the SAS path (pin E2E_AUTH=sas). EntraValidate is
+// retained at the default so an unpinned E2E_AUTH=entra placement run
+// still models the per-request Entra validation cost correctly.
 //
 // The placement axis is the full sender×listener grid: each client sits
 // at one of three distances from the relay — near (5 ms), mid (35 ms),
@@ -164,16 +186,19 @@ const (
 )
 
 // placementProfile builds a grid cell from a sender/listener lane
-// transit, holding the placement-independent costs (DNS, SAS validation,
-// matchmake) at the DelayProfileDefault values so the cold-vs-warm spread
-// the perf matrix renders isolates distance alone. TokenAcquire is zero:
-// these cells are swept on the SAS path (pin E2E_AUTH=sas).
+// transit, holding the placement-independent costs (DNS, token
+// validation, matchmake) at the DelayProfileDefault values so the
+// cold-vs-warm spread the perf matrix renders isolates distance alone.
+// TokenAcquire is left zero (the cold-token premium is orthogonal to
+// placement); EntraValidate is retained so an E2E_AUTH=entra sweep over
+// these cells still models per-request Entra validation.
 func placementProfile(sender, listener time.Duration) DelayProfile {
 	return DelayProfile{
 		SLatency:          sender,
 		LLatency:          listener,
 		DNSLookup:         DelayProfileDefault.DNSLookup,
 		AuthInternal:      DelayProfileDefault.AuthInternal,
+		EntraValidate:     DelayProfileDefault.EntraValidate,
 		MatchMakeInternal: DelayProfileDefault.MatchMakeInternal,
 	}
 }
@@ -261,19 +286,34 @@ func FunctionalMatrixProfileNames() []string {
 }
 
 // PredictedRendezvous returns the synthetic wall-clock this profile
-// adds to a single cold hyco rendezvous (listener already attached):
-// both fresh DNS lookups, the sender and listener lane transits, the
-// shared response leg, and the relay-internal auth + matchmake costs.
-// It is the synthetic-delay component only — the in-process baseline
-// (~6 ms) is not included. The decomposition follows the hop
-// accounting above; see docs/internals/sequences/ for the wireshark
-// basis. For the zero profile this is zero.
+// adds to a single cold hyco rendezvous (listener already attached) on
+// the SAS auth path: both fresh DNS lookups, the sender and listener
+// lane transits, the shared response leg, and the relay-internal auth
+// (AuthInternal) + matchmake costs. It is the synthetic-delay component
+// only — the in-process baseline (~6 ms) is not included. The
+// decomposition follows the hop accounting above; see
+// docs/internals/sequences/ for the wireshark basis. For the zero
+// profile this is zero. Use PredictedRendezvousFor to predict the Entra
+// path (which pays EntraValidate instead of AuthInternal).
 func (p DelayProfile) PredictedRendezvous() time.Duration {
+	return p.PredictedRendezvousFor(false)
+}
+
+// PredictedRendezvousFor is PredictedRendezvous parameterised by auth
+// method. The relay pays exactly one token-validation cost per
+// token-bearing leg: EntraValidate on the Entra (JWT) path, AuthInternal
+// on the SAS path. All other terms are auth-independent. Passing
+// entra=false reproduces PredictedRendezvous exactly.
+func (p DelayProfile) PredictedRendezvousFor(entra bool) time.Duration {
+	authCost := p.AuthInternal
+	if entra {
+		authCost = p.EntraValidate
+	}
 	return 2*p.DNSLookup +
 		(hopsHandshake+hopsWSGet)*p.SLatency +
 		(hopsHandshake+hopsWSGet+hopsAcceptFrame)*p.LLatency +
 		hopsResponse*max(p.SLatency, p.LLatency) +
-		p.AuthInternal + p.MatchMakeInternal
+		authCost + p.MatchMakeInternal
 }
 
 // PredictedBridgeEcho returns the synthetic wall-clock this profile
@@ -318,6 +358,7 @@ func (p DelayProfile) validate() error {
 		{"LLatency", p.LLatency},
 		{"DNSLookup", p.DNSLookup},
 		{"AuthInternal", p.AuthInternal},
+		{"EntraValidate", p.EntraValidate},
 		{"MatchMakeInternal", p.MatchMakeInternal},
 		{"TokenAcquire", p.TokenAcquire},
 	} {

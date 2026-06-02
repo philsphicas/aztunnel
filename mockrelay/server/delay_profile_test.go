@@ -551,6 +551,26 @@ func TestDelayProfile_PredictedTimings(t *testing.T) {
 	if got := p.PredictedRendezvous(); got != wantRendezvous {
 		t.Errorf("default PredictedRendezvous = %v, want %v", got, wantRendezvous)
 	}
+	// PredictedRendezvousFor(false) must reproduce PredictedRendezvous
+	// exactly (back-compat: the SAS path is the historical behaviour).
+	if got := p.PredictedRendezvousFor(false); got != p.PredictedRendezvous() {
+		t.Errorf("PredictedRendezvousFor(false) = %v, want %v (== PredictedRendezvous)",
+			got, p.PredictedRendezvous())
+	}
+	// The Entra path swaps AuthInternal for EntraValidate, so the only
+	// difference between the two predictions is exactly that delta.
+	gotDelta := p.PredictedRendezvousFor(true) - p.PredictedRendezvousFor(false)
+	wantDelta := p.EntraValidate - p.AuthInternal
+	if gotDelta != wantDelta {
+		t.Errorf("entra vs sas PredictedRendezvousFor delta = %v, want %v (EntraValidate-AuthInternal)",
+			gotDelta, wantDelta)
+	}
+	// With the default profile EntraValidate > AuthInternal, so the
+	// Entra path must predict a strictly larger rendezvous.
+	if p.PredictedRendezvousFor(true) <= p.PredictedRendezvousFor(false) {
+		t.Errorf("entra PredictedRendezvousFor (%v) not greater than sas (%v)",
+			p.PredictedRendezvousFor(true), p.PredictedRendezvousFor(false))
+	}
 	if got, want := p.PredictedBridgeEcho(), 2*(p.SLatency+p.LLatency); got != want {
 		t.Errorf("default PredictedBridgeEcho = %v, want %v", got, want)
 	}
@@ -665,6 +685,7 @@ func TestWithDelayProfile_RejectsNegativeDuration(t *testing.T) {
 		{"LLatency", DelayProfile{LLatency: -1 * time.Millisecond}},
 		{"DNSLookup", DelayProfile{DNSLookup: -1 * time.Millisecond}},
 		{"AuthInternal", DelayProfile{AuthInternal: -1 * time.Millisecond}},
+		{"EntraValidate", DelayProfile{EntraValidate: -1 * time.Millisecond}},
 		{"MatchMakeInternal", DelayProfile{MatchMakeInternal: -1 * time.Millisecond}},
 	}
 	for _, c := range cases {
