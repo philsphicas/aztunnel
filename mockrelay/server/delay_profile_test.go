@@ -466,6 +466,35 @@ func TestProfileRegistry_KnownNames(t *testing.T) {
 	}
 }
 
+// TestFunctionalMatrixProfileNames asserts the curated functional
+// matrix set stays narrow (the timing-fidelity pair zero/default) and
+// that placement profiles, while resolvable by ProfileByName, are
+// deliberately excluded from it — so a perf-only placement sweep does
+// not silently expand the E2E_DELAY=all functional run.
+func TestFunctionalMatrixProfileNames(t *testing.T) {
+	got := FunctionalMatrixProfileNames()
+	want := []string{"default", "zero"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("FunctionalMatrixProfileNames() = %v, want %v", got, want)
+	}
+
+	all := ProfileNames()
+	for _, name := range got {
+		if !slices.Contains(all, name) {
+			t.Errorf("functional profile %q is not resolvable (missing from ProfileNames %v)", name, all)
+		}
+	}
+
+	for _, placement := range PlacementGridProfileNames() {
+		if _, err := ProfileByName(placement); err != nil {
+			t.Errorf("placement profile %q should be resolvable: %v", placement, err)
+		}
+		if slices.Contains(got, placement) {
+			t.Errorf("placement profile %q must NOT be in the functional matrix set %v", placement, got)
+		}
+	}
+}
+
 // TestProfileByName_UnknownIsLoud asserts an unregistered name yields
 // an error naming the bad input and listing the known profiles, so a
 // typo at a selection site fails loudly rather than silently picking

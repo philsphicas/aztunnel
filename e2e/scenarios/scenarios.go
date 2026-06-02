@@ -31,7 +31,16 @@ import (
 // #01/#02/... suffixes.
 func RunAllScenarios(t *testing.T, b Backend) {
 	t.Helper()
-	forEachCell(t, b.Axes(), func(t *testing.T, cell map[string]string) {
+	axes := b.Axes()
+	names := make([]string, len(axes))
+	for i, a := range axes {
+		names[i] = a.Name()
+	}
+	perfMatrixSink.setAxisNames(names)
+	t.Cleanup(func() {
+		finishPerfMatrix(t)
+	})
+	forEachCell(t, axes, func(t *testing.T, cell map[string]string) {
 		cellBackend := b.Cell(cell)
 		RunCoreScenarios(t, cellBackend)
 		RunTopologyScenarios(t, cellBackend)
