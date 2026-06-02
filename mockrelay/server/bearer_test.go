@@ -225,8 +225,13 @@ func TestDelayProfile_EntraPathPaysEntraValidate(t *testing.T) {
 			connectElapsed, connectEntraLower)
 	}
 
-	// SAS leg on the same handler must NOT pay EntraValidate: a valid
-	// SAS connect returns 404 well under the EntraValidate floor.
+	// SAS leg on the same handler must NOT pay EntraValidate. It runs
+	// the identical connect-leg 404 path as the Entra connect above, so
+	// the only modeled difference is EntraValidate (Entra) vs
+	// AuthInternal (SAS). Assert relatively: the SAS leg must be faster
+	// than the Entra leg by most of that gap. A relative delta cancels
+	// the shared per-request overhead, so it stays robust under CI load
+	// where an absolute floor on sasElapsed could spuriously trip.
 	start = time.Now()
 	resp, err = http.Get(srv.URL + "/$hc/baz?sb-hc-action=connect&sb-hc-token=" + url.QueryEscape(sas))
 	sasElapsed := time.Since(start)
@@ -237,8 +242,10 @@ func TestDelayProfile_EntraPathPaysEntraValidate(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("sas connect status = %d, want 404", resp.StatusCode)
 	}
-	if sasElapsed >= p.EntraValidate {
-		t.Errorf("sas connect elapsed %v >= EntraValidate %v (SAS path wrongly charged EntraValidate)",
-			sasElapsed, p.EntraValidate)
+	savedBySAS := connectElapsed - sasElapsed
+	minSaving := (p.EntraValidate - p.AuthInternal) / 2
+	if savedBySAS < minSaving {
+		t.Errorf("sas connect (%v) was only %v faster than entra connect (%v); want >= %v saved (SAS path wrongly charged EntraValidate)",
+			sasElapsed, savedBySAS, connectElapsed, minSaving)
 	}
 }
