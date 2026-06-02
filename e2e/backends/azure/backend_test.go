@@ -50,8 +50,8 @@ import (
 //     successive Setup calls — and so scenarios that call Setup
 //     twice (e.g. ScenarioErrorPropagation_*) hold disjoint hycos.
 //   - leaseSharedHyco: returns a process-shared, lazily-leased pair
-//     drained at TestMain exit. Used by BenchmarkE2E_Azure so
-//     benchstat runs do not pay per-sub-bench provisioning.
+//     drained at TestMain exit, for callers that share one hyco
+//     across sub-tests instead of provisioning per sub-test.
 type azureBackend struct {
 	axis       *authAxis
 	authName   string

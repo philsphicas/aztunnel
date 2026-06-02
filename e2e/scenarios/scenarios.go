@@ -31,6 +31,15 @@ import (
 // #01/#02/... suffixes.
 func RunAllScenarios(t *testing.T, b Backend) {
 	t.Helper()
+	axes := b.Axes()
+	names := make([]string, len(axes))
+	for i, a := range axes {
+		names[i] = a.Name()
+	}
+	perfMatrixSink.setAxisNames(names)
+	t.Cleanup(func() {
+		finishPerfMatrix(t)
+	})
 	forEachCell(t, b.Axes(), func(t *testing.T, cell map[string]string) {
 		cellBackend := b.Cell(cell)
 		RunCoreScenarios(t, cellBackend)
@@ -38,16 +47,6 @@ func RunAllScenarios(t *testing.T, b Backend) {
 		RunReliabilityScenarios(t, cellBackend)
 		RunObservabilityScenarios(t, cellBackend)
 		RunPerformanceScenarios(t, cellBackend)
-	})
-}
-
-// RunAllBenchmarks is the *testing.B mirror of RunAllScenarios:
-// enumerates backend.Axes() once and calls RunBenchmarks inside
-// each cell.
-func RunAllBenchmarks(b *testing.B, backend Backend) {
-	b.Helper()
-	forEachBenchCell(b, backend.Axes(), func(b *testing.B, cell map[string]string) {
-		RunBenchmarks(b, backend.Cell(cell))
 	})
 }
 

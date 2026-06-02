@@ -427,7 +427,7 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 func timeOneConnect(senderAddr, target string, mode SenderMode, payload, buf []byte, threshold time.Duration) (time.Duration, error) {
 	const connectSlack = 5 * time.Second
 	start := time.Now()
-	conn, err := benchDial(senderAddr, target, mode, threshold+connectSlack)
+	conn, err := dialSender(senderAddr, target, mode, threshold+connectSlack)
 	if err != nil {
 		return time.Since(start), err
 	}
@@ -494,10 +494,11 @@ func timeOneConnect(senderAddr, target string, mode SenderMode, payload, buf []b
 // requests are discarded from the reported stats.
 //
 //	cold-path scenarios (ConnPerRequest, ConnReused):
-//	  WarmupRequests = 0 — first request times count as ttfw/ttc
+//	  WarmupRequests = 0 — the first request's round-trip is reported
+//	  as cold_rtt (includes connection establishment)
 //	steady-state scenarios (ConnPrewarmed):
 //	  WarmupRequests = 1 — first request is discarded; the rest are
-//	  reported as warm_min/mean/p50/p95/p99/max
+//	  reported as warm_rtt_min/mean/p50/p95/p99/max
 type WorkloadShape struct {
 	TotalConns      int
 	Concurrency     int
@@ -612,8 +613,13 @@ type connResult struct {
 }
 
 type firstReqTiming struct {
-	TTFW time.Duration // dial → first write complete (request transmitted to local sender; NOT the conventional "time to first byte received")
-	TTC  time.Duration // dial → first read complete (full request → response round-trip including dial)
+	// ColdRTT is the cold-path round-trip: open → first response
+	// received on a fresh connection. It spans the full
+	// request → target → response round-trip and, because the
+	// connection is new, includes connection establishment. With a
+	// tiny payload against an instant echo target, "first response"
+	// coincides with "round-trip complete", so this is an honest RTT.
+	ColdRTT time.Duration
 }
 
 func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold time.Duration, w WorkloadShape) {
@@ -641,15 +647,15 @@ func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold time.Duration
 			switch {
 			case w.WarmupRequests > 0 && len(r.Warm) > 0:
 				wmin, wmax, wmean := minMaxMean(r.Warm)
-				t.Logf("conn[%d] warm_n=%d warm_min=%v warm_mean=%v warm_max=%v",
+				t.Logf("conn[%d] warm_n=%d warm_rtt_min=%v warm_rtt_mean=%v warm_rtt_max=%v",
 					i, len(r.Warm), wmin, wmean, wmax)
 			case len(r.Warm) > 0:
 				wmin, wmax, wmean := minMaxMean(r.Warm)
-				t.Logf("conn[%d] first_req_ttfw=%v first_req_ttc=%v warm_n=%d warm_min=%v warm_mean=%v warm_max=%v",
-					i, r.FirstReq.TTFW, r.FirstReq.TTC, len(r.Warm), wmin, wmean, wmax)
+				t.Logf("conn[%d] cold_rtt=%v warm_n=%d warm_rtt_min=%v warm_rtt_mean=%v warm_rtt_max=%v",
+					i, r.FirstReq.ColdRTT, len(r.Warm), wmin, wmean, wmax)
 			default:
-				t.Logf("conn[%d] ttfw=%v ttc=%v",
-					i, r.FirstReq.TTFW, r.FirstReq.TTC)
+				t.Logf("conn[%d] cold_rtt=%v",
+					i, r.FirstReq.ColdRTT)
 			}
 		}(i)
 	}
@@ -657,15 +663,14 @@ func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold time.Duration
 	wall := time.Since(start)
 
 	var failures int
-	var coldTTFW, coldTTC, warmAll []time.Duration
+	var coldRTT, warmAll []time.Duration
 	for _, r := range results {
 		if r.Err != nil {
 			failures++
 			continue
 		}
 		if w.WarmupRequests == 0 {
-			coldTTFW = append(coldTTFW, r.FirstReq.TTFW)
-			coldTTC = append(coldTTC, r.FirstReq.TTC)
+			coldRTT = append(coldRTT, r.FirstReq.ColdRTT)
 		}
 		warmAll = append(warmAll, r.Warm...)
 	}
@@ -682,24 +687,24 @@ func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold time.Duration
 	// `TestE2E_Azure/entra/Parallel_ConnPrewarmedEcho_SOCKS5`).
 	parts = append(parts, "workload-summary", fmt.Sprintf("scenario=%s", t.Name()))
 
-	if len(coldTTFW) > 0 {
-		parts = append(parts,
-			fmtDist("ttfw", coldTTFW),
-			fmtDist("ttc", coldTTC),
-		)
+	if len(coldRTT) > 0 {
+		parts = append(parts, fmtDist("cold_rtt", coldRTT))
 	}
 	if len(warmAll) > 0 {
-		parts = append(parts, fmtDist("warm", warmAll))
+		parts = append(parts, fmtDist("warm_rtt", warmAll))
 	}
 	parts = append(parts,
 		fmt.Sprintf("wall=%v", wall),
 		fmt.Sprintf("budget=%v", budget),
-		fmt.Sprintf("cold_n=%d", len(coldTTFW)),
+		fmt.Sprintf("cold_n=%d", len(coldRTT)),
 		fmt.Sprintf("warm_n=%d", len(warmAll)),
 		fmt.Sprintf("num_targets=%d", len(addrs)),
 		fmt.Sprintf("success=%d/%d", w.TotalConns-failures, w.TotalConns),
 	)
 	t.Logf("%s", strings.Join(parts, " "))
+
+	recordPerfMatrixRow(t.Name(), coldRTT, warmAll,
+		w.TotalConns-failures, w.TotalConns, wall)
 
 	// Go's net deadlines are best-effort: an I/O op can return a few
 	// hundred milliseconds after its deadline under scheduler / OS
@@ -843,9 +848,6 @@ func runOneConn(senderAddr, target string, w WorkloadShape, roundDeadline time.T
 			res.Err = fmt.Errorf("write[%d]: %w", i, err)
 			return res
 		}
-		if i == 0 && w.WarmupRequests == 0 {
-			res.FirstReq.TTFW = time.Since(dialStart)
-		}
 		if _, err = io.ReadFull(conn, buf); err != nil {
 			res.Err = fmt.Errorf("read[%d]: %w", i, err)
 			return res
@@ -857,7 +859,7 @@ func runOneConn(senderAddr, target string, w WorkloadShape, roundDeadline time.T
 		elapsed := time.Since(reqStart)
 		switch {
 		case i == 0 && w.WarmupRequests == 0:
-			res.FirstReq.TTC = time.Since(dialStart)
+			res.FirstReq.ColdRTT = time.Since(dialStart)
 		case i >= w.WarmupRequests:
 			res.Warm = append(res.Warm, elapsed)
 		}

@@ -1,0 +1,67 @@
+name: Perf (PR, opt-in)
+
+# Opt-in performance characterization for a pull request. This is a
+# *measurement* lens on the mock e2e suite, not a gate: it always
+# reports green and never blocks a merge. Trigger it deliberately,
+# either by adding the `perf` label to a PR or via the Actions
+# "Run workflow" button — perf numbers are noisy enough that running
+# them on every push would be cost without signal.
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+# Read-only. The mock backend needs no cloud credentials, so we never
+# grant id-token: write — PR-supplied code (`make build` /
+# `make perf-placement`) cannot mint an OIDC token. No write scope
+# means the job cannot comment on or mutate the PR either; results are
+# surfaced via the job summary and an uploaded artifact instead.
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-pr-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf-mock:
+    name: Perf (mock)
+    # Only run on the dispatch button or when the triggering label is
+    # exactly `perf`; otherwise every unrelated label edit would spawn
+    # a run.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Build
+        run: make build
+
+      - name: Run mock perf scenarios
+        run: make perf-placement
+
+      - name: Render perf matrix into job summary
+        if: always()
+        run: |
+          {
+            echo '## Perf matrix (mock)'
+            echo
+            echo '```'
+            make perf-table 2>&1 || echo '(no perf artifacts produced)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload perf history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-history-pr
+          path: e2e/perf-artifacts/history/*.jsonl
+          if-no-files-found: warn

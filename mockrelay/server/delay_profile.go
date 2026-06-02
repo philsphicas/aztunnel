@@ -129,6 +129,55 @@ var DelayProfileDefault = DelayProfile{
 	TokenAcquire:      450 * time.Millisecond,
 }
 
+// Relay-placement profiles model where the sender and listener sit
+// relative to the relay by varying only the per-lane one-way transit
+// (SLatency/LLatency). The placement-independent costs — fresh DNS
+// resolution, SAS validation, and matchmake — are held at the
+// DelayProfileDefault values so the cold-vs-warm spread the perf matrix
+// renders (est ≈ establishment cost) isolates distance alone.
+// TokenAcquire is zero because these profiles are exercised on the SAS
+// path (no AAD round trip); pin E2E_AUTH=sas when sweeping them.
+//
+// The placement axis is the full sender×listener grid: each client sits
+// at one of three distances from the relay — near (5 ms), mid (35 ms),
+// or far (90 ms) one-way lane transit — giving nine cells. Cells are
+// named <sender><listener> with single-letter distance codes (n/m/f),
+// sender first: e.g. "nf" = sender near, listener far; "fn" = sender
+// far, listener near. The three diagonal cells (nn/mm/ff) are symmetric;
+// the six off-diagonal cells are asymmetric. Because the listener lane
+// carries one extra rendezvous hop (the accept frame), a cell and its
+// transpose are NOT equal in establishment cost — e.g. "nf" predicts a
+// higher rendezvous than "fn" at identical total distance, a difference
+// the matrix surfaces directly. Steady-state echo depends only on the
+// total path (SLatency+LLatency), so transposed cells share a warm RTT.
+//
+// All nine keep PredictedBridgeEcho under the perf harness's flat 500 ms
+// warm-request model (ff is the largest at 2*(90+90)=360 ms), so no
+// roundBudget change is needed. They are deliberately excluded from the
+// functional matrix set (see FunctionalMatrixProfileNames): they are
+// resolvable by name for perf sweeps but do not expand the
+// E2E_DELAY=all functional run.
+const (
+	placementNear = 5 * time.Millisecond
+	placementMid  = 35 * time.Millisecond
+	placementFar  = 90 * time.Millisecond
+)
+
+// placementProfile builds a grid cell from a sender/listener lane
+// transit, holding the placement-independent costs (DNS, SAS validation,
+// matchmake) at the DelayProfileDefault values so the cold-vs-warm spread
+// the perf matrix renders isolates distance alone. TokenAcquire is zero:
+// these cells are swept on the SAS path (pin E2E_AUTH=sas).
+func placementProfile(sender, listener time.Duration) DelayProfile {
+	return DelayProfile{
+		SLatency:          sender,
+		LLatency:          listener,
+		DNSLookup:         40 * time.Millisecond,
+		AuthInternal:      10 * time.Millisecond,
+		MatchMakeInternal: 50 * time.Millisecond,
+	}
+}
+
 // registry is the single source of truth mapping canonical profile
 // names to DelayProfiles. Selection sites — the E2E_DELAY env toggle,
 // docs, and any future CLI or test-matrix axis — resolve through
@@ -137,10 +186,41 @@ var DelayProfileDefault = DelayProfile{
 // every consumer picks up automatically. Keep keys lowercase and
 // hyphen-free so they read cleanly as env-var values and sub-test
 // path segments.
+//
+// Membership here makes a profile *resolvable by name*; it does NOT by
+// itself enroll the profile in the E2E_DELAY=all functional matrix —
+// that set is curated separately (FunctionalMatrixProfileNames) so
+// placement profiles can be swept by perf targets without inflating the
+// full functional run.
 var registry = map[string]DelayProfile{
 	"zero":    DelayProfileZero,
 	"default": DelayProfileDefault,
+	"nn":      placementProfile(placementNear, placementNear),
+	"nm":      placementProfile(placementNear, placementMid),
+	"nf":      placementProfile(placementNear, placementFar),
+	"mn":      placementProfile(placementMid, placementNear),
+	"mm":      placementProfile(placementMid, placementMid),
+	"mf":      placementProfile(placementMid, placementFar),
+	"fn":      placementProfile(placementFar, placementNear),
+	"fm":      placementProfile(placementFar, placementMid),
+	"ff":      placementProfile(placementFar, placementFar),
 }
+
+// PlacementGridProfileNames returns the nine sender×listener placement
+// cell names in row-major order (sender outer, listener inner: nn, nm,
+// nf, mn, …, ff). Perf placement sweeps default to this set; it is a
+// superset relationship with neither the functional matrix nor the
+// timing-fidelity profiles.
+func PlacementGridProfileNames() []string {
+	return []string{"nn", "nm", "nf", "mn", "mm", "mf", "fn", "fm", "ff"}
+}
+
+// functionalMatrix is the curated set of profile names the full mock
+// e2e suite fans over when E2E_DELAY=all. It is intentionally narrow —
+// the zero (test-speed) and default (wire-faithful) timing-fidelity
+// profiles — so adding a resolvable placement profile to registry does
+// not silently multiply the functional run's cell count or runtime.
+var functionalMatrix = []string{"zero", "default"}
 
 // ProfileByName returns the named profile from the registry. The error
 // names the unknown profile and lists the known names (sorted) so a
@@ -155,14 +235,27 @@ func ProfileByName(name string) (DelayProfile, error) {
 	return p, nil
 }
 
-// ProfileNames returns the registered profile names in sorted order.
-// Drives stable error messages and lets docs or a test-matrix axis
-// enumerate the profiles from the single registry source of truth.
+// ProfileNames returns every resolvable profile name in sorted order.
+// Drives stable error messages and lets docs or a CLI enumerate the
+// profiles from the single registry source of truth. Note this is the
+// full resolvable set, not the functional matrix set — use
+// FunctionalMatrixProfileNames for the E2E_DELAY=all enumeration.
 func ProfileNames() []string {
 	names := make([]string, 0, len(registry))
 	for n := range registry {
 		names = append(names, n)
 	}
+	sort.Strings(names)
+	return names
+}
+
+// FunctionalMatrixProfileNames returns the curated set of profile names
+// the full mock e2e suite runs when E2E_DELAY=all, in sorted order. It
+// is the timing-fidelity pair (zero, default) only; placement profiles
+// are resolvable by ProfileByName but deliberately omitted so a perf
+// sweep does not expand the functional matrix.
+func FunctionalMatrixProfileNames() []string {
+	names := append([]string(nil), functionalMatrix...)
 	sort.Strings(names)
 	return names
 }

@@ -205,9 +205,8 @@ func resultToEnv(r *azrelay.Result) *relayEnv {
 // benchLease holds the single process-wide hyco pair leased on the
 // first leaseSharedHyco call. drainBenchLease releases it after
 // m.Run returns. Concurrent leaseSharedHyco callers are serialised
-// by the mutex; in practice b.Run sub-benches inside a single
-// BenchmarkE2E_Azure run sequentially so the lock is uncontended
-// past the first call.
+// by the mutex; in practice the sub-tests that share the leased pair
+// run sequentially so the lock is uncontended past the first call.
 var (
 	benchLeaseMu  sync.Mutex
 	benchLeaseEnv *relayEnv
@@ -283,8 +282,8 @@ func drainBenchLease() {
 // availableAuthNames returns the auth method names to exercise based
 // on the E2E_AUTH filter, without binding to a specific env. Used by
 // callers that pick an authConfig only AFTER provisioning a fresh
-// hyco pair (e.g. TestE2E_Azure / BenchmarkE2E_Azure, which
-// build authConfig inside Backend.Setup via authFromEnv).
+// hyco pair (e.g. TestE2E_Azure, which builds authConfig inside
+// Backend.Setup via authFromEnv).
 //
 // Returns ["entra", "sas"] when E2E_AUTH is empty, ["entra"] when
 // E2E_AUTH=entra, ["sas"] when E2E_AUTH=sas. Any other value fails
