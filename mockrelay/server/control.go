@@ -59,10 +59,11 @@ func (c *controlSession) writeJSON(ctx context.Context, msg interface{}) error {
 // context.WithTimeout did not.
 //
 // DelayProfile timing: handleListen models the wire as DNS lookup +
-// hopsHandshake legs + hopsWSGet leg before the listener's SAS token
-// arrives at the relay; then AuthInternal for token validation; then
-// hopsResponse leg for the 101 (or error) reply. All sleeps honor the
-// request context so server shutdown is not blocked.
+// hopsHandshake legs + hopsWSGet leg before the listener's token
+// arrives at the relay; then the auth-validation cost (AuthInternal for
+// SAS, EntraValidate for Entra) for token validation; then hopsResponse
+// leg for the 101 (or error) reply. All sleeps honor the request
+// context so server shutdown is not blocked.
 func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity string) {
 	ctx := r.Context()
 	p := s.delayProfile
@@ -72,12 +73,13 @@ func (s *Server) handleListen(w http.ResponseWriter, r *http.Request, entity str
 		return
 	}
 	// Relay-side auth cost runs in parallel with the response leg in
-	// the real relay, but we serialise here so AuthInternal is
-	// observable as a separate knob.
-	if !sleepContext(ctx, p.AuthInternal) {
+	// the real relay, but we serialise here so the validation cost is
+	// observable as a separate knob. The cost (and validator) depend on
+	// the token shape: AuthInternal for SAS, EntraValidate for Entra.
+	if !sleepContext(ctx, s.authCost(r)) {
 		return
 	}
-	if err := s.validateSAS(r); err != nil {
+	if err := s.validateToken(r); err != nil {
 		s.log.Warn("listener auth failed", "entity", entity, "remote", r.RemoteAddr, "error", err)
 		_ = sleepContext(ctx, hopsResponse*p.LLatency)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)

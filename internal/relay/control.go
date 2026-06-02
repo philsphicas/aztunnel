@@ -367,15 +367,21 @@ func handleAccept(ctx context.Context, addr string, cfg ControlConfig, logger *s
 	logger.Debug("accept dial started")
 	dialCtx, dialCancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer dialCancel()
+	var trace *dialTrace
+	if logger.Enabled(ctx, slog.LevelDebug) {
+		dialCtx, trace = newDialTrace(dialCtx, time.Now())
+	}
 	ws, resp, err := websocket.Dial(dialCtx, addr, cfg.Options.dialOptions())
 	if err != nil {
 		reason := AcceptDroppedDialFailed
+		trace.log(ctx, logger, "accept rendezvous trace (dial failed)")
 		if dialAuthFailed(resp) {
 			reason = AcceptDroppedAuthFailed
 		}
 		logger.Warn(EventAcceptDropped, "reason", reason, "error", sanitizeErr(err))
 		return
 	}
+	trace.log(ctx, logger, "accept rendezvous trace")
 	logger.Debug("accept dial complete", "ok", true)
 	defer func() { _ = ws.CloseNow() }()
 

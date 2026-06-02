@@ -134,6 +134,39 @@ func (*azureBackend) ConnectLatencyThreshold() time.Duration {
 	return 3 * time.Second
 }
 
+// ConnectLatencyPolicy returns the tolerant quantile gate for the
+// steady-state ConnectLatency_Serial scenario against real Azure Relay.
+//
+// Steady-state rendezvous is ~0.4 s (SAS) / ~0.75 s (Entra), but an
+// isolated ~1-in-10-to-40 dial spikes to 3-7 s in the relay control
+// plane (proven from full sender+listener logs: zero client retries,
+// the listener idle in ws.Read for the whole stall). That tail is not
+// aztunnel's to fix, so the gate tolerates a sparse spike tail while
+// still catching a broad regression:
+//
+//   - NormalP50 = 1.5 s: comfortably above both auth cells' steady
+//     state, well below the seconds-scale regressions we expect; a
+//     broad shift lifts the median into it.
+//   - SoftTail = 3 s: the old per-sample ceiling, now applied to the
+//     soft-tail sample (top ~10% discarded) instead of every sample.
+//   - SpikeCeiling = 6 s: per-dial deadline budget (deadline =
+//     SpikeCeiling + connectSlack ≈ 11 s) so a tolerated 3-7 s spike is
+//     measured, not killed by an i/o timeout.
+//   - Iterations = 20: enough that the soft-tail statistic discards 2
+//     spikes (ceil(10%)) yet the run stays well inside the job budget.
+//
+// Returned regardless of authName: both auth cells share the same
+// control-plane rendezvous path; per-auth cold-start cost is gated
+// separately via ColdStartLatencyThreshold.
+func (*azureBackend) ConnectLatencyPolicy() scenarios.ConnectLatencyPolicy {
+	return scenarios.ConnectLatencyPolicy{
+		Iterations:   20,
+		NormalP50:    1500 * time.Millisecond,
+		SoftTail:     3 * time.Second,
+		SpikeCeiling: 6 * time.Second,
+	}
+}
+
 // ColdStartLatencyThreshold returns the per-backend ceiling for the
 // first connection through a freshly-started sender. The first
 // dial pays one-time costs the steady-state threshold excludes —

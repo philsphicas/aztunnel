@@ -68,13 +68,23 @@ func DialWithRetry(ctx context.Context, endpoint, entityPath string, tp TokenPro
 			opts.wssBase(endpoint), url.PathEscape(entityPath), url.QueryEscape(token))
 
 		dialCtx, cancel := context.WithTimeout(ctx, defaultDialTimeout)
+		var trace *dialTrace
+		if logger.Enabled(ctx, slog.LevelDebug) {
+			dialCtx, trace = newDialTrace(dialCtx, time.Now())
+		}
 		ws, resp, dialErr := websocket.Dial(dialCtx, connectURL, opts.dialOptions())
 		cancel()
 
 		if dialErr == nil {
+			trace.log(ctx, logger, "relay rendezvous trace")
 			logger.Debug("relay connected", "entityPath", entityPath)
 			return ws, nil
 		}
+
+		// Emit the trace on failure too: a dial that exceeded its
+		// deadline or failed before the HTTP 101 is exactly when the
+		// phase split (local dial time vs relay hold) is most useful.
+		trace.log(ctx, logger, "relay rendezvous trace (dial failed)")
 
 		// Only retry on 404/503 (no active listener / listener transitioning).
 		if resp == nil || !IsRetryableStatus(resp.StatusCode) {

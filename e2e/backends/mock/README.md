@@ -15,8 +15,12 @@ Azure backend:
 - **Auth method** (`E2E_AUTH`): unset runs both `sas` and `entra`; pin one with
   `E2E_AUTH=sas` or `E2E_AUTH=entra`. The `entra` cell drives a real
   `EntraTokenProvider` (backed by a fake credential) so the production token
-  cache is exercised end-to-end, and pays a one-off cold token-acquisition cost
-  on the first dial.
+  cache is exercised end-to-end, pays a one-off cold token-acquisition cost on
+  the first dial, and — because the fake credential now mints a JWT-shaped token
+  — also pays the mock relay's per-request Entra validation cost
+  (`EntraValidate`) on every connect, modelling the recurring server-side "warm
+  tax" the real Azure Relay charges under Entra. The `sas` cell pays only the
+  cheap local SAS validation (`AuthInternal`).
 - **Delay profile** (`E2E_DELAY`): unset uses the wire-faithful `default`
   profile so timing thresholds calibrated against Azure also fire here. The
   profile also owns the entra cold-acquisition cost (`TokenAcquire`), so the

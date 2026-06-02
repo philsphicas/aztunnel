@@ -52,6 +52,52 @@ type Axis interface {
 	Values() []string
 }
 
+// ConnectLatencyPolicy parameterises the steady-state
+// ConnectLatency_Serial assertion. The scenario runs Iterations timed
+// dials, then judges the batch on robust quantiles rather than any
+// single sample, so the rare and unfixable Azure Relay rendezvous tail
+// (isolated multi-second spikes, proven to originate in the relay
+// control plane and not in aztunnel) does not flake the suite while a
+// genuine, broad regression still trips it:
+//
+//   - the upper-median sample must be below NormalP50. A regression in
+//     aztunnel's steady-state overhead lifts every sample and moves the
+//     median; an isolated spike does not.
+//   - the soft-tail sample (the largest after discarding the sparse top
+//     ~10% of samples) must be below SoftTail. This tolerates a small
+//     number of independent spikes while still catching a degradation
+//     broad enough to lift the bulk of the tail.
+//
+// There is deliberately no "max sample" or "tolerated spike count"
+// assertion: a hard count cap reintroduces the statistical cliff it is
+// meant to remove (its trip probability grows with Iterations). The
+// only hard failure on a single slow dial is a genuine hang, bounded by
+// the per-dial deadline of SpikeCeiling + connectSlack.
+//
+// A strict, spike-free backend (the in-process mock) sets NormalP50,
+// SoftTail and SpikeCeiling to the same deterministic budget so any
+// real regression trips the gate; a tolerant backend (real Azure Relay)
+// sets NormalP50 well above steady state, SoftTail at the old
+// per-sample ceiling, and SpikeCeiling generously above both.
+type ConnectLatencyPolicy struct {
+	// Iterations is the number of timed dials the serial scenario
+	// performs (in addition to one untimed warm-up).
+	Iterations int
+
+	// NormalP50 is the upper bound on the upper-median sample.
+	NormalP50 time.Duration
+
+	// SoftTail is the upper bound on the soft-tail sample (largest
+	// after discarding the sparse top ~10%).
+	SoftTail time.Duration
+
+	// SpikeCeiling bounds a single dial: the per-dial socket deadline
+	// is SpikeCeiling + connectSlack. It is decoupled from the
+	// assertion thresholds so a tolerated spike is measured rather than
+	// killed by an i/o timeout.
+	SpikeCeiling time.Duration
+}
+
 // Backend is the abstraction e2e scenarios run against. Each
 // implementation knows how to bring up a topology that satisfies
 // SetupOptions and to tear it down cleanly via t.Cleanup.
@@ -93,8 +139,13 @@ type Backend interface {
 
 	// ConnectLatencyThreshold is the per-backend ceiling for a single
 	// fresh-connection round-trip (Dial → 1-byte write → 1-byte echo
-	// read → Close). The Performance suite's serial-connect scenarios
-	// assert each iteration completes inside this budget.
+	// read → Close). It feeds the echo-workload scenarios' per-round
+	// budget (roundBudget) and the per-connection dial/I-O deadlines
+	// clamped to it. The steady-state ConnectLatency_Serial scenarios
+	// do NOT use this value at all — neither as an assertion nor as a
+	// deadline: their gate is the quantile policy from
+	// ConnectLatencyPolicy (see below) and their per-dial deadline is
+	// that policy's SpikeCeiling.
 	//
 	// The threshold is read on the cell-pinned backend (after Cell()),
 	// so implementations may vary it per axis value (e.g. tighter for
@@ -110,12 +161,17 @@ type Backend interface {
 	// backend that wanted to split those costs into separate budgets
 	// would need a richer interface.
 	//
-	// The Performance suite's ConnectLatency_Serial scenarios drive
-	// this threshold against the steady-state path — they discard one
-	// untimed warm-up dial before measuring. Cold-start cost is
-	// regression-protected separately via ColdStartLatencyThreshold
-	// and ConnectLatency_ColdStart_* scenarios.
+	// Cold-start cost is regression-protected separately via
+	// ColdStartLatencyThreshold and ConnectLatency_ColdStart_*.
 	ConnectLatencyThreshold() time.Duration
+
+	// ConnectLatencyPolicy parameterises the steady-state
+	// ConnectLatency_Serial assertion for this backend. It is read on
+	// the cell-pinned backend so an Azure implementation may tune the
+	// quantile gate per axis value when data justifies it. See
+	// ConnectLatencyPolicy (the struct) for the meaning of each field
+	// and the rationale for a quantile gate over a per-sample ceiling.
+	ConnectLatencyPolicy() ConnectLatencyPolicy
 
 	// ColdStartLatencyThreshold is the per-backend ceiling for the
 	// very first connection through a freshly-started sender — the

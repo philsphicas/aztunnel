@@ -69,9 +69,11 @@ func (p *pendingRendezvous) abort() {
 
 // handleConnect handles the sender's connect WebSocket. The flow:
 //  1. DelayProfile entry sleeps (DNS, handshake, WSGet) so the sender's
-//     SAS token "arrives" at the relay at the modeled wire time.
-//  2. AuthInternal + validateSAS — 401 on failure (pre-upgrade, with a
-//     hopsResponse leg paid before the body is written).
+//     token "arrives" at the relay at the modeled wire time.
+//  2. authCost + validateToken — the auth-validation cost (AuthInternal
+//     for SAS, EntraValidate for Entra) then the matching validator;
+//     401 on failure (pre-upgrade, with a hopsResponse leg paid before
+//     the body is written).
 //  3. tryReserve (per-entity cap) — 503 on failure.
 //  4. Build id + rendezvous URL.
 //  5. MatchMakeInternal + lookup listener controls. Empty → 404
@@ -98,10 +100,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request, entity st
 	if !sleepContext(ctx, p.DNSLookup+hopsHandshake*p.SLatency+hopsWSGet*p.SLatency) {
 		return
 	}
-	if !sleepContext(ctx, p.AuthInternal) {
+	if !sleepContext(ctx, s.authCost(r)) {
 		return
 	}
-	if err := s.validateSAS(r); err != nil {
+	if err := s.validateToken(r); err != nil {
 		s.log.Warn("sender auth failed", "entity", entity, "remote", r.RemoteAddr, "error", err)
 		_ = sleepContext(ctx, hopsResponse*p.SLatency)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)

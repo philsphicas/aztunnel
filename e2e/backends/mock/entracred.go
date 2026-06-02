@@ -23,17 +23,19 @@ import (
 // actually works — break EntraTokenProvider's caching and `calls` jumps
 // from 1 to N.
 //
-// The token string it returns is a genuine SAS token signed with the
-// mock relay's default key, because mockrelay/server.validateSAS only
-// accepts SharedAccessSignature-shaped tokens. The mock does not compare
-// the token audience (sr) against the request URI, so a single fixed
-// resource URI signs a token valid for every entity. This is a
+// The token string it returns is a fake Entra (OAuth2 JWT) bearer token
+// minted by server.MintFakeBearerToken: an HS256 compact JWS signed with
+// the mock relay's default key. The mock relay sniffs the token shape and
+// runs it down the Entra validation path (server.validateBearer), charging
+// the per-request EntraValidate cost — so the mock now models the Entra
+// "warm tax" the real Azure Relay control plane pays on every
+// token-bearing leg, not just the client-side acquisition. This is still a
 // deliberate fidelity trade: we model Entra *client acquisition timing +
-// caching + metrics*, NOT Entra cryptography, OAuth scopes, audience
-// binding, or server-side RBAC (none of which the mock server can
-// validate). The trade is only safe because production EntraTokenProvider
-// never parses the returned token string — it trusts AccessToken.ExpiresOn
-// directly (internal/relay/auth.go) — so a SAS-shaped string is opaque to
+// caching + metrics* and the *relay-side per-request validation cost*, NOT
+// real Entra cryptography (RS256/AAD keys), OAuth scopes, audience binding,
+// or RBAC. The trade is safe because production EntraTokenProvider never
+// parses the returned token string — it trusts AccessToken.ExpiresOn
+// directly (internal/relay/auth.go) — so a JWT-shaped string is opaque to
 // it. Revisit if EntraTokenProvider ever starts parsing the token body.
 type fakeEntraCredential struct {
 	// delay is the synthetic per-acquisition latency, modelling the
@@ -56,16 +58,12 @@ func (c *fakeEntraCredential) GetToken(ctx context.Context, _ policy.TokenReques
 			return azcore.AccessToken{}, ctx.Err()
 		}
 	}
-	// Sign a SAS token the mock relay will accept. The audience is a
-	// fixed placeholder — validateSAS does not bind sr to the request
-	// URI — and outlives the test so the cache treats it as fresh.
+	// Mint a fake Entra JWT the mock relay will validate down its Entra
+	// path (charging EntraValidate). It is signed with the relay's
+	// default key and outlives the test so the client cache treats it as
+	// fresh.
 	const tokenLifetime = time.Hour
-	tok, err := relay.GenerateSASToken(
-		"https://mock-entra.invalid/fake",
-		server.DefaultSASKeyName,
-		server.DefaultSASKey,
-		tokenLifetime,
-	)
+	tok, err := server.MintFakeBearerToken(server.DefaultSASKey, tokenLifetime)
 	if err != nil {
 		return azcore.AccessToken{}, err
 	}

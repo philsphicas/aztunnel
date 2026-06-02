@@ -228,21 +228,23 @@ func (b *MockBackend) Cell(values map[string]string) scenarios.Backend {
 const mockLatencyFloor = 3 * time.Second
 
 // mockLatencyBudget derives the per-connection latency ceiling for a
-// pinned profile. It is affine in the profile's predicted cost — one
-// cold rendezvous plus one bridge echo, the shape the ConnectLatency
-// scenarios measure (dial -> 1-byte echo) — so a slow profile gets a
-// proportionally larger budget that still trips on a real regression,
-// rather than a flat constant that would mask seconds-scale slowdowns.
-// The 3 s floor preserves the historical budget for the zero/default
-// profiles (both predict well under it).
+// pinned profile and auth method. It is affine in the profile's
+// predicted cost — one cold rendezvous (on the given auth path, so the
+// Entra leg pays EntraValidate instead of AuthInternal) plus one bridge
+// echo, the shape the ConnectLatency scenarios measure (dial -> 1-byte
+// echo) — so a slow profile gets a proportionally larger budget that
+// still trips on a real regression, rather than a flat constant that
+// would mask seconds-scale slowdowns. The 3 s floor preserves the
+// historical budget for the zero/default profiles (both predict well
+// under it).
 //
 // Note: the workload scenarios' warm-request budget (roundBudget in
 // e2e/scenarios/performance.go) is a flat 500 ms per request and is
 // NOT derived from the profile; a profile whose PredictedBridgeEcho
 // exceeds that would need roundBudget made delay-aware. Both currently
 // registered profiles (zero, default) are well within it.
-func mockLatencyBudget(p server.DelayProfile) time.Duration {
-	predicted := p.PredictedRendezvous() + p.PredictedBridgeEcho()
+func mockLatencyBudget(p server.DelayProfile, entra bool) time.Duration {
+	predicted := p.PredictedRendezvousFor(entra) + p.PredictedBridgeEcho()
 	budget := predicted*3/2 + 2*time.Second
 	if budget < mockLatencyFloor {
 		budget = mockLatencyFloor
@@ -256,7 +258,27 @@ func mockLatencyBudget(p server.DelayProfile) time.Duration {
 // mockLatencyBudget). A directly-constructed zero-profile backend
 // yields the 3 s floor — the historical value.
 func (b *MockBackend) ConnectLatencyThreshold() time.Duration {
-	return mockLatencyBudget(b.DelayProfile)
+	return mockLatencyBudget(b.DelayProfile, b.authName == AuthEntra)
+}
+
+// ConnectLatencyPolicy returns a strict, spike-free quantile gate for
+// the mock backend. The in-process mock is deterministic — every dial
+// pays the same modelled rendezvous delay with negligible jitter — so
+// it must NOT inherit Azure's spike tolerance, which would mask a real
+// regression in mock-exercised code. All three thresholds collapse to
+// the single deterministic budget (mockLatencyBudget): the upper-median
+// and soft-tail samples both sit at ~the modelled latency, comfortably
+// under the budget, and any regression that lifts the bulk of samples
+// past the budget trips the gate. Iterations is kept at 10 since extra
+// samples buy nothing against a deterministic backend.
+func (b *MockBackend) ConnectLatencyPolicy() scenarios.ConnectLatencyPolicy {
+	budget := mockLatencyBudget(b.DelayProfile, b.authName == AuthEntra)
+	return scenarios.ConnectLatencyPolicy{
+		Iterations:   10,
+		NormalP50:    budget,
+		SoftTail:     budget,
+		SpikeCeiling: budget,
+	}
 }
 
 // ColdStartLatencyThreshold returns the per-backend ceiling for the
@@ -269,7 +291,7 @@ func (b *MockBackend) ConnectLatencyThreshold() time.Duration {
 // is 0, so entra and sas share the same (floored) cold-start budget,
 // keeping "zero means instant everywhere" intact.
 func (b *MockBackend) ColdStartLatencyThreshold() time.Duration {
-	budget := mockLatencyBudget(b.DelayProfile)
+	budget := mockLatencyBudget(b.DelayProfile, b.authName == AuthEntra)
 	if b.authName == AuthEntra {
 		budget += entraColdStartHeadroom(b.DelayProfile)
 	}
