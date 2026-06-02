@@ -210,6 +210,11 @@ func ScenarioShortSession_Serial(t *testing.T, b Backend) {
 // brand-new tunnels, but by the first measured iteration the relay is
 // fully warm (one untimed warm-up dial precedes the loop); failing on
 // a real dial error here is what we want to measure.
+//
+// When a tolerated spike occurs (a sample >= NormalP50) but the batch
+// still passes, the captured sender/listener rendezvous traces are
+// dumped so the resp_wait phase split is visible for that run — the
+// failure dump alone would discard them on a green run.
 func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	t.Helper()
 	policy := b.ConnectLatencyPolicy()
@@ -241,20 +246,41 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	t.Logf("ConnectLatency_Serial_%v warmup: %v (untimed)", mode, warmupElapsed)
 
 	samples := make([]time.Duration, 0, policy.Iterations)
+	spikes := 0
 	for i := 0; i < policy.Iterations; i++ {
 		elapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, deadlineBudget)
 		if err != nil {
 			t.Fatalf("iter %d: %v (elapsed=%v)", i, err, elapsed)
 		}
 		samples = append(samples, elapsed)
+		if elapsed >= policy.NormalP50 {
+			spikes++
+			t.Logf("ConnectLatency_Serial_%v iter %d: %v [tolerated spike >= NormalP50 %v; see rendezvous trace dump below for the resp_wait phase split]",
+				mode, i, elapsed, policy.NormalP50)
+			continue
+		}
 		t.Logf("ConnectLatency_Serial_%v iter %d: %v", mode, i, elapsed)
 	}
 
-	t.Logf("ConnectLatency_Serial_%v distribution: %s (policy normalP50=%v softTail=%v over %d iters)",
-		mode, fmtDist("connect", samples), policy.NormalP50, policy.SoftTail, policy.Iterations)
+	t.Logf("ConnectLatency_Serial_%v distribution: %s (policy normalP50=%v softTail=%v over %d iters, %d tolerated spike(s))",
+		mode, fmtDist("connect", samples), policy.NormalP50, policy.SoftTail, policy.Iterations, spikes)
 
 	if ok, reason := evaluateConnectLatency(samples, policy); !ok {
 		t.Errorf("ConnectLatency_Serial_%v: %s", mode, reason)
+	}
+
+	// Surface the per-dial rendezvous traces (which carry resp_wait, the
+	// relay-side hold of the HTTP 101) whenever a tolerated spike
+	// occurred but the batch still passed. The DEBUG trace is captured
+	// into the sender/listener log buffers on every dial, but the
+	// failure dump only fires on t.Failed() — so on a green-but-spiky
+	// run the very trace that diagnoses Phase 2 (sender cold dial) vs
+	// Phase 3 (relay hold) would otherwise be discarded. Skip when the
+	// batch failed: dumpConnectLatencyLogsOnFail already dumps then.
+	if spikes > 0 && !t.Failed() {
+		t.Logf("ConnectLatency_Serial_%v: %d tolerated spike(s) >= NormalP50 %v on a passing run; dumping rendezvous traces for phase analysis",
+			mode, spikes, policy.NormalP50)
+		dumpTunnelLogs(t, tun)
 	}
 }
 
@@ -463,6 +489,7 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	// for it.
 	const attempts = 2
 	var elapsed time.Duration
+	var spikedTun *Tunnel
 	for attempt := 1; attempt <= attempts; attempt++ {
 		// A fresh Setup spawns a brand-new sender process, which is
 		// what makes the token cold again. Each Setup registers its own
@@ -478,8 +505,17 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 		}
 		if elapsed < threshold {
 			t.Logf("ConnectLatency_ColdStart_%v: %v (< %v) [attempt %d/%d]", mode, elapsed, threshold, attempt, attempts)
+			// If an earlier attempt spiked but this one recovered, the
+			// scenario passes and the failure dump never fires — so
+			// surface the spiked attempt's rendezvous trace (resp_wait)
+			// for phase analysis, mirroring the serial scenario.
+			if spikedTun != nil {
+				t.Logf("ConnectLatency_ColdStart_%v: recovered after a tolerated spike; dumping the spiked attempt's rendezvous trace for phase analysis", mode)
+				dumpTunnelLogs(t, spikedTun)
+			}
 			return
 		}
+		spikedTun = tun
 		t.Logf("ConnectLatency_ColdStart_%v: attempt %d/%d spiked at %v (>= %v)", mode, attempt, attempts, elapsed, threshold)
 	}
 	t.Errorf("cold-start connect latency %v >= threshold %v on all %d attempts", elapsed, threshold, attempts)
