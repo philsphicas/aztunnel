@@ -139,8 +139,13 @@ type Backend interface {
 
 	// ConnectLatencyThreshold is the per-backend ceiling for a single
 	// fresh-connection round-trip (Dial → 1-byte write → 1-byte echo
-	// read → Close). The Performance suite's serial-connect scenarios
-	// assert each iteration completes inside this budget.
+	// read → Close). It feeds the echo-workload scenarios' per-round
+	// budget (roundBudget) and the per-connection dial/I-O deadlines
+	// clamped to it. The steady-state ConnectLatency_Serial scenarios
+	// do NOT use this value at all — neither as an assertion nor as a
+	// deadline: their gate is the quantile policy from
+	// ConnectLatencyPolicy (see below) and their per-dial deadline is
+	// that policy's SpikeCeiling.
 	//
 	// The threshold is read on the cell-pinned backend (after Cell()),
 	// so implementations may vary it per axis value (e.g. tighter for
@@ -156,11 +161,8 @@ type Backend interface {
 	// backend that wanted to split those costs into separate budgets
 	// would need a richer interface.
 	//
-	// The Performance suite's ConnectLatency_Serial scenarios drive
-	// this threshold against the steady-state path — they discard one
-	// untimed warm-up dial before measuring. Cold-start cost is
-	// regression-protected separately via ColdStartLatencyThreshold
-	// and ConnectLatency_ColdStart_* scenarios.
+	// Cold-start cost is regression-protected separately via
+	// ColdStartLatencyThreshold and ConnectLatency_ColdStart_*.
 	ConnectLatencyThreshold() time.Duration
 
 	// ConnectLatencyPolicy parameterises the steady-state

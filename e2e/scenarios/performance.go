@@ -275,12 +275,14 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	// into the sender/listener log buffers on every dial, but the
 	// failure dump only fires on t.Failed() — so on a green-but-spiky
 	// run the very trace that diagnoses Phase 2 (sender cold dial) vs
-	// Phase 3 (relay hold) would otherwise be discarded. Skip when the
-	// batch failed: dumpConnectLatencyLogsOnFail already dumps then.
+	// Phase 3 (relay hold) would otherwise be discarded. We dump only
+	// the trace lines (not the full DEBUG buffers) to keep green-run CI
+	// output lean. Skip when the batch failed: dumpConnectLatencyLogsOnFail
+	// already dumps the full logs then.
 	if spikes > 0 && !t.Failed() {
 		t.Logf("ConnectLatency_Serial_%v: %d tolerated spike(s) >= NormalP50 %v on a passing run; dumping rendezvous traces for phase analysis",
 			mode, spikes, policy.NormalP50)
-		dumpTunnelLogs(t, tun)
+		dumpTunnelRendezvousTraces(t, tun)
 	}
 }
 
@@ -374,7 +376,9 @@ func dumpConnectLatencyLogsOnFail(t *testing.T, tun *Tunnel) {
 // dumpTunnelLogs prints the captured sender and listener logs for
 // every process in the tunnel, skipping nil handles and backends that
 // did not wire log capture (Logs == nil). It is unconditional; the
-// failure gate lives in dumpConnectLatencyLogsOnFail's cleanup.
+// failure gate lives in dumpConnectLatencyLogsOnFail's cleanup. It
+// dumps the FULL buffers and so is reserved for failing runs — passing
+// runs use the lean dumpTunnelRendezvousTraces instead.
 func dumpTunnelLogs(t *testing.T, tun *Tunnel) {
 	t.Helper()
 	for i, s := range tun.Senders {
@@ -389,6 +393,64 @@ func dumpTunnelLogs(t *testing.T, tun *Tunnel) {
 		}
 		t.Logf("--- listener[%d] logs ---\n%s", i, l.Logs())
 	}
+}
+
+// dumpTunnelRendezvousTraces prints ONLY the rendezvous-trace log lines
+// (the dns/tcp/tls/req_written/first_byte/resp_wait phase split emitted
+// by internal/relay's dial tracer) from each process in the tunnel. It
+// is the lean counterpart to dumpTunnelLogs, used on PASSING-but-spiky
+// runs: the Azure sender/listener subprocesses log at DEBUG, so dumping
+// their entire buffers on every green run that happened to tolerate a
+// spike would bloat CI output (and risk hitting log truncation limits),
+// while phase analysis only needs the trace lines. Full-buffer dumps
+// stay reserved for failing runs (dumpConnectLatencyLogsOnFail).
+func dumpTunnelRendezvousTraces(t *testing.T, tun *Tunnel) {
+	t.Helper()
+	emitted := false
+	dump := func(label string, logs func() string) {
+		if traces := filterTraceLines(logs()); traces != "" {
+			t.Logf("--- %s rendezvous traces ---\n%s", label, traces)
+			emitted = true
+		}
+	}
+	for i, s := range tun.Senders {
+		if s == nil || s.Logs == nil {
+			continue
+		}
+		dump(fmt.Sprintf("sender[%d]", i), s.Logs)
+	}
+	for i, l := range tun.Listeners {
+		if l == nil || l.Logs == nil {
+			continue
+		}
+		dump(fmt.Sprintf("listener[%d]", i), l.Logs)
+	}
+	if !emitted {
+		// Distinguish "tracer fired, here are the spans" from "nothing
+		// captured" (tracer disabled, buffer rolled, or no log capture
+		// wired) so the preceding "dumping…" announcement is never
+		// followed by confusing silence.
+		t.Logf("(no rendezvous trace lines captured)")
+	}
+}
+
+// filterTraceLines returns only the lines of logs that carry a
+// rendezvous trace (both the "relay rendezvous trace" sender lines and
+// the "accept rendezvous trace" listener lines, including their
+// "(dial failed)" variants), joined by newlines. Returns "" when none
+// match.
+func filterTraceLines(logs string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(logs, "\n") {
+		if !strings.Contains(line, "rendezvous trace") {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // ScenarioConnectLatency_ColdStart_PortForward opens exactly one
@@ -515,10 +577,12 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 			// If an earlier attempt spiked but this one recovered, the
 			// scenario passes and the failure dump never fires — so
 			// surface the spiked attempt's rendezvous trace (resp_wait)
-			// for phase analysis, mirroring the serial scenario.
+			// for phase analysis, mirroring the serial scenario. Dump
+			// only the trace lines, not the full DEBUG buffers, to keep
+			// passing-run CI output lean.
 			if spikedTun != nil {
 				t.Logf("ConnectLatency_ColdStart_%v: recovered after a tolerated spike; dumping the spiked attempt's rendezvous trace for phase analysis", mode)
-				dumpTunnelLogs(t, spikedTun)
+				dumpTunnelRendezvousTraces(t, spikedTun)
 			}
 			return
 		}
