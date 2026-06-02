@@ -439,16 +439,23 @@ func ScenarioConnectLatency_ColdStart_SOCKS5(t *testing.T, b Backend) {
 }
 
 // runColdStartConnectLatency is the shared implementation of the
-// two ConnectLatency_ColdStart variants. It builds a fresh topology,
-// performs exactly one timed dial through the cold sender, and
-// asserts the elapsed time is below b.ColdStartLatencyThreshold().
+// two ConnectLatency_ColdStart variants. It builds a fresh topology
+// and times a cold-sender dial, asserting the elapsed time is below
+// b.ColdStartLatencyThreshold(). To absorb isolated Azure Relay
+// rendezvous spikes (independent of aztunnel) it uses a best-of-2
+// attempt loop: each attempt spawns a brand-new sender process (still
+// a cold token) and the scenario passes if either attempt is under
+// threshold. On a passing run where an earlier attempt spiked, the
+// spiked attempt's rendezvous trace is dumped for phase analysis.
 //
 // Unlike runSerialConnectLatency, no warm-up dial precedes the
 // measurement — measuring the cold-start cost is the whole point.
-// The dial timeout and connection deadline both use
-// threshold + connectSlack so a regression surfaces as the explicit
-// elapsed >= threshold assertion rather than as an i/o timeout from
-// the deadline firing exactly at the threshold.
+// The per-dial deadline budget is decoupled from the assertion
+// threshold (deadlineBudget = threshold + SpikeCeiling, plus
+// connectSlack inside timeOneConnect) so a tolerable spike returns a
+// measured over-threshold sample for the retry instead of a fatal i/o
+// timeout, while a genuine regression still surfaces as the explicit
+// elapsed >= threshold assertion.
 func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	t.Helper()
 	threshold := b.ColdStartLatencyThreshold()
