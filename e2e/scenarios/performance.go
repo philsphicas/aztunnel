@@ -498,8 +498,8 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 // The dial timeout and connection deadline both use
 // deadlineBudget + connectSlack. deadlineBudget is the caller's
 // generous per-dial ceiling (the serial scenario passes its
-// SpikeCeiling, the cold-start scenario passes its threshold); the
-// slack only widens the timeout headroom so a tolerated slow dial is
+// SpikeCeiling; the cold-start scenario passes its threshold +
+// SpikeCeiling); the slack only widens the timeout headroom so a tolerated slow dial is
 // measured and returned to the caller rather than surfacing as an i/o
 // timeout from the deadline firing.
 //
