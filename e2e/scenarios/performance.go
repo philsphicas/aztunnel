@@ -78,6 +78,9 @@ func performanceCases() []scenarioCase {
 		{name: "Parallel_ConnReusedEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnReusedEcho_SOCKS5},
 		{name: "Parallel_ConnPrewarmedEcho_SOCKS5", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_SOCKS5},
 		{name: "Parallel_ConnPrewarmedEcho_SOCKS5_MultiTarget", scope: AnyBackend, run: ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget},
+		// Real-usage workload shapes (customer fan-out).
+		{name: "Parallel_AsymmetricRespond_SOCKS5_FanOut", scope: AnyBackend, run: ScenarioParallel_AsymmetricRespond_SOCKS5_FanOut},
+		{name: "Parallel_ConnPerRequest_SOCKS5_DistinctTargets_N32", scope: AnyBackend, run: ScenarioParallel_ConnPerRequest_SOCKS5_DistinctTargets_N32},
 	}
 }
 
@@ -731,6 +734,39 @@ type WorkloadShape struct {
 	NumTargets   int
 	Mode         SenderMode
 	RepeatRounds int
+
+	// Workload selects the downstream WorkloadServer behavior and the
+	// matching client protocol. The zero value (WorkloadEcho) preserves
+	// the legacy plain-echo round-trip exactly. WorkloadRespond drives a
+	// framed asymmetric request/response (ReqSize need not equal
+	// RespSize). WorkloadStream is driven by a separate runner, not
+	// runRound.
+	Workload WorkloadKind
+
+	// ProcessingDelay is the server think-time inserted before each
+	// response in WorkloadRespond mode. Ignored by WorkloadEcho.
+	ProcessingDelay time.Duration
+}
+
+// WorkloadKind selects the workload protocol a shape drives; it maps to a
+// WorkloadServer ServerMode for the on-wire behavior.
+type WorkloadKind int
+
+const (
+	WorkloadEcho    WorkloadKind = iota // literal io.Copy echo (legacy default)
+	WorkloadRespond                     // framed asymmetric request/response
+	WorkloadStream                      // long-lived server-paced trickle stream
+)
+
+// serverBehavior maps a shape to the ServerBehavior its downstream
+// targets run.
+func (w WorkloadShape) serverBehavior() ServerBehavior {
+	switch w.Workload {
+	case WorkloadRespond:
+		return ServerBehavior{Mode: ServerRespond, RespSize: w.RespSize, ProcessingDelay: w.ProcessingDelay}
+	default:
+		return ServerBehavior{} // ServerEcho
+	}
 }
 
 func runWorkload(t *testing.T, b Backend, w WorkloadShape) {
@@ -749,8 +785,9 @@ func runWorkload(t *testing.T, b Backend, w WorkloadShape) {
 		t.Fatalf("invalid WorkloadShape: %v", err)
 	}
 	addrs := make([]string, w.NumTargets)
+	behavior := w.serverBehavior()
 	for i := range addrs {
-		addrs[i] = StartPlainEcho(t).Addr()
+		addrs[i] = StartWorkloadServer(t, behavior).Addr()
 	}
 	opts := SetupOptions{NumListeners: 1, SenderMode: w.Mode, AllowedTargets: addrs}
 	if w.Mode == ModePortForward {
@@ -792,12 +829,15 @@ func (w WorkloadShape) validate() error {
 	if w.ReqSize < 1 || w.RespSize < 1 {
 		return fmt.Errorf("ReqSize (%d) and RespSize (%d) must both be >= 1", w.ReqSize, w.RespSize)
 	}
-	if w.ReqSize != w.RespSize {
-		return fmt.Errorf("ReqSize (%d) and RespSize (%d) must match: the workload is an echo, so the response is the request",
+	if w.Workload == WorkloadEcho && w.ReqSize != w.RespSize {
+		return fmt.Errorf("ReqSize (%d) and RespSize (%d) must match in WorkloadEcho mode: the echo response is the request (use WorkloadRespond for asymmetric sizes)",
 			w.ReqSize, w.RespSize)
 	}
 	if w.NumTargets < 1 {
 		return fmt.Errorf("NumTargets must be >= 1, got %d", w.NumTargets)
+	}
+	if w.Workload == WorkloadStream {
+		return fmt.Errorf("WorkloadStream is not driven by runWorkload/runRound; it requires the dedicated streaming runner (Stage B)")
 	}
 	if w.NumTargets > 1 && w.Mode == ModePortForward {
 		return fmt.Errorf("NumTargets > 1 is only supported with ModeSOCKS5; ModePortForward has a single fixed Target (got NumTargets=%d)", w.NumTargets)
@@ -1047,25 +1087,13 @@ func runOneConn(senderAddr, target string, w WorkloadShape, roundDeadline time.T
 		return connResult{Err: fmt.Errorf("set deadline: %w", err)}
 	}
 
-	req := make([]byte, w.ReqSize)
-	for i := range req {
-		req[i] = byte(i)
-	}
-	buf := make([]byte, w.RespSize)
+	doRequest := requestFn(conn, w)
 
 	res := connResult{}
 	for i := 0; i < w.RequestsPerConn; i++ {
 		reqStart := time.Now()
-		if err = writeFull(conn, req); err != nil {
-			res.Err = fmt.Errorf("write[%d]: %w", i, err)
-			return res
-		}
-		if _, err = io.ReadFull(conn, buf); err != nil {
-			res.Err = fmt.Errorf("read[%d]: %w", i, err)
-			return res
-		}
-		if !bytes.Equal(buf, req) {
-			res.Err = fmt.Errorf("echo[%d]: payload mismatch", i)
+		if err := doRequest(i); err != nil {
+			res.Err = err
 			return res
 		}
 		elapsed := time.Since(reqStart)
@@ -1077,6 +1105,39 @@ func runOneConn(senderAddr, target string, w WorkloadShape, roundDeadline time.T
 		}
 	}
 	return res
+}
+
+// requestFn builds the per-request operation for one connection,
+// dispatching on the workload kind. The echo path writes ReqSize bytes
+// and verifies the byte-identical echo; the respond path drives one
+// framed asymmetric request/response (which carries its own integrity
+// check via the nonce-keyed pattern). The returned closure is called once
+// per request with the request index.
+func requestFn(conn net.Conn, w WorkloadShape) func(i int) error {
+	if w.Workload == WorkloadRespond {
+		base := randNonce()
+		return func(i int) error {
+			return doRespondRequest(conn, base+uint64(i), w.ReqSize, w.RespSize)
+		}
+	}
+	// WorkloadEcho: write a fixed payload, expect it back verbatim.
+	req := make([]byte, w.ReqSize)
+	for i := range req {
+		req[i] = byte(i)
+	}
+	buf := make([]byte, w.RespSize)
+	return func(i int) error {
+		if err := writeFull(conn, req); err != nil {
+			return fmt.Errorf("write[%d]: %w", i, err)
+		}
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			return fmt.Errorf("read[%d]: %w", i, err)
+		}
+		if !bytes.Equal(buf, req) {
+			return fmt.Errorf("echo[%d]: payload mismatch", i)
+		}
+		return nil
+	}
 }
 
 // ----------------------------------------------------------------------------
@@ -1209,6 +1270,60 @@ func ScenarioParallel_ConnPrewarmedEcho_SOCKS5_MultiTarget(t *testing.T, b Backe
 		TotalConns: 5, Concurrency: 5, RequestsPerConn: 21, WarmupRequests: 1,
 		ReqSize: 1024, RespSize: 1024, Mode: ModeSOCKS5,
 		NumTargets: 4,
+	})
+}
+
+// ----------------------------------------------------------------------------
+// Real-usage workload shapes (customer fan-out: GNMI/eAPI → SOCKS5 → N devices)
+// ----------------------------------------------------------------------------
+
+// AsymmetricReqSize / AsymmetricRespSize size the eAPI-like asymmetric
+// shape: a small request eliciting a large response. 256 B → 64 KiB
+// mirrors a config-get / state-fetch call where the reply dwarfs the
+// query.
+const (
+	AsymmetricReqSize  = 256
+	AsymmetricRespSize = 64 << 10
+)
+
+// ScenarioParallel_AsymmetricRespond_SOCKS5_FanOut drives the asymmetric
+// request/response shape (eAPI-like): 8 parallel SOCKS5 connections fan
+// out across 4 distinct WorkloadServer targets in ServerRespond mode,
+// each sending a 256 B request and reading a framed 64 KiB response.
+// One warm-up request per conn is discarded; the remaining 10×8 = 80
+// measured round-trips report the steady-state warm distribution.
+//
+// Unlike the echo scenarios, request and response sizes differ — the
+// framed protocol carries a nonce-keyed pattern so corruption,
+// truncation, and misrouted responses are still caught without a
+// byte-identical echo. Reuses the cold/warm RTT metric family.
+func ScenarioParallel_AsymmetricRespond_SOCKS5_FanOut(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: 8, Concurrency: 8, RequestsPerConn: 11, WarmupRequests: 1,
+		ReqSize: AsymmetricReqSize, RespSize: AsymmetricRespSize,
+		Mode: ModeSOCKS5, NumTargets: 4,
+		Workload: WorkloadRespond,
+	})
+}
+
+// DistinctTargetFanOut is the device count the N32 fan-out shape spreads
+// across — close to the customer's ~36 Arista cEOS devices behind one
+// SOCKS5 sender, rounded to a tidy power of two.
+const DistinctTargetFanOut = 32
+
+// ScenarioParallel_ConnPerRequest_SOCKS5_DistinctTargets_N32 models the
+// customer fan-out: 32 parallel SOCKS5 connections, one per distinct
+// downstream target, each doing a single 1 KB echo round-trip then
+// closing. This is the connection-setup-amortization probe for #47 — the
+// shape where stream multiplexing should help most (many short-lived
+// concurrent connections), measured via the cold-path per-conn RTT and
+// the round wall time. No new server behavior: plain echo targets.
+func ScenarioParallel_ConnPerRequest_SOCKS5_DistinctTargets_N32(t *testing.T, b Backend) {
+	runWorkload(t, b, WorkloadShape{
+		TotalConns: DistinctTargetFanOut, Concurrency: DistinctTargetFanOut,
+		RequestsPerConn: 1,
+		ReqSize:         1024, RespSize: 1024,
+		Mode: ModeSOCKS5, NumTargets: DistinctTargetFanOut,
 	})
 }
 
