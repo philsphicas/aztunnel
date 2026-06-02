@@ -19,8 +19,10 @@ import (
 // connection-setup and short-session work as testing.T so CI fails
 // when wall time exceeds the per-backend threshold.
 //
-// Two scenarios assert per-iteration time against
-// ConnectLatencyThreshold; ShortSession_Serial is observation-only.
+// Two scenarios assert connect time against the backend's
+// ConnectLatencyPolicy (ConnectLatency_Serial) / ColdStartLatency-
+// Threshold (ConnectLatency_ColdStart); ShortSession_Serial is
+// observation-only.
 // The 12 parameterized echo-workload scenarios that follow
 // (Serial|Parallel × ConnPerRequest|ConnReused|ConnPrewarmed ×
 // _PortForward|_SOCKS5), plus the single _MultiTarget variant that
@@ -48,7 +50,7 @@ func RunPerformanceScenarios(t *testing.T, b Backend) {
 
 // performanceCases is the metadata-only registry of performance
 // scenarios. All entries are AnyBackend: per-backend thresholds are
-// applied inside each scenario via b.ConnectLatencyThreshold(),
+// applied inside each scenario via b.ConnectLatencyPolicy(),
 // b.RoundBudget(), etc., so the same scenario can run against both
 // without false alarms.
 //
@@ -79,31 +81,21 @@ func performanceCases() []scenarioCase {
 	}
 }
 
-// ScenarioConnectLatency_Serial_PortForward opens 10 serial
-// port-forward connections, each performing one 1-byte echo
-// round-trip, and asserts every iteration completes inside
-// b.ConnectLatencyThreshold(). One additional untimed warm-up
-// dial precedes the measured loop so per-process cold-start
-// costs (notably the EntraTokenProvider's first credential
-// fetch — ~2-3 s observed against Entra ID) don't bleed into
-// the first measured iteration. The scenario logs the warm-up
-// elapsed for visibility and a per-iteration elapsed so a
-// failure makes the offending iteration obvious.
+// ScenarioConnectLatency_Serial_PortForward opens a backend-defined
+// number of serial port-forward connections (ConnectLatencyPolicy.
+// Iterations), each performing one 1-byte echo round-trip, and asserts
+// the batch against the backend's quantile gate (upper-median <
+// NormalP50 AND soft-tail < SoftTail; see ConnectLatencyPolicy). One
+// additional untimed warm-up dial precedes the measured loop so
+// per-process cold-start costs (notably the EntraTokenProvider's first
+// credential fetch — ~2-3 s observed against Entra ID) don't bleed into
+// the measured samples. The scenario logs the warm-up elapsed and a
+// per-iteration elapsed plus the distribution so a failure is
+// diagnosable from CI output alone.
 //
-// Measured iteration count is fixed at 10 (plus 1 warm-up).
-// Walltime bounds at the current 3 s thresholds:
-//   - Happy path: 11 × ~1 s rendezvous ≈ 11 s per scenario.
-//   - Threshold-only violation (operational success, elapsed too
-//     high): bounded by 11 × (threshold + connectSlack) ≈ 88 s
-//     per scenario, since runSerialConnectLatency uses
-//     t.Errorf + continue on threshold violations and a
-//     successful iteration can use up to threshold+connectSlack
-//     of budget before the deadline fires.
-//   - Operational error (dial/echo/close failure): fails fast at
-//     ≈ threshold + connectSlack ≈ 8 s via t.Fatalf.
-//
-// All three bounds keep the scenario well inside both the
-// per-test default timeout and the e2e job's 60 m envelope.
+// Walltime is bounded by Iterations × (SpikeCeiling + connectSlack) in
+// the worst case (every dial stalls to its deadline), well inside the
+// e2e job's 60 m envelope; the happy path is Iterations × ~steady-state.
 func ScenarioConnectLatency_Serial_PortForward(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
@@ -181,49 +173,46 @@ func ScenarioShortSession_Serial(t *testing.T, b Backend) {
 // runSerialConnectLatency is the shared implementation of the two
 // ConnectLatency_Serial variants. Each measured iteration: dial
 // (port-forward TCP or SOCKS5 CONNECT) → write 1 byte → read
-// 1 byte echoed back → close. Asserts elapsed < threshold per
-// measured iteration.
+// 1 byte echoed back → close. It collects every iteration's elapsed
+// time and asserts the batch against the backend's
+// ConnectLatencyPolicy quantile gate (see evaluateConnectLatency and
+// the ConnectLatencyPolicy doc) rather than checking each sample
+// against a single ceiling.
 //
-// A single warm-up dial precedes the measured loop. Its elapsed
-// is logged but neither threshold-asserted nor counted in the
-// measured iteration count. The warm-up absorbs per-process
-// cold-start costs that the steady-state scenario isn't trying
-// to characterize — most prominently the EntraTokenProvider's
-// first credential fetch, which observably adds ~2-3 s to the
-// first connection and exceeds the 3 s threshold on most runs
-// against Entra ID. Without the warm-up, ConnectLatency_Serial
-// flakes on Entra cells while reporting healthy steady-state
-// latency on every subsequent iteration.
+// The quantile gate exists because the dominant failure mode against
+// real Azure Relay is an isolated multi-second rendezvous spike that
+// originates in the relay control plane, not in aztunnel (proven from
+// full sender+listener logs: zero client-side retries, the listener
+// sits idle in ws.Read for the whole stall, then accepts normally).
+// A per-sample ceiling turns that unfixable tail into a flake; a
+// per-sample ceiling with a tolerated-spike count reintroduces the
+// same cliff at a higher count. The upper-median + soft-tail gate
+// tolerates the sparse tail while still tripping on a broad regression
+// (which an old "max < 3 s" check missed entirely below 3 s).
 //
-// Failure-mode handling is deliberately split:
+// A single warm-up dial precedes the measured loop. Its elapsed is
+// logged but neither asserted nor counted. The warm-up absorbs
+// per-process cold-start costs the steady-state scenario isn't trying
+// to characterize — most prominently the EntraTokenProvider's first
+// credential fetch, which observably adds ~2-3 s to the first
+// connection. Cold-start cost is regression-protected separately via
+// ConnectLatency_ColdStart_*.
 //
-//   - Operational errors (dial/write/read/echo-mismatch/close) →
-//     t.Fatalf. These mean the harness is fundamentally broken
-//     (no rendezvous, target unreachable, socket draining
-//     timeout, etc.). Continuing past them wastes CI walltime
-//     because every subsequent iteration is likely to hit the
-//     same (threshold + connectSlack) ~ 8 s timeout — at 10
-//     iterations × 2 scenarios × 2 Azure auth cells that's a
-//     320 s failure-path burn against the 60 m e2e workflow
-//     envelope. Fail fast.
-//   - Threshold violations (operational success, elapsed >=
-//     threshold) → t.Errorf + continue. These produce a
-//     measured elapsed time on every iteration, so continuing is
-//     cheap (each iteration completed normally inside the budget
-//     window) and lets a flaky CI run surface every offending
-//     iteration in one report. CI still fails the suite either
-//     way.
+// Operational errors (dial/write/read/echo-mismatch/close) → t.Fatalf:
+// they mean the harness is fundamentally broken and every subsequent
+// iteration would burn the same deadline. The per-dial deadline is
+// anchored to policy.SpikeCeiling + connectSlack (not the assertion
+// thresholds) so a tolerated spike is measured rather than killed by
+// an i/o timeout.
 //
 // dialWithRetry / dialSOCKS5WithRetry are intentionally not used —
 // the retry helpers exist to swallow first-dial transient races on
-// brand-new tunnels, but the Performance scenarios open exactly
-// one topology, perform one untimed warm-up dial, and then dial
-// it 10 times in sequence. By the first measured iteration the
-// relay is fully warm; failing on a real dial error here is what
-// we want to measure.
+// brand-new tunnels, but by the first measured iteration the relay is
+// fully warm (one untimed warm-up dial precedes the loop); failing on
+// a real dial error here is what we want to measure.
 func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	t.Helper()
-	threshold := b.ConnectLatencyThreshold()
+	policy := b.ConnectLatencyPolicy()
 	echo := StartPlainEcho(t)
 	opts := SetupOptions{
 		NumListeners:   1,
@@ -236,27 +225,97 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	tun := b.Setup(t, opts)
 	dumpConnectLatencyLogsOnFail(t, tun)
 
-	const iterations = 10
 	payload := []byte{0x42}
 	buf := make([]byte, 1)
 
-	warmupElapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, threshold)
+	// The per-dial deadline is anchored to SpikeCeiling, not to the
+	// assertion thresholds, so a tolerated rendezvous spike is measured
+	// and folded into the quantiles rather than killed by an i/o
+	// timeout (which would be an unrecoverable t.Fatalf below).
+	deadlineBudget := policy.SpikeCeiling
+
+	warmupElapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, deadlineBudget)
 	if err != nil {
 		t.Fatalf("warmup: %v (elapsed=%v)", err, warmupElapsed)
 	}
-	t.Logf("ConnectLatency_Serial_%v warmup: %v (untimed, threshold %v)", mode, warmupElapsed, threshold)
+	t.Logf("ConnectLatency_Serial_%v warmup: %v (untimed)", mode, warmupElapsed)
 
-	for i := 0; i < iterations; i++ {
-		elapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, threshold)
+	samples := make([]time.Duration, 0, policy.Iterations)
+	for i := 0; i < policy.Iterations; i++ {
+		elapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, deadlineBudget)
 		if err != nil {
 			t.Fatalf("iter %d: %v (elapsed=%v)", i, err, elapsed)
 		}
-		if elapsed >= threshold {
-			t.Errorf("iter %d: connect latency %v >= threshold %v", i, elapsed, threshold)
-			continue
-		}
-		t.Logf("ConnectLatency_Serial_%v iter %d: %v (< %v)", mode, i, elapsed, threshold)
+		samples = append(samples, elapsed)
+		t.Logf("ConnectLatency_Serial_%v iter %d: %v", mode, i, elapsed)
 	}
+
+	t.Logf("ConnectLatency_Serial_%v distribution: %s (policy normalP50=%v softTail=%v over %d iters)",
+		mode, fmtDist("connect", samples), policy.NormalP50, policy.SoftTail, policy.Iterations)
+
+	if ok, reason := evaluateConnectLatency(samples, policy); !ok {
+		t.Errorf("ConnectLatency_Serial_%v: %s", mode, reason)
+	}
+}
+
+// evaluateConnectLatency judges a batch of connect-latency samples
+// against a policy's quantile gate. It returns ok=false with a
+// human-readable reason naming the first failing arm. See
+// ConnectLatencyPolicy for the rationale behind the two-arm gate and
+// the deliberate absence of a per-sample / spike-count cap.
+//
+// The gate is intentionally tolerant of a sparse tail of independent
+// spikes (the soft-tail statistic discards the top ceil(10%) of
+// samples) but strict about a broad shift (the upper-median moves the
+// moment the bulk of samples regress).
+func evaluateConnectLatency(samples []time.Duration, p ConnectLatencyPolicy) (ok bool, reason string) {
+	if len(samples) == 0 {
+		return false, "no connect-latency samples collected"
+	}
+	sorted := make([]time.Duration, len(samples))
+	copy(sorted, samples)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	p50 := upperMedian(sorted)
+	if p50 >= p.NormalP50 {
+		return false, fmt.Sprintf("median connect latency %v >= normal threshold %v (broad regression across %d samples; %s)",
+			p50, p.NormalP50, len(sorted), fmtDist("connect", sorted))
+	}
+
+	tolerate := tolerableSpikes(len(sorted))
+	softTail := softTailSample(sorted, tolerate)
+	if softTail >= p.SoftTail {
+		return false, fmt.Sprintf("soft-tail connect latency %v >= soft-tail threshold %v (tail degradation beyond the %d tolerated spike(s) across %d samples; %s)",
+			softTail, p.SoftTail, tolerate, len(sorted), fmtDist("connect", sorted))
+	}
+	return true, ""
+}
+
+// upperMedian returns the upper of the two central samples for an
+// even-length sorted slice, or the central sample for an odd length:
+// sorted[len/2]. Choosing the upper central value makes the median
+// assertion conservative — a regression that lifts half the samples
+// still trips it.
+func upperMedian(sorted []time.Duration) time.Duration {
+	return sorted[len(sorted)/2]
+}
+
+// tolerableSpikes is the number of top samples the soft-tail statistic
+// discards: ceil(10% of n). This scales the spike tolerance with the
+// iteration count (2 spikes over 20, 1 over 10) so the gate degrades
+// gracefully instead of at a fixed cliff.
+func tolerableSpikes(n int) int {
+	return (n + 9) / 10
+}
+
+// softTailSample returns the largest sample after discarding the top
+// `tolerate` outliers: sorted[len-1-tolerate], clamped to the slice.
+func softTailSample(sorted []time.Duration, tolerate int) time.Duration {
+	idx := len(sorted) - 1 - tolerate
+	if idx < 0 {
+		idx = 0
+	}
+	return sorted[idx]
 }
 
 // dumpConnectLatencyLogsOnFail registers a t.Cleanup that prints the
@@ -367,6 +426,16 @@ func ScenarioConnectLatency_ColdStart_SOCKS5(t *testing.T, b Backend) {
 func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	t.Helper()
 	threshold := b.ColdStartLatencyThreshold()
+	// Decouple the per-dial deadline from the assertion threshold, the
+	// same way the serial scenario does. A cold-start dial that pays a
+	// tolerable rendezvous spike on top of the genuine cold-token cost
+	// must return a measured (over-threshold) sample so the best-of-2
+	// retry below can run; if the deadline fired at threshold+slack the
+	// spike would surface as a fatal i/o timeout and defeat the retry.
+	// SpikeCeiling is the backend's model of the largest tolerable
+	// rendezvous spike; threshold+SpikeCeiling comfortably exceeds any
+	// cold-start+spike combination while still bounding a genuine hang.
+	deadlineBudget := threshold + b.ConnectLatencyPolicy().SpikeCeiling
 	echo := StartPlainEcho(t)
 	opts := SetupOptions{
 		NumListeners:   1,
@@ -376,21 +445,44 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	if mode == ModePortForward {
 		opts.Target = echo.Addr()
 	}
-	tun := b.Setup(t, opts)
-	dumpConnectLatencyLogsOnFail(t, tun)
 
 	payload := []byte{0x42}
 	buf := make([]byte, 1)
 
-	elapsed, err := timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, threshold)
-	if err != nil {
-		t.Fatalf("cold-start dial: %v (elapsed=%v)", err, elapsed)
+	// Best-of-2-on-spike: a cold-start dial occasionally pays an
+	// isolated Azure Relay rendezvous spike on top of the genuine
+	// one-time cold-token cost. Because the spike originates in the
+	// relay control plane and is independent of aztunnel, a second
+	// attempt with a freshly-started sender (a new sender process =>
+	// still a cold token, because the token cache lives in that
+	// process) almost never spikes again. Passing if either attempt is
+	// under budget turns a per-attempt spike probability p into ~p^2
+	// without widening the threshold (which would mask real cold-start
+	// regressions). The mock backend is deterministic and never spikes,
+	// so attempt 1 always passes there and the retry is dead code in CI
+	// for it.
+	const attempts = 2
+	var elapsed time.Duration
+	for attempt := 1; attempt <= attempts; attempt++ {
+		// A fresh Setup spawns a brand-new sender process, which is
+		// what makes the token cold again. Each Setup registers its own
+		// t.Cleanup, so the prior attempt's resources are released at
+		// test end.
+		tun := b.Setup(t, opts)
+		dumpConnectLatencyLogsOnFail(t, tun)
+
+		var err error
+		elapsed, err = timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, deadlineBudget)
+		if err != nil {
+			t.Fatalf("cold-start dial (attempt %d/%d): %v (elapsed=%v)", attempt, attempts, err, elapsed)
+		}
+		if elapsed < threshold {
+			t.Logf("ConnectLatency_ColdStart_%v: %v (< %v) [attempt %d/%d]", mode, elapsed, threshold, attempt, attempts)
+			return
+		}
+		t.Logf("ConnectLatency_ColdStart_%v: attempt %d/%d spiked at %v (>= %v)", mode, attempt, attempts, elapsed, threshold)
 	}
-	if elapsed >= threshold {
-		t.Errorf("cold-start connect latency %v >= threshold %v", elapsed, threshold)
-		return
-	}
-	t.Logf("ConnectLatency_ColdStart_%v: %v (< %v)", mode, elapsed, threshold)
+	t.Errorf("cold-start connect latency %v >= threshold %v on all %d attempts", elapsed, threshold, attempts)
 }
 
 // timeOneConnect opens one connection in the given mode, writes
@@ -404,33 +496,33 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 // against the budget by design.
 //
 // The dial timeout and connection deadline both use
-// threshold + connectSlack rather than threshold so a timing
-// regression surfaces as the explicit elapsed >= threshold
-// assertion in the caller rather than as an i/o timeout from
-// the deadline firing exactly at threshold. The slack only widens
-// the timeout headroom; it does not change the threshold being
-// asserted.
+// deadlineBudget + connectSlack. deadlineBudget is the caller's
+// generous per-dial ceiling (the serial scenario passes its
+// SpikeCeiling, the cold-start scenario passes its threshold); the
+// slack only widens the timeout headroom so a tolerated slow dial is
+// measured and returned to the caller rather than surfacing as an i/o
+// timeout from the deadline firing.
 //
 // The deadline is anchored to start (the pre-dial timestamp),
 // not to time.Now() after the dial returns. Anchoring to start
 // bounds the entire dial+write+read+close iteration to a single
-// threshold + connectSlack window; if dial itself burns most of
+// deadlineBudget + connectSlack window; if dial itself burns most of
 // that window the remaining read/write inherit whatever is left.
 // Anchoring to post-dial time.Now() would let the whole
-// iteration take up to 2 × (threshold + connectSlack) in the
+// iteration take up to 2 × (deadlineBudget + connectSlack) in the
 // worst case (dial uses one window, deadline allows another),
 // violating the bound documented on the calling scenario.
 //
 // Returns the elapsed time even on error so the caller can log
 // timing context alongside the failure reason.
-func timeOneConnect(senderAddr, target string, mode SenderMode, payload, buf []byte, threshold time.Duration) (time.Duration, error) {
+func timeOneConnect(senderAddr, target string, mode SenderMode, payload, buf []byte, deadlineBudget time.Duration) (time.Duration, error) {
 	const connectSlack = 5 * time.Second
 	start := time.Now()
-	conn, err := dialSender(senderAddr, target, mode, threshold+connectSlack)
+	conn, err := dialSender(senderAddr, target, mode, deadlineBudget+connectSlack)
 	if err != nil {
 		return time.Since(start), err
 	}
-	_ = conn.SetDeadline(start.Add(threshold + connectSlack))
+	_ = conn.SetDeadline(start.Add(deadlineBudget + connectSlack))
 	if err := writeFull(conn, payload); err != nil {
 		_ = conn.Close()
 		return time.Since(start), err

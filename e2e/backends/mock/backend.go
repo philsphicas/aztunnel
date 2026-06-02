@@ -259,6 +259,26 @@ func (b *MockBackend) ConnectLatencyThreshold() time.Duration {
 	return mockLatencyBudget(b.DelayProfile)
 }
 
+// ConnectLatencyPolicy returns a strict, spike-free quantile gate for
+// the mock backend. The in-process mock is deterministic — every dial
+// pays the same modelled rendezvous delay with negligible jitter — so
+// it must NOT inherit Azure's spike tolerance, which would mask a real
+// regression in mock-exercised code. All three thresholds collapse to
+// the single deterministic budget (mockLatencyBudget): the upper-median
+// and soft-tail samples both sit at ~the modelled latency, comfortably
+// under the budget, and any regression that lifts the bulk of samples
+// past the budget trips the gate. Iterations is kept at 10 since extra
+// samples buy nothing against a deterministic backend.
+func (b *MockBackend) ConnectLatencyPolicy() scenarios.ConnectLatencyPolicy {
+	budget := mockLatencyBudget(b.DelayProfile)
+	return scenarios.ConnectLatencyPolicy{
+		Iterations:   10,
+		NormalP50:    budget,
+		SoftTail:     budget,
+		SpikeCeiling: budget,
+	}
+}
+
 // ColdStartLatencyThreshold returns the per-backend ceiling for the
 // first connection through a freshly-started sender. The warm budget is
 // mockLatencyBudget (every dial pays the same rendezvous delay). The
