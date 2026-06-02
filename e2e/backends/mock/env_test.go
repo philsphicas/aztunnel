@@ -53,7 +53,11 @@ func authNamesFromEnv(t testing.TB) []string {
 //
 //   - unset / empty -> the single "default" profile (the wire-faithful
 //     profile the e2e timing thresholds are calibrated against).
-//   - "all"         -> every registered profile, in sorted order.
+//   - "all"         -> the functional matrix set (zero, default), in
+//     sorted order. This is deliberately the curated functional set,
+//     not every resolvable profile: placement profiles (near/mid/far/…)
+//     are resolvable by name for perf sweeps but excluded here so the
+//     full functional run is not silently expanded.
 //   - "a,b,c"       -> the listed profiles, in the given order, deduped.
 //
 // Every name is validated against the mockrelay registry; an empty
@@ -65,7 +69,7 @@ func delayProfileNamesFromEnv(t testing.TB) []string {
 	case "":
 		return []string{"default"}
 	case "all":
-		return server.ProfileNames()
+		return server.FunctionalMatrixProfileNames()
 	}
 	seen := make(map[string]struct{})
 	var names []string

@@ -9,6 +9,7 @@ bin/
 coverage.txt
 coverage.html
 e2e/.local.json
+e2e/perf-artifacts/
 
 # IDE
 .vscode/
