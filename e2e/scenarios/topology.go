@@ -3,7 +3,6 @@ package scenarios
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -270,7 +269,7 @@ func scenarioDistributionPerSender(t *testing.T, b Backend, n, m int) {
 func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	echo := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   m,
 		NumSenders:     n,
@@ -283,19 +282,19 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 		kBatch = 8
 		kMax   = 40
 	)
-	var flows []*longFlow
+	var flows []*probeFlow
 	var a0 int64
 	for len(flows) < kMax {
 		// Open one batch.
 		batchStart := len(flows)
 		for i := 0; i < kBatch && len(flows) < kMax; i++ {
 			addr := tun.SenderAddrs[len(flows)%len(tun.SenderAddrs)]
-			f, err := startLongFlow(addr, 15*time.Second)
+			f, err := startProbeFlow(addr, 15*time.Second, ProbeConfig{})
 			if err != nil {
-				t.Fatalf("start long flow %d: %v", len(flows), err)
+				t.Fatalf("start probe flow %d: %v", len(flows), err)
 			}
 			flows = append(flows, f)
-			t.Cleanup(f.Close)
+			t.Cleanup(f.Stop)
 		}
 		// Wait until every long-flow opened so far is bridged.
 		if !waitForSumActive(tun, int64(len(flows)), 10*time.Second) {
@@ -361,20 +360,22 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 		t.Errorf("after dropping listener[0]: %d/%d flows broken, want <= %d (A0); surviving listener(s) silently tore down %d in-flight bridge(s)", dead, k, a0, int64(dead)-a0)
 	}
 
-	// Verify every surviving flow still echoes. If A0 happened to
-	// equal K (all flows on the dropped listener), all flows are
-	// broken and we skip the survivor check; otherwise we exercise
-	// every non-broken flow — a regression where the surviving
-	// listener silently dropped some bridges but left others healthy
-	// would slip through if we only probed one.
+	// Verify every surviving flow keeps making forward progress. If A0
+	// happened to equal K (all flows on the dropped listener), all flows
+	// are broken and we skip the survivor check; otherwise we exercise
+	// every non-broken flow — a regression where the surviving listener
+	// silently dropped some bridges but left others healthy would slip
+	// through if we only probed one.
 	if a0 < int64(k) {
 		survivors := 0
 		for i, f := range flows {
 			if f.broken() {
 				continue
 			}
-			if err := f.exchange(fmt.Sprintf("survivor-%d\n", i), 5*time.Second); err != nil {
-				t.Errorf("survivor flow %d exchange failed: %v", i, err)
+			base := f.acked()
+			if !waitProgress(f, base, 5*time.Second) {
+				t.Errorf("survivor flow %d made no progress after drop (acked stuck at %d)", i, base)
+				f.Dump(t, echo, fmt.Sprintf("hotdrop-flow-%d", i))
 				continue
 			}
 			survivors++
@@ -382,11 +383,11 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 		if survivors == 0 {
 			t.Fatalf("expected at least one surviving flow but all are broken")
 		}
-		t.Logf("post-drop: %d/%d surviving flows still echo", survivors, k)
+		t.Logf("post-drop: %d/%d surviving flows still progressing", survivors, k)
 	}
 
 	// A fresh dial after drop must succeed via the surviving listener.
-	if err := runEchoOnce(tun.SenderAddr, "after-drop\n", 15*time.Second); err != nil {
+	if err := probeOnce(tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 		t.Errorf("post-drop fresh dial: %v", err)
 	}
 }
@@ -404,28 +405,28 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   m,
 		NumSenders:     n,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 	if tun.AddListener == nil {
 		t.Skip("backend does not implement hot-add (Tunnel.AddListener is nil)")
 	}
 
 	const kActive = 4
-	flows := make([]*longFlow, kActive)
+	flows := make([]*probeFlow, kActive)
 	for i := 0; i < kActive; i++ {
 		addr := tun.SenderAddrs[i%len(tun.SenderAddrs)]
-		f, err := startLongFlow(addr, 15*time.Second)
+		f, err := startProbeFlow(addr, 15*time.Second, ProbeConfig{})
 		if err != nil {
-			t.Fatalf("start long flow %d: %v", i, err)
+			t.Fatalf("start probe flow %d: %v", i, err)
 		}
 		flows[i] = f
-		t.Cleanup(f.Close)
+		t.Cleanup(f.Stop)
 	}
 
 	newListener := tun.AddListener(t)
@@ -433,7 +434,7 @@ func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 		t.Fatalf("AddListener returned nil")
 	}
 
-	// Drive short echoes in batches until the new listener completes
+	// Drive short probes in batches until the new listener completes
 	// at least one bridge, or we exhaust the probe budget. We need
 	// the listener to be the chosen destination at least once;
 	// Azure's selection is non-uniform but biased toward freshly-
@@ -449,8 +450,7 @@ func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 	for newListener.Completed() == 0 && sent < kMax && time.Now().Before(probeDeadline) {
 		for i := 0; i < kBatch && sent < kMax && time.Now().Before(probeDeadline); i++ {
 			addr := tun.SenderAddrs[sent%len(tun.SenderAddrs)]
-			payload := fmt.Sprintf("probe-%d\n", sent)
-			if err := runEchoOnce(addr, payload, 10*time.Second); err != nil {
+			if err := probeOnce(addr, defaultProbeBody, defaultProbeBody, 10*time.Second); err != nil {
 				t.Fatalf("probe %d via %s: %v", sent, addr, err)
 			}
 			sent++
@@ -467,14 +467,17 @@ func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 		t.Logf("hot-add converged: new listener completed=%d after %d probes", c, sent)
 	}
 
-	// Existing flows must still be alive.
+	// Existing flows must still be alive and making forward progress.
 	for i, f := range flows {
 		if f.broken() {
 			t.Errorf("existing flow %d broken after hot-add", i)
+			f.Dump(t, srv, fmt.Sprintf("hotadd-flow-%d", i))
 			continue
 		}
-		if err := f.exchange(fmt.Sprintf("existing-%d\n", i), 5*time.Second); err != nil {
-			t.Errorf("existing flow %d exchange failed: %v", i, err)
+		base := f.acked()
+		if !waitProgress(f, base, 5*time.Second) {
+			t.Errorf("existing flow %d made no progress after hot-add (acked stuck at %d)", i, base)
+			f.Dump(t, srv, fmt.Sprintf("hotadd-flow-%d", i))
 		}
 	}
 }
@@ -706,109 +709,6 @@ func waitForSumActive(tun *Tunnel, want int64, timeout time.Duration) bool {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return false
-}
-
-// longFlow is a holds-open echo connection used by hot-drop and hot-
-// add scenarios that need to observe in-flight bridges.
-type longFlow struct {
-	conn net.Conn
-	mu   sync.Mutex
-	bad  bool
-}
-
-func startLongFlow(addr string, dialTimeout time.Duration) (*longFlow, error) {
-	c, err := net.DialTimeout("tcp", addr, dialTimeout)
-	if err != nil {
-		return nil, err
-	}
-	// Sanity exchange so we know the bridge is established before
-	// callers move on to topology changes. Without this, race-y
-	// behaviour where the bridge hasn't yet bumped Active() can give
-	// false A0=0 readings in hot-drop.
-	f := &longFlow{conn: c}
-	if err := f.exchange("init\n", 10*time.Second); err != nil {
-		_ = c.Close()
-		return nil, fmt.Errorf("init: %w", err)
-	}
-	return f, nil
-}
-
-// exchange writes payload and reads it back; returns an error if
-// either side fails. On any error, the flow is marked broken so
-// future broken() calls return true.
-func (f *longFlow) exchange(payload string, timeout time.Duration) error {
-	if f == nil {
-		return errors.New("nil flow")
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.bad {
-		return errors.New("flow already broken")
-	}
-	_ = f.conn.SetDeadline(time.Now().Add(timeout))
-	defer func() { _ = f.conn.SetDeadline(time.Time{}) }()
-
-	if err := writeFull(f.conn, []byte(payload)); err != nil {
-		f.bad = true
-		return fmt.Errorf("write: %w", err)
-	}
-	buf := make([]byte, len(payload))
-	if _, err := io.ReadFull(f.conn, buf); err != nil {
-		f.bad = true
-		return fmt.Errorf("read: %w", err)
-	}
-	if !bytes.Equal(buf, []byte(payload)) {
-		f.bad = true
-		return fmt.Errorf("mismatch: got %q want %q", buf, payload)
-	}
-	return nil
-}
-
-// broken probes the flow with a tiny non-destructive read deadline.
-// If the underlying TCP has been torn down (peer closed), Read
-// returns EOF / RST immediately and we mark the flow broken.
-//
-// We intentionally do NOT call broken() in parallel with exchange()
-// from the same flow — the mutex serialises both, but the broken
-// check sets a 1 ms read deadline that would race a concurrent
-// exchange.
-func (f *longFlow) broken() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.bad {
-		return true
-	}
-	_ = f.conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
-	buf := make([]byte, 1)
-	_, err := f.conn.Read(buf)
-	_ = f.conn.SetReadDeadline(time.Time{})
-	if err == nil {
-		// Got a byte unexpectedly. Treat as broken (echo is full-
-		// duplex; a stray byte means something is wrong).
-		f.bad = true
-		return true
-	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		// No data; still alive.
-		return false
-	}
-	// Any other error means EOF / RST / closed.
-	f.bad = true
-	return true
-}
-
-// Close closes the underlying connection. Safe to call multiple times.
-func (f *longFlow) Close() {
-	if f == nil {
-		return
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.conn != nil {
-		_ = f.conn.Close()
-		f.conn = nil
-	}
 }
 
 // ScenarioListenerRestart_Recovers: bring up one listener and one

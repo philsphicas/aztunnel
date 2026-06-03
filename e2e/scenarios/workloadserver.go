@@ -50,6 +50,13 @@ type WorkloadServer struct {
 	serveDone chan struct{}
 	connWg    sync.WaitGroup
 	done      atomic.Bool
+
+	// probeMu guards probeStats (ServerProbe mode only). Each probe
+	// connection is keyed by its stream nonce so a test holding a
+	// probeFlow can read the server's last-seen sequence and terminating
+	// error to localize a break the client only sees as silence.
+	probeMu    sync.Mutex
+	probeStats map[uint64]*probeConnStat
 }
 
 // ServerMode selects a WorkloadServer's per-connection behavior. The zero
@@ -61,6 +68,15 @@ const (
 	ServerEcho ServerMode = iota
 	ServerRespond
 	ServerStream
+	// ServerProbe is a continuous full-duplex request/response loop used
+	// by the held-flow topology scenarios and (later) a bidirectional
+	// perf shape. Each request frame carries a sequence number and the
+	// client's monotonic send timestamp; the server echoes both back
+	// alongside its own receive and send timestamps, so the client can
+	// split the round-trip into request leg, server think, and response
+	// leg. Unlike ServerEcho it is framed, so it is never the byte-
+	// transparency oracle.
+	ServerProbe
 )
 
 // ServerBehavior is the construction-time configuration of a
@@ -103,7 +119,7 @@ type ServerBehavior struct {
 func StartWorkloadServer(t testing.TB, behavior ServerBehavior) *WorkloadServer {
 	t.Helper()
 	switch behavior.Mode {
-	case ServerEcho, ServerRespond, ServerStream:
+	case ServerEcho, ServerRespond, ServerStream, ServerProbe:
 	default:
 		t.Fatalf("workload server: unknown ServerBehavior.Mode %d", behavior.Mode)
 	}
@@ -111,7 +127,12 @@ func StartWorkloadServer(t testing.TB, behavior ServerBehavior) *WorkloadServer 
 	if err != nil {
 		t.Fatalf("workload server listen: %v", err)
 	}
-	s := &WorkloadServer{behavior: behavior, ln: ln, serveDone: make(chan struct{})}
+	s := &WorkloadServer{
+		behavior:   behavior,
+		ln:         ln,
+		serveDone:  make(chan struct{}),
+		probeStats: make(map[uint64]*probeConnStat),
+	}
 	go s.serve()
 	t.Cleanup(s.Stop)
 	return s
@@ -157,6 +178,8 @@ func (s *WorkloadServer) handle(c net.Conn) {
 		_ = serveRespond(c, s.behavior)
 	case ServerStream:
 		_ = serveStream(c, s.behavior)
+	case ServerProbe:
+		_ = s.serveProbe(c)
 	default:
 		// Modes are validated at construction (StartWorkloadServer); a
 		// value reaching here means the server was built another way with
@@ -190,6 +213,8 @@ const (
 	frameStreamChunk byte = 4 // server -> client (ServerStream)
 	frameStreamEnd   byte = 5 // server -> client (ServerStream): clean completion
 	frameError       byte = 6 // either direction: integrity failure detected
+	frameProbeReq    byte = 7 // client -> server (ServerProbe)
+	frameProbeResp   byte = 8 // server -> client (ServerProbe)
 )
 
 var errBadMagic = errors.New("workload frame: bad magic")
@@ -382,4 +407,129 @@ func doRespondRequest(conn net.Conn, nonce uint64, reqSize, wantRespSize int) er
 		return fmt.Errorf("response pattern mismatch at offset %d", off)
 	}
 	return nil
+}
+
+// probeConnStat is the server's per-connection record for one ServerProbe
+// flow, keyed by the flow's nonce. It exists so that when a flow breaks
+// and the client only observes silence, the test can ask the server what
+// it last saw and localize the break: no record at all means the request
+// never reached the server; lastSeqSeen set with no matching write means
+// the server stalled before replying; lastWriteStart set without
+// lastWriteDone means the server->tunnel write itself blocked.
+//
+// All fields and the terminal flag are written under WorkloadServer.probeMu.
+// Timestamps are probeNanos() values (one shared monotonic epoch across the
+// whole test process), directly comparable with the client's stamps.
+type probeConnStat struct {
+	lastSeqSeen    int64 // highest request seq read (-1 before the first request)
+	lastRecvNano   int64 // probeNanos at the read of lastSeqSeen's request
+	lastWriteStart int64 // probeNanos just before writing lastSeqSeen's response
+	lastWriteDone  int64 // probeNanos just after that write returned
+	termErr        error // serveProbe's terminating error (nil on clean EOF)
+	terminal       bool  // true once serveProbe has returned for this conn
+}
+
+// ProbeRecord returns a snapshot copy of the server's record for the
+// probe flow identified by nonce, and whether such a record exists. The
+// terminal field reports whether the server has finished with the
+// connection; a non-terminal record is a live snapshot and its
+// lastSeqSeen may still advance.
+func (s *WorkloadServer) ProbeRecord(nonce uint64) (probeConnStat, bool) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	st, ok := s.probeStats[nonce]
+	if !ok {
+		return probeConnStat{}, false
+	}
+	return *st, true
+}
+
+// serveProbe runs the ServerProbe per-connection loop: read a request
+// frame, stamp the receive time, verify its pattern, optionally think,
+// then reply with a frame echoing the request's seq and client-send
+// timestamp plus the server's receive and send timestamps and RespSize
+// bytes of the nonce's pattern. The per-connection record is published
+// under probeMu so a test can localize a break by nonce.
+func (s *WorkloadServer) serveProbe(c net.Conn) error {
+	b := s.behavior
+	var (
+		nonce    uint64
+		stat     *probeConnStat
+		haveStat bool
+		retErr   error
+	)
+	defer func() {
+		if haveStat {
+			s.probeMu.Lock()
+			stat.termErr = retErr
+			stat.terminal = true
+			s.probeMu.Unlock()
+		}
+	}()
+
+	for {
+		typ, n, payload, err := readFrame(c)
+		recv := probeNanos()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			retErr = err
+			return err
+		}
+		if typ != frameProbeReq {
+			retErr = fmt.Errorf("serveProbe: unexpected frame type %d", typ)
+			return retErr
+		}
+		if len(payload) < probeHdrLen {
+			retErr = fmt.Errorf("serveProbe: short probe header: %d < %d", len(payload), probeHdrLen)
+			return retErr
+		}
+		if !haveStat {
+			nonce = n
+			stat = &probeConnStat{lastSeqSeen: -1}
+			s.probeMu.Lock()
+			s.probeStats[nonce] = stat
+			s.probeMu.Unlock()
+			haveStat = true
+		}
+		seq := binary.BigEndian.Uint32(payload[0:4])
+		reqBody := payload[probeHdrLen:]
+		if off, ok := verifyPattern(reqBody, nonce, int(seq)*len(reqBody)); !ok {
+			_ = writeFrame(c, frameError, nonce, nil)
+			retErr = fmt.Errorf("serveProbe: request pattern mismatch at offset %d (seq %d)", off, seq)
+			return retErr
+		}
+
+		s.probeMu.Lock()
+		stat.lastSeqSeen = int64(seq)
+		stat.lastRecvNano = recv
+		s.probeMu.Unlock()
+
+		if b.ProcessingDelay > 0 {
+			time.Sleep(b.ProcessingDelay)
+		}
+
+		// Response payload: [seq | clientSend | serverRecv | serverSend | pattern].
+		resp := make([]byte, probeHdrLen+b.RespSize)
+		copy(resp[0:4], payload[0:4])   // echo seq
+		copy(resp[4:12], payload[4:12]) // echo client-send timestamp
+		binary.BigEndian.PutUint64(resp[12:20], uint64(recv))
+		fillPattern(resp[probeHdrLen:], nonce, int(seq)*b.RespSize)
+
+		writeStart := probeNanos()
+		binary.BigEndian.PutUint64(resp[20:28], uint64(writeStart))
+		s.probeMu.Lock()
+		stat.lastWriteStart = writeStart
+		s.probeMu.Unlock()
+
+		if err := writeFrame(c, frameProbeResp, nonce, resp); err != nil {
+			retErr = err
+			return err
+		}
+		writeDone := probeNanos()
+		s.probeMu.Lock()
+		stat.lastWriteDone = writeDone
+		s.probeMu.Unlock()
+	}
 }
