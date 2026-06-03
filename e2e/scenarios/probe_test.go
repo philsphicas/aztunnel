@@ -251,6 +251,7 @@ func TestServeProbe_NonceChange_Rejected(t *testing.T) {
 	}
 }
 
+// TestProbeFlow_Localize_OutboundBreak verifies localize() correctly
 // identifies "no record at server" (no request ever reached the server).
 func TestProbeFlow_Localize_OutboundBreak(t *testing.T) {
 	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: 16})

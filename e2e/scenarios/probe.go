@@ -50,9 +50,11 @@ func dur(n int64) time.Duration { return time.Duration(n) }
 // zero value is filled with calibrated defaults (100ms interval, 64-byte
 // bodies, one outstanding request) by newProbeFlow.
 type ProbeConfig struct {
-	// Interval is the minimum gap between successive requests. Combined
-	// with MaxOutstanding it paces the flow as "send next on ack, no
-	// faster than Interval". Zero means send as fast as the window allows.
+	// Interval is the minimum gap between successive request writes. The
+	// sender enforces it after each write via a time.Ticker. A zero
+	// value is replaced with defaultProbeIntvl (100ms) by newProbeFlow;
+	// callers that want unpaced (window-bound) sending must set a small
+	// non-zero value such as time.Microsecond.
 	Interval time.Duration
 
 	// ReqSize / RespSize are the request and response body pattern bytes,
@@ -63,7 +65,9 @@ type ProbeConfig struct {
 
 	// MaxOutstanding bounds in-flight (sent but unacked) requests. The
 	// topology scenarios use 1 so each exchange's legs are uncontaminated
-	// by self-induced send-queue depth; the perf shape may widen it.
+	// by self-induced send-queue depth; the perf shape may widen it,
+	// in which case more than one request may sit in flight between an
+	// Interval tick and the matching ack.
 	MaxOutstanding int
 }
 
