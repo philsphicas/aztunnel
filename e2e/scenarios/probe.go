@@ -206,6 +206,13 @@ func (f *probeFlow) waitFirstAck(timeout time.Duration) error {
 		if f.broken() {
 			return fmt.Errorf("flow broke before first ack: %w", f.firstError())
 		}
+		// A write-side failure doesn't flip brokenFlag (broken is
+		// read-side only by design), so check it explicitly here. The
+		// sender goroutine will have already returned after recording
+		// the error, so no further progress is possible.
+		if we := f.writeError(); we != nil {
+			return fmt.Errorf("flow write failed before first ack: %w", we)
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	return fmt.Errorf("no ack within %v (sent up to seq %d)", timeout, f.lastSeqSent.Load())
@@ -215,6 +222,12 @@ func (f *probeFlow) firstError() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.firstErr
+}
+
+func (f *probeFlow) writeError() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.writeErr
 }
 
 // recordReadErr latches the first read-side error and marks the flow

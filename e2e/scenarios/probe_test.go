@@ -2,6 +2,7 @@ package scenarios
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -409,6 +410,39 @@ func TestServeProbe_NonMonotonicSeq_Rejected(t *testing.T) {
 	}
 }
 
+// TestProbeFlow_WaitFirstAck_FailsFastOnWriteError verifies waitFirstAck
+// surfaces a latched write-side failure immediately instead of waiting
+// for the full timeout, even when the read side hasn't broken (in real
+// use this is the sender returning before the reader observes EOF).
+// We exercise the loop's writeErr check directly: construct a flow,
+// don't start goroutines, latch a synthetic write error, then call
+// waitFirstAck and assert it returns fast with that error.
+func TestProbeFlow_WaitFirstAck_FailsFastOnWriteError(t *testing.T) {
+	cli, srv := net.Pipe()
+	t.Cleanup(func() { _ = cli.Close(); _ = srv.Close() })
+
+	f := newProbeFlow(cli, ProbeConfig{Interval: 1 * time.Hour, ReqSize: 8, RespSize: 8})
+	// Don't Start — we don't want the sender/reader goroutines to run.
+	f.recordWriteErr(fmt.Errorf("synthetic write failure"))
+
+	start := time.Now()
+	err := f.waitFirstAck(5 * time.Second)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("waitFirstAck succeeded despite latched writeErr")
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Errorf("waitFirstAck took %v; expected fast write-error path", elapsed)
+	}
+	if !strings.Contains(err.Error(), "write") {
+		t.Errorf("error %q does not mention write", err)
+	}
+}
+
+// and asserts the Samples() snapshot is bounded by SampleSize and
+// returns the most-recent N exchanges in chronological order. Without
+// SampleSize, Samples must return nil to confirm the allocation-free
+// path is preserved.
 // TestProbeFlow_Samples_RingBuffer drives a probeFlow with SampleSize > 0
 // and asserts the Samples() snapshot is bounded by SampleSize and
 // returns the most-recent N exchanges in chronological order. Without

@@ -296,7 +296,7 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 			flows = append(flows, f)
 			t.Cleanup(f.Stop)
 		}
-		// Wait until every long-flow opened so far is bridged.
+		// Wait until every probe flow opened so far is bridged.
 		if !waitForSumActive(tun, int64(len(flows)), 10*time.Second) {
 			t.Fatalf("sum of listener Active() never reached %d after batch starting at %d",
 				len(flows), batchStart)
