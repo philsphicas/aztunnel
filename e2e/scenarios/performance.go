@@ -28,7 +28,7 @@ import (
 // _PortForward|_SOCKS5), plus the single _MultiTarget variant that
 // exercises the NumTargets axis, emit a per-round
 // workload-summary log line for trend analysis; each round's wall
-// time is strictly bounded by roundBudget(threshold, w) because
+// time is strictly bounded by roundBudget(threshold, warmReq, w) because
 // per-conn dial+I/O deadlines are clamped to the remaining round
 // budget. See the WorkloadShape doc block below for details.
 //
@@ -697,7 +697,7 @@ func dialSender(senderAddr, target string, mode SenderMode, timeout time.Duratio
 // Scenarios do not assert per-request latency thresholds; the
 // workload-summary line carries the per-shape distribution for
 // trend / regression detection. Each round's wall time is strictly
-// bounded by roundBudget(threshold, w) — per-conn dial+I/O deadlines
+// bounded by roundBudget(threshold, warmReq, w) — per-conn dial+I/O deadlines
 // are clamped to the remaining round budget, so a hung or slow
 // connection cannot extend the round beyond its budget. CI failure
 // surfaces when the workload itself fails (connection refused,
@@ -799,12 +799,13 @@ func runWorkload(t *testing.T, b Backend, w WorkloadShape) {
 	}
 	tun := b.Setup(t, opts)
 	threshold := b.ConnectLatencyThreshold()
+	warmReq := b.WarmRequestBudget()
 
 	for r := 0; r < w.RepeatRounds; r++ {
 		if w.RepeatRounds > 1 {
 			t.Logf("--- round %d/%d ---", r+1, w.RepeatRounds)
 		}
-		runRound(t, tun, addrs, threshold, w)
+		runRound(t, tun, addrs, threshold, warmReq, w)
 	}
 }
 
@@ -877,12 +878,12 @@ type firstReqTiming struct {
 	ColdRTT time.Duration
 }
 
-func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold time.Duration, w WorkloadShape) {
+func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold, warmReq time.Duration, w WorkloadShape) {
 	results := make([]connResult, w.TotalConns)
 
 	sem := make(chan struct{}, w.Concurrency)
 	var wg sync.WaitGroup
-	budget := roundBudget(threshold, w)
+	budget := roundBudget(threshold, warmReq, w)
 	start := time.Now()
 	roundDeadline := start.Add(budget)
 
@@ -972,18 +973,18 @@ func runRound(t *testing.T, tun *Tunnel, addrs []string, threshold time.Duration
 }
 
 // roundBudget returns the per-round wall-time ceiling for shape w on
-// a backend with the given per-conn connect-latency threshold. The
-// formula models per-conn cost as `threshold` (cold path: dial +
-// rendezvous) plus `RequestsPerConn × 500 ms` (warm path: pessimistic
-// upper bound on RTT for cross-region links), multiplied by the
-// serial depth (TotalConns / Concurrency rounded up), with a 2×
-// safety factor and a 60 s floor for trivial shapes. Round wall time
-// is bounded by this budget because per-conn dial+I/O deadlines in
-// runOneConn are clamped to the remaining round budget; the post-hoc
-// check in runRound is a sanity assertion.
-func roundBudget(threshold time.Duration, w WorkloadShape) time.Duration {
+// a backend with the given per-conn connect-latency threshold and
+// warm-request budget. The formula models per-conn cost as `threshold`
+// (cold path: dial + rendezvous) plus `RequestsPerConn × warmReq`
+// (warm path: the backend's pessimistic upper bound on warm RTT),
+// multiplied by the serial depth (TotalConns / Concurrency rounded
+// up), with a 2× safety factor and a 60 s floor for trivial shapes.
+// Round wall time is bounded by this budget because per-conn dial+I/O
+// deadlines in runOneConn are clamped to the remaining round budget;
+// the post-hoc check in runRound is a sanity assertion.
+func roundBudget(threshold, warmReq time.Duration, w WorkloadShape) time.Duration {
 	serialDepth := (w.TotalConns + w.Concurrency - 1) / w.Concurrency
-	perConn := threshold + time.Duration(w.RequestsPerConn)*500*time.Millisecond
+	perConn := threshold + time.Duration(w.RequestsPerConn)*warmReq
 	budget := time.Duration(serialDepth) * perConn * 2
 	if budget < 60*time.Second {
 		budget = 60 * time.Second

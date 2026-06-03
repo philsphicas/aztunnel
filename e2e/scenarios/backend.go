@@ -165,6 +165,24 @@ type Backend interface {
 	// ColdStartLatencyThreshold and ConnectLatency_ColdStart_*.
 	ConnectLatencyThreshold() time.Duration
 
+	// WarmRequestBudget is the per-backend pessimistic upper bound on a
+	// single warm-path request round-trip — a write→read on a
+	// connection that is already established and bridged. It is the
+	// warm-request term of the echo/respond workload scenarios' per-
+	// round wall budget (roundBudget): a round's ceiling is modelled as
+	// the cold connect cost (ConnectLatencyThreshold) plus
+	// RequestsPerConn × WarmRequestBudget, scaled by serial depth.
+	//
+	// Like ConnectLatencyThreshold this is a sanity ceiling, not a
+	// gate: per-conn I/O deadlines are clamped to the remaining round
+	// budget and the post-hoc check in runRound only fails on gross
+	// overruns, so the value should be comfortably above the typical
+	// warm RTT rather than tight. It is read on the cell-pinned backend
+	// (after Cell()), so implementations may scale it per axis value —
+	// e.g. a slower mock DelayProfile predicts a larger bridge-echo
+	// round-trip.
+	WarmRequestBudget() time.Duration
+
 	// ConnectLatencyPolicy parameterises the steady-state
 	// ConnectLatency_Serial assertion for this backend. It is read on
 	// the cell-pinned backend so an Azure implementation may tune the

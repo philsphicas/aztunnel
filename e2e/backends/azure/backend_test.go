@@ -134,6 +134,18 @@ func (*azureBackend) ConnectLatencyThreshold() time.Duration {
 	return 3 * time.Second
 }
 
+// WarmRequestBudget returns the warm-request term of the workload
+// scenarios' per-round budget. A warm request is a write→read on an
+// already-bridged Azure Relay connection; 500 ms is a conservative
+// pessimistic upper bound on that RTT for cross-region links, matching
+// the historical flat value the round budget used before the term was
+// made backend-specific. Returned regardless of authName: the warm
+// path is identical for both auth cells (the credential only affects
+// the cold connect, gated via ConnectLatencyThreshold).
+func (*azureBackend) WarmRequestBudget() time.Duration {
+	return 500 * time.Millisecond
+}
+
 // ConnectLatencyPolicy returns the tolerant quantile gate for the
 // steady-state ConnectLatency_Serial scenario against real Azure Relay.
 //
