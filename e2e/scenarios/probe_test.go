@@ -268,3 +268,100 @@ func TestProbeFlow_Localize_OutboundBreak(t *testing.T) {
 		t.Errorf("localize() = %q, want outbound/no-record diagnosis", got)
 	}
 }
+
+// TestNewProbeFlow_ClampsNegativeFields verifies that negative
+// Interval/ReqSize/RespSize and MaxOutstanding are clamped to safe
+// defaults instead of producing a hot-loop sender or a make() panic.
+func TestNewProbeFlow_ClampsNegativeFields(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { _ = c1.Close(); _ = c2.Close() })
+	cfg := ProbeConfig{
+		Interval:       -1 * time.Millisecond,
+		ReqSize:        -1,
+		RespSize:       -1,
+		MaxOutstanding: -1,
+	}
+	f := newProbeFlow(c1, cfg) // must not panic
+	if f.cfg.Interval != defaultProbeIntvl {
+		t.Errorf("Interval=%v, want %v", f.cfg.Interval, defaultProbeIntvl)
+	}
+	if f.cfg.ReqSize != defaultProbeBody || f.cfg.RespSize != defaultProbeBody {
+		t.Errorf("Req/Resp size=(%d,%d), want (%d,%d)", f.cfg.ReqSize, f.cfg.RespSize, defaultProbeBody, defaultProbeBody)
+	}
+	if f.cfg.MaxOutstanding != 1 {
+		t.Errorf("MaxOutstanding=%d, want 1", f.cfg.MaxOutstanding)
+	}
+}
+
+// TestProbeFlow_ReaderClosesConnOnBreak verifies that when the reader
+// exits due to an integrity error, it closes the underlying connection
+// so the server side unblocks promptly (important under MaxOutstanding>1
+// where the server might be blocked writing a response).
+func TestProbeFlow_ReaderClosesConnOnBreak(t *testing.T) {
+	srv, cli := net.Pipe()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	f := newProbeFlow(cli, ProbeConfig{Interval: 1 * time.Hour, ReqSize: 8, RespSize: 8})
+	f.Start()
+	t.Cleanup(f.Stop)
+
+	// Send a complete frame header with a bad magic so readFrame returns
+	// errBadMagic. (frameHdrLen=17 bytes: 4-byte magic + 1-byte type +
+	// 8-byte nonce + 4-byte length.) Writing fewer bytes would leave
+	// readFrame blocked in io.ReadFull and never trigger the break path.
+	bad := make([]byte, 17)
+	copy(bad, []byte("XXXX"))
+	if _, err := srv.Write(bad); err != nil {
+		t.Fatalf("server write: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.broken() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !f.broken() {
+		t.Fatalf("reader did not flag broken after garbled frame")
+	}
+	// Verify the conn the reader held is closed: a subsequent write from
+	// the server side returns an error.
+	_ = srv.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, err := srv.Write([]byte{0}); err == nil {
+		t.Errorf("server write should fail after reader closed the conn, got nil")
+	}
+}
+
+// TestServeProbe_NonMonotonicSeq_Rejected verifies the server rejects a
+// request whose seq does not strictly exceed the prior request's seq.
+// Without this, a buggy client repeating or decreasing seq would regress
+// probeConnStat.lastSeqSeen and corrupt localize() output.
+func TestServeProbe_NonMonotonicSeq_Rejected(t *testing.T) {
+	const body = 16
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: body})
+	conn := dialServer(t, srv)
+
+	nonce := uint64(0x4444444444444444)
+	send := func(seq uint32) {
+		req := make([]byte, probeHdrLen+body)
+		binary.BigEndian.PutUint32(req[probeOffSeq:], seq)
+		fillPattern(req[probeHdrLen:], nonce, int(seq)*body)
+		if err := writeFrame(conn, frameProbeReq, nonce, req); err != nil {
+			t.Fatalf("write seq %d: %v", seq, err)
+		}
+	}
+	// First request seq=0 should succeed.
+	send(0)
+	if _, _, _, err := readFrame(conn); err != nil {
+		t.Fatalf("read 0: %v", err)
+	}
+	// Repeat seq=0 — must be rejected.
+	send(0)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	typ, _, _, err := readFrame(conn)
+	if err == nil && typ != frameError {
+		t.Fatalf("expected frameError or close after duplicate seq, got typ=%d err=%v", typ, err)
+	}
+}
+

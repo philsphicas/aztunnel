@@ -502,6 +502,16 @@ func (s *WorkloadServer) serveProbe(c net.Conn) error {
 			return retErr
 		}
 		seq := binary.BigEndian.Uint32(payload[0:4])
+		// Enforce strict per-connection monotonic seq. lastSeqSeen starts
+		// at -1, so the first request (seq=0) passes; thereafter only
+		// strictly greater seqs are accepted. Without this, a buggy
+		// client repeating or decreasing seq would regress the stat
+		// record and produce misleading localize() output.
+		if int64(seq) <= stat.lastSeqSeen {
+			_ = writeFrame(c, frameError, nonce, nil)
+			retErr = fmt.Errorf("serveProbe: non-monotonic seq %d (last seen %d)", seq, stat.lastSeqSeen)
+			return retErr
+		}
 		reqBody := payload[probeHdrLen:]
 		if off, ok := verifyPattern(reqBody, nonce, int(seq)*len(reqBody)); !ok {
 			_ = writeFrame(c, frameError, nonce, nil)

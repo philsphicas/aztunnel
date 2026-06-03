@@ -114,13 +114,16 @@ type probeFlow struct {
 // not start traffic; call Start. The caller owns the connection's
 // lifetime via Stop (which closes it).
 func newProbeFlow(conn net.Conn, cfg ProbeConfig) *probeFlow {
-	if cfg.Interval == 0 {
+	// Clamp non-positive values so callers can't accidentally request a
+	// disabled ticker (Interval <= 0) which would spin the sender, or
+	// a non-positive payload size which would panic make.
+	if cfg.Interval <= 0 {
 		cfg.Interval = defaultProbeIntvl
 	}
-	if cfg.ReqSize == 0 {
+	if cfg.ReqSize <= 0 {
 		cfg.ReqSize = defaultProbeBody
 	}
-	if cfg.RespSize == 0 {
+	if cfg.RespSize <= 0 {
 		cfg.RespSize = defaultProbeBody
 	}
 	if cfg.MaxOutstanding < 1 {
@@ -253,6 +256,11 @@ func (f *probeFlow) sender() {
 
 func (f *probeFlow) reader() {
 	defer f.wg.Done()
+	// Close the connection on exit so the server's serveProbe goroutine
+	// for this nonce unblocks promptly (especially under MaxOutstanding>1
+	// where the server may be blocked writing a response). conn.Close is
+	// idempotent, so this is safe even when Stop already closed it.
+	defer func() { _ = f.conn.Close() }()
 	for {
 		typ, n, payload, err := readFrame(f.conn)
 		clientRecv := probeNanos()
