@@ -69,7 +69,7 @@ func (s StreamShape) serverBehavior() ServerBehavior {
 // the zero-value defaults (Streams, NumTargets, RepeatRounds) are filled.
 func (s StreamShape) validate() error {
 	if s.Streams < 1 {
-		return fmt.Errorf("Streams must be >= 1, got %d", s.Streams)
+		return fmt.Errorf("StreamShape.Streams must be >= 1, got %d", s.Streams)
 	}
 	if s.StreamChunks < 1 {
 		return fmt.Errorf("StreamChunks must be >= 1, got %d", s.StreamChunks)

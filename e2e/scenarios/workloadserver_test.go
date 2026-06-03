@@ -90,10 +90,14 @@ func TestWorkloadServer_Respond_RejectsCorruptRequest(t *testing.T) {
 	s := StartWorkloadServer(t, ServerBehavior{Mode: ServerRespond, RespSize: 16})
 	conn := dialServer(t, s)
 
-	// Hand-craft a request frame whose payload does NOT match the nonce's
-	// pattern.
+	// Build the request payload the server expects for this nonce, then
+	// flip one byte so the body is guaranteed to mismatch the nonce's
+	// pattern (and be rejected) regardless of what patternByte hashes
+	// to — an all-zero buffer would only be corrupt by luck.
 	const nonce = 42
-	bad := make([]byte, 16) // all zero; pattern[0] = byte(42) != 0
+	bad := make([]byte, 16)
+	fillPattern(bad, nonce, 0)
+	bad[0] ^= 0xFF
 	if err := writeFrame(conn, frameRequest, nonce, bad); err != nil {
 		t.Fatalf("write bad frame: %v", err)
 	}
