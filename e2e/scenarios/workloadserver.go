@@ -506,10 +506,15 @@ func (s *WorkloadServer) serveProbe(c net.Conn) error {
 		// at -1, so the first request (seq=0) passes; thereafter only
 		// strictly greater seqs are accepted. Without this, a buggy
 		// client repeating or decreasing seq would regress the stat
-		// record and produce misleading localize() output.
-		if int64(seq) <= stat.lastSeqSeen {
+		// record and produce misleading localize() output. Read
+		// lastSeqSeen under probeMu since ProbeRecord() may snapshot
+		// the struct concurrently from the test goroutine.
+		s.probeMu.Lock()
+		prevSeen := stat.lastSeqSeen
+		s.probeMu.Unlock()
+		if int64(seq) <= prevSeen {
 			_ = writeFrame(c, frameError, nonce, nil)
-			retErr = fmt.Errorf("serveProbe: non-monotonic seq %d (last seen %d)", seq, stat.lastSeqSeen)
+			retErr = fmt.Errorf("serveProbe: non-monotonic seq %d (last seen %d)", seq, prevSeen)
 			return retErr
 		}
 		reqBody := payload[probeHdrLen:]

@@ -407,7 +407,12 @@ func (f *probeFlow) localize(srv *WorkloadServer) string {
 		return fmt.Sprintf("server[%s] read seq %d (recv=%v) but had not started its reply (server-path stall; client_acked=%d)",
 			state, rec.lastSeqSeen, dur(rec.lastRecvNano), acked)
 	case rec.lastWriteDone < rec.lastWriteStart:
-		return fmt.Sprintf("server[%s] began writing seq %d (write_start=%v) but the write did not complete (server->tunnel write blocked; client_acked=%d)",
+		// write_start was stamped but write_done was not — covers both a
+		// truly blocked write (FIN/RST never arrived, conn still open)
+		// and a fast write failure that returned an error before the
+		// post-write stamp. The terminal flag and termErr distinguish
+		// them: a non-nil termErr names the write failure.
+		return fmt.Sprintf("server[%s] began writing seq %d (write_start=%v) but the write did not complete before the server gave up (return-leg failure or server->tunnel write stuck; client_acked=%d)",
 			state, rec.lastSeqSeen, dur(rec.lastWriteStart), acked)
 	default:
 		return fmt.Sprintf("server[%s] completed reply for seq %d (write_done=%v) but client only acked %d (return/response-leg break)",

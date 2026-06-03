@@ -364,4 +364,3 @@ func TestServeProbe_NonMonotonicSeq_Rejected(t *testing.T) {
 		t.Fatalf("expected frameError or close after duplicate seq, got typ=%d err=%v", typ, err)
 	}
 }
-
