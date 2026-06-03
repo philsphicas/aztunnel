@@ -9,7 +9,7 @@
 // builds `cmd/aztunnel` as a subprocess).
 module github.com/philsphicas/aztunnel/mockrelay
 
-go 1.26.0
+go 1.26.4
 
 require (
 	github.com/KimMachineGun/automemlimit v0.7.5
