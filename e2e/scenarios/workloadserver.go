@@ -492,6 +492,14 @@ func (s *WorkloadServer) serveProbe(c net.Conn) error {
 			s.probeStats[nonce] = stat
 			s.probeMu.Unlock()
 			haveStat = true
+		} else if n != nonce {
+			// A probe connection is keyed by the first frame's nonce; a
+			// later frame with a different nonce would otherwise be
+			// verified and stat-recorded against the original nonce,
+			// silently producing confusing integrity failures and
+			// misleading localization data. Reject the connection.
+			retErr = fmt.Errorf("serveProbe: nonce changed mid-connection: got %d want %d", n, nonce)
+			return retErr
 		}
 		seq := binary.BigEndian.Uint32(payload[0:4])
 		reqBody := payload[probeHdrLen:]

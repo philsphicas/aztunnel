@@ -124,10 +124,10 @@ func TestProbeFlow_ContinuousProgress(t *testing.T) {
 // the connection abruptly, the flow flips broken() within a short window
 // and Stop is safe to call after.
 func TestProbeFlow_BrokenOnPeerClose(t *testing.T) {
-	// Stand up a one-shot proxy that immediately RSTs after accept; this
-	// gives us a deterministic peer-close without driving the
-	// WorkloadServer through a real probe exchange first (the server's
-	// orderly EOF on Stop would NOT mark broken if stopping is set).
+	// Stand up a one-shot listener that closes the accepted conn (FIN);
+	// the probeFlow's reader observes EOF and must mark broken. We use
+	// this stub instead of a real WorkloadServer so the close is
+	// unambiguously a peer-side close (not a Stop-with-stopping-flag).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -214,7 +214,43 @@ func TestProbeOnce_WrongRespSize(t *testing.T) {
 	}
 }
 
-// TestProbeFlow_Localize_OutboundBreak verifies localize() correctly
+// TestServeProbe_NonceChange_Rejected verifies that the server rejects a
+// frame whose nonce differs from the first frame on the same connection.
+// Without this, a buggy client mixing nonces would be silently verified
+// and stat-recorded against the original nonce, masking real bugs.
+func TestServeProbe_NonceChange_Rejected(t *testing.T) {
+	const body = 16
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: body})
+	conn := dialServer(t, srv)
+
+	// First request: nonce A, seq 0, valid pattern.
+	nonceA := uint64(0x1111111111111111)
+	reqA := make([]byte, probeHdrLen+body)
+	fillPattern(reqA[probeHdrLen:], nonceA, 0)
+	if err := writeFrame(conn, frameProbeReq, nonceA, reqA); err != nil {
+		t.Fatalf("write A: %v", err)
+	}
+	if _, _, _, err := readFrame(conn); err != nil {
+		t.Fatalf("read A: %v", err)
+	}
+	// Second request: nonce B (different), seq 1. The pattern is built
+	// from nonceB so it would verify against nonceB but NOT nonceA; we
+	// want the server to reject on the nonce mismatch before any pattern
+	// check, so the test does not depend on which check fires first.
+	nonceB := uint64(0x2222222222222222)
+	reqB := make([]byte, probeHdrLen+body)
+	binary.BigEndian.PutUint32(reqB[probeOffSeq:], 1)
+	fillPattern(reqB[probeHdrLen:], nonceB, body)
+	if err := writeFrame(conn, frameProbeReq, nonceB, reqB); err != nil {
+		t.Fatalf("write B: %v", err)
+	}
+	// The server should close the connection in response.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, _, err := readFrame(conn); err == nil {
+		t.Fatalf("expected server to close after nonce change, got a frame")
+	}
+}
+
 // identifies "no record at server" (no request ever reached the server).
 func TestProbeFlow_Localize_OutboundBreak(t *testing.T) {
 	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: 16})
