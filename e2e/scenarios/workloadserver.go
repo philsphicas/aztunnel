@@ -434,6 +434,12 @@ type probeConnStat struct {
 // terminal field reports whether the server has finished with the
 // connection; a non-terminal record is a live snapshot and its
 // lastSeqSeen may still advance.
+//
+// ProbeRecord is non-destructive: the entry stays in probeStats until
+// the WorkloadServer is stopped. Diagnostic consumers that only need
+// the record once should prefer ConsumeProbeRecord so the entry does
+// not linger for the rest of the server's lifetime — important when
+// many short-lived probes (e.g., probeOnce dials) share one server.
 func (s *WorkloadServer) ProbeRecord(nonce uint64) (probeConnStat, bool) {
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
@@ -441,6 +447,27 @@ func (s *WorkloadServer) ProbeRecord(nonce uint64) (probeConnStat, bool) {
 	if !ok {
 		return probeConnStat{}, false
 	}
+	return *st, true
+}
+
+// ConsumeProbeRecord is like ProbeRecord but removes the entry from
+// probeStats after returning the snapshot. It is the right call from a
+// diagnostic path that reports a record exactly once (probeFlow.Dump /
+// localize) so the record does not linger for the rest of the server's
+// lifetime.
+//
+// Note: probeOnce dials do not consume their record. In test-only
+// servers with single-test lifetimes the resulting accumulation is
+// bounded by the test duration; long-running scenarios that hammer
+// probeOnce should consider a periodic eviction strategy.
+func (s *WorkloadServer) ConsumeProbeRecord(nonce uint64) (probeConnStat, bool) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	st, ok := s.probeStats[nonce]
+	if !ok {
+		return probeConnStat{}, false
+	}
+	delete(s.probeStats, nonce)
 	return *st, true
 }
 

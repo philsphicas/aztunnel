@@ -389,9 +389,14 @@ func (f *probeFlow) Dump(t *testing.T, srv *WorkloadServer, label string) {
 // last-seen record to attribute a break to the outbound (request) or
 // return (response) path, mirroring the diagnostic ladder the design
 // targets.
+//
+// localize consumes the server-side record (ConsumeProbeRecord) so it
+// does not linger after the diagnostic has been emitted. It is intended
+// to be called at most once per flow; subsequent calls will see no
+// record and report "no record for nonce".
 func (f *probeFlow) localize(srv *WorkloadServer) string {
 	acked := f.lastSeqAck.Load()
-	rec, ok := srv.ProbeRecord(f.nonce)
+	rec, ok := srv.ConsumeProbeRecord(f.nonce)
 	if !ok {
 		return fmt.Sprintf("server has no record for nonce %d: no request reached the server (outbound/request-leg break for seq %d)", f.nonce, acked+1)
 	}

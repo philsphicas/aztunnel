@@ -269,6 +269,42 @@ func TestProbeFlow_Localize_OutboundBreak(t *testing.T) {
 	}
 }
 
+// TestServeProbe_ConsumeProbeRecord verifies that ConsumeProbeRecord
+// returns a snapshot of the per-nonce record AND removes it, so future
+// lookups (Probe/Consume) report no record. This is the bounded-memory
+// path for diagnostic consumers that only need the record once.
+func TestServeProbe_ConsumeProbeRecord(t *testing.T) {
+	const body = 16
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: body})
+	conn := dialServer(t, srv)
+
+	nonce := uint64(0x5555555555555555)
+	req := make([]byte, probeHdrLen+body)
+	fillPattern(req[probeHdrLen:], nonce, 0)
+	if err := writeFrame(conn, frameProbeReq, nonce, req); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, _, _, err := readFrame(conn); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if _, ok := srv.ProbeRecord(nonce); !ok {
+		t.Fatalf("ProbeRecord before consume: not found")
+	}
+	rec, ok := srv.ConsumeProbeRecord(nonce)
+	if !ok {
+		t.Fatalf("ConsumeProbeRecord: not found")
+	}
+	if rec.lastSeqSeen != 0 {
+		t.Errorf("rec.lastSeqSeen=%d want 0", rec.lastSeqSeen)
+	}
+	if _, ok := srv.ProbeRecord(nonce); ok {
+		t.Errorf("ProbeRecord after consume: still present")
+	}
+	if _, ok := srv.ConsumeProbeRecord(nonce); ok {
+		t.Errorf("second ConsumeProbeRecord: still present")
+	}
+}
+
 // TestNewProbeFlow_ClampsNegativeFields verifies that negative
 // Interval/ReqSize/RespSize and MaxOutstanding are clamped to safe
 // defaults instead of producing a hot-loop sender or a make() panic.
