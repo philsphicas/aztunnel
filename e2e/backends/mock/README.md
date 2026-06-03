@@ -141,6 +141,47 @@ than printing meaningless dashes. Filtering on the compared dimension (e.g.
 one side of the comparison. The underlying flags are `--compare-by <dim>` with
 `--compare base..cand`.
 
+### Streaming workload — the second metric family
+
+Most perf scenarios drive a request/response **RTT** workload (an echo or a
+fixed-size respond) and report the cold/warm establishment distribution.
+Long-lived **streaming** scenarios measure something the RTT family cannot:
+how a server-paced trickle of chunks fans out across many concurrent
+streams. They use a separate `StreamShape` and a connect-all **start
+barrier** — every stream dials and completes its SOCKS5 CONNECT first, then
+all are released together — so the metrics reflect steady-state behaviour
+under simultaneous load rather than dial/rendezvous ordering. Streaming is
+SOCKS5-only (the fan-out targets distinct workload servers).
+
+Streaming rows carry `metric_family: "stream"` (RTT rows omit the field).
+The reporter keeps the two families on separate tables and never pairs one
+against the other. The streaming columns are:
+
+- `first_resp_p50` / `first_resp_p95` — client-side time to the first server
+  output, from the barrier release. With a zero-think-time server this is just
+  a warm round-trip; a non-zero server `ProcessingDelay` adds its initial think
+  time. Reported for context, **not gated** (it tracks a warm RTT plus an
+  injected constant, neither of which is a tunnel regression).
+- `gap_p95` — pooled inter-chunk gap p95 (uniform pacing degradation).
+- `max_stream_gap_p95` — the worst single stream's inter-chunk gap p95, the
+  starvation-sensitive **jitter** signal (gated).
+- `max_gap` — the single largest inter-chunk gap (diagnostic for a stall).
+- `final_chunk_spread` — max−min of the streams' last-chunk arrivals, i.e.
+  delivery **fairness** across the fan-out (gated).
+- `goodput` — total payload bytes over the active stream window (release →
+  last chunk delivered), not the full round wall.
+
+`make perf-compare` renders a parallel **streaming** comparison table whose
+deltas are **absolute** durations, not percentages: an injected trickle
+interval inflates a percentage denominator and would hide a real fairness
+or jitter regression. The gate covers `max_stream_gap_p95` (jitter) and
+`final_chunk_spread` (fairness) only; the other streaming columns are reported
+but not gated. Because streaming metrics are noisier than RTT p50s, the
+streaming gate never trips below a 50ms absolute floor (even if
+`--fail-min-abs` is lower), and a comparison that paired streaming cells but
+produced no comparable gated metric is a hard failure rather than a silent
+pass.
+
 ### Validation tiers — where perf fits next to correctness
 
 Perf is a **measurement lens on the e2e suite**, not a separate suite: the perf
@@ -161,7 +202,9 @@ distinct uses, in increasing cost:
 3. **Nightly gross-regression gate** (`perf-nightly.yml`). A cron job sweeps the
    mock grid, restores the previous nightly's history artifact as a baseline,
    and runs `make perf-gate` (default `FAIL_OVER=30`, i.e. fail only on a
-   warm/cold p50 cell that regressed by **both** >30% **and** >20ms). Mock-only:
+   warm/cold p50 cell that regressed by **both** >30% **and** >20ms, plus
+   any streaming `max_stream_gap_p95`/`final_chunk_spread` cell that regressed past
+   the 50ms absolute floor). Mock-only:
    the real Azure relay's rendezvous spikes (~3–6s) swamp any threshold. The
    baseline is re-uploaded only on success, so a regressing night never
    overwrites the known-good reference.

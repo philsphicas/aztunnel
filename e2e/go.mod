@@ -11,7 +11,7 @@
 // e2e/infra/ to isolate Microsoft Graph and GitHub-API deps even further.
 module github.com/philsphicas/aztunnel/e2e
 
-go 1.26.0
+go 1.26.4
 
 replace github.com/philsphicas/aztunnel => ../
 

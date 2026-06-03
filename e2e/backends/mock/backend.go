@@ -237,17 +237,33 @@ const mockLatencyFloor = 3 * time.Second
 // would mask seconds-scale slowdowns. The 3 s floor preserves the
 // historical budget for the zero/default profiles (both predict well
 // under it).
-//
-// Note: the workload scenarios' warm-request budget (roundBudget in
-// e2e/scenarios/performance.go) is a flat 500 ms per request and is
-// NOT derived from the profile; a profile whose PredictedBridgeEcho
-// exceeds that would need roundBudget made delay-aware. Both currently
-// registered profiles (zero, default) are well within it.
 func mockLatencyBudget(p server.DelayProfile, entra bool) time.Duration {
 	predicted := p.PredictedRendezvousFor(entra) + p.PredictedBridgeEcho()
 	budget := predicted*3/2 + 2*time.Second
 	if budget < mockLatencyFloor {
 		budget = mockLatencyFloor
+	}
+	return budget
+}
+
+// mockWarmRequestFloor is the minimum warm-request budget. It preserves
+// the historical flat per-request wall allowance (500 ms) for the
+// zero/default profiles, whose PredictedBridgeEcho sits well under it.
+const mockWarmRequestFloor = 500 * time.Millisecond
+
+// mockWarmRequestBudget derives the warm-request term of the workload
+// scenarios' per-round budget (roundBudget) for a pinned profile. A
+// warm request is a single write→read on an already-bridged
+// connection, so it is modelled on the profile's predicted bridge-echo
+// round-trip with a 3/2 headroom factor, floored at mockWarmRequestFloor
+// so near-zero profiles keep the historical 500 ms allowance. A slow
+// DelayProfile (PredictedBridgeEcho above the floor) scales the budget
+// up accordingly, keeping roundBudget's sanity ceiling honest instead
+// of tripping on the profile's own modelled latency.
+func mockWarmRequestBudget(p server.DelayProfile) time.Duration {
+	budget := p.PredictedBridgeEcho() * 3 / 2
+	if budget < mockWarmRequestFloor {
+		budget = mockWarmRequestFloor
 	}
 	return budget
 }
@@ -259,6 +275,14 @@ func mockLatencyBudget(p server.DelayProfile, entra bool) time.Duration {
 // yields the 3 s floor — the historical value.
 func (b *MockBackend) ConnectLatencyThreshold() time.Duration {
 	return mockLatencyBudget(b.DelayProfile, b.authName == AuthEntra)
+}
+
+// WarmRequestBudget returns the warm-request term of the workload
+// scenarios' per-round budget, derived from this backend's pinned
+// DelayProfile (see mockWarmRequestBudget). A zero/default profile
+// yields the 500 ms floor — the historical flat value.
+func (b *MockBackend) WarmRequestBudget() time.Duration {
+	return mockWarmRequestBudget(b.DelayProfile)
 }
 
 // ConnectLatencyPolicy returns a strict, spike-free quantile gate for

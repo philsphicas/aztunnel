@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version: "1.26.4"
 
       - name: Build
         run: make build
@@ -35,7 +35,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version: "1.26.4"
 
       - name: Test with coverage
         run: go test -race -coverprofile=coverage.txt ./...
@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version: "1.26.4"
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -110,7 +110,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: stable
+          go-version: "1.26.4"
 
       - name: govulncheck
         run: make vulncheck
