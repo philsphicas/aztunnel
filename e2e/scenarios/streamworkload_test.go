@@ -256,10 +256,11 @@ func TestStreamBudget(t *testing.T) {
 	if got := streamBudget(time.Second, small); got != 60*time.Second {
 		t.Errorf("small budget=%v want 60s floor", got)
 	}
-	// Large trickle: budget exceeds the floor and scales with chunks*interval.
+	// Large trickle: budget exceeds the floor and scales with the
+	// (StreamChunks-1) inter-chunk intervals (the first chunk is immediate).
 	large := StreamShape{StreamChunks: 100, TrickleInterval: time.Second}
 	got := streamBudget(time.Second, large)
-	want := 2*time.Second + 100*time.Second*3 + 10*time.Second
+	want := 2*time.Second + 99*time.Second*3 + 10*time.Second
 	if got != want {
 		t.Errorf("large budget=%v want %v", got, want)
 	}

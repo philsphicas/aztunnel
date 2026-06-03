@@ -826,7 +826,7 @@ func renderStreamReportTable(w io.Writer, recs []record) error {
 	if showRun {
 		header = append(header, "run")
 	}
-	header = append(header, "scenario", "mode", "first_resp_p50", "first_resp_p95", "maxgap_p95", "max_gap", "final_spread", "goodput_KiB/s", "success", "wall")
+	header = append(header, "scenario", "mode", "first_resp_p50", "first_resp_p95", "gap_p95", "maxgap_p95", "max_gap", "final_spread", "completion_spread", "goodput_KiB/s", "success", "wall")
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, r := range recs {
@@ -843,8 +843,9 @@ func renderStreamReportTable(w io.Writer, recs []record) error {
 		}
 		cells = append(cells,
 			r.Scenario, dash(r.Mode),
-			durOrDash(r.FirstRespP50Ns), durOrDash(r.FirstRespP95Ns), durOrDash(r.MaxStreamGapP95Ns),
-			durOrDash(r.MaxGapNs), durOrDash(r.FinalChunkSpreadNs),
+			durOrDash(r.FirstRespP50Ns), durOrDash(r.FirstRespP95Ns),
+			durOrDash(r.GapP95Ns), durOrDash(r.MaxStreamGapP95Ns),
+			durOrDash(r.MaxGapNs), durOrDash(r.FinalChunkSpreadNs), durOrDash(r.CompletionSpreadNs),
 			goodputCell(r.GoodputBytesPerSec),
 			fmt.Sprintf("%d/%d", r.SuccessN, r.AttemptN), dur(r.WallNs),
 		)

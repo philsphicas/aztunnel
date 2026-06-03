@@ -147,15 +147,17 @@ func renderStreamTable(rows []perfMatrixRow) string {
 	var b strings.Builder
 	b.WriteString("\nPERF MATRIX (streaming; first_resp = client-side time to first server output from release, spread = max−min across streams)\n")
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "axis\tscenario\tmode\tfirst_resp_p50\tfirst_resp_p95\tmaxgap_p95\tmax_gap\tfinal_spread\tgoodput_KiB/s\tsuccess\twall")
+	_, _ = fmt.Fprintln(tw, "axis\tscenario\tmode\tfirst_resp_p50\tfirst_resp_p95\tgap_p95\tmaxgap_p95\tmax_gap\tfinal_spread\tcompletion_spread\tgoodput_KiB/s\tsuccess\twall")
 	for _, r := range stream {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%s\n",
 			dash(r.axis), r.scenario, dash(r.mode),
 			durOrDash(r.firstRespP50, r.successN),
 			durOrDash(r.firstRespP95, r.successN),
+			durOrDash(r.gapP95, r.successN),
 			durOrDash(r.maxStreamGapP95, r.successN),
 			durOrDash(r.maxGap, r.successN),
 			durOrDash(r.finalChunkSpread, r.successN),
+			durOrDash(r.completionSpread, r.successN),
 			goodputCol(r),
 			r.successN, r.attemptN, round1(r.wall),
 		)

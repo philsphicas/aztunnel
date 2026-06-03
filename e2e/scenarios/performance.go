@@ -1121,7 +1121,10 @@ func requestFn(conn net.Conn, w WorkloadShape) func(i int) error {
 	if w.Workload == WorkloadRespond {
 		base := randNonce()
 		return func(i int) error {
-			return doRespondRequest(conn, base+uint64(i), w.ReqSize, w.RespSize)
+			if err := doRespondRequest(conn, base+uint64(i), w.ReqSize, w.RespSize); err != nil {
+				return fmt.Errorf("respond[%d]: %w", i, err)
+			}
+			return nil
 		}
 	}
 	// WorkloadEcho: write a fixed payload, expect it back verbatim.

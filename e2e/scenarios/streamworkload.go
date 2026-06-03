@@ -359,10 +359,16 @@ func logStreamSummary(t *testing.T, s StreamShape, addrs []string, m streamMetri
 // dial at once, so this is not multiplied by stream count), the server's
 // initial think time before first output, its total trickle duration
 // with a generous safety factor for tunnel and scheduler jitter, plus
-// fixed slack, with a 60s floor.
+// fixed slack, with a 60s floor. The first chunk ships immediately after
+// ProcessingDelay and only the gaps between subsequent chunks cost a
+// TrickleInterval, so the trickle term uses StreamChunks-1 intervals.
 func streamBudget(threshold time.Duration, s StreamShape) time.Duration {
 	connect := 2 * threshold
-	trickle := time.Duration(s.StreamChunks) * s.TrickleInterval
+	intervals := s.StreamChunks - 1
+	if intervals < 0 {
+		intervals = 0
+	}
+	trickle := time.Duration(intervals) * s.TrickleInterval
 	budget := connect + s.ProcessingDelay + trickle*3 + 10*time.Second
 	if budget < 60*time.Second {
 		budget = 60 * time.Second
