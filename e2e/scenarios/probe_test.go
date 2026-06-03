@@ -118,6 +118,14 @@ func TestProbeFlow_ContinuousProgress(t *testing.T) {
 	if s.exchanges <= 0 || s.acked < s.sent-1 {
 		t.Errorf("summary inconsistent: %+v", s)
 	}
+	// Rolling aggregates must reflect a real worst exchange: maxRTT > 0
+	// and worstByRTT.rtt == maxRTT, with seq <= acked.
+	if s.maxRTT <= 0 || s.worstByRTT.rtt != s.maxRTT {
+		t.Errorf("worstByRTT mismatch: maxRTT=%v worst=%+v", s.maxRTT, s.worstByRTT)
+	}
+	if int64(s.worstByRTT.seq) > s.acked {
+		t.Errorf("worstByRTT.seq=%d > acked=%d", s.worstByRTT.seq, s.acked)
+	}
 }
 
 // TestProbeFlow_BrokenOnPeerClose verifies that when the server closes
@@ -257,7 +265,7 @@ func TestProbeFlow_Localize_OutboundBreak(t *testing.T) {
 	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: 16})
 	// Build a probeFlow with no traffic — pick an arbitrary nonce the
 	// server has never seen.
-	c, err := net.Dial("tcp", srv.Addr())
+	c, err := net.DialTimeout("tcp", srv.Addr(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

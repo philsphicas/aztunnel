@@ -104,10 +104,17 @@ type probeFlow struct {
 	lastSeqAck  atomic.Int64 // highest seq acked (-1 before first)
 	brokenFlag  atomic.Bool  // read-side break observed
 
-	mu        sync.Mutex
-	exchanges []probeExchange
-	firstErr  error // first read-side integrity/break error
-	writeErr  error // first write-side error (does not mark broken)
+	mu          sync.Mutex
+	numExch     int64         // total exchanges completed
+	maxReqLeg   time.Duration // rolling aggregates, updated under mu by reader
+	maxRespLeg  time.Duration
+	maxThink    time.Duration
+	maxRTT      time.Duration
+	maxGap      time.Duration // largest gap between successive acked arrivals
+	prevArrival time.Duration // arrival of the previous exchange, for gap calc
+	worstByRTT  probeExchange // single highest-RTT exchange, for Dump
+	firstErr    error         // first read-side integrity/break error
+	writeErr    error         // first write-side error (does not mark broken)
 }
 
 // newProbeFlow wraps an established connection in a probeFlow. It does
@@ -313,8 +320,29 @@ func (f *probeFlow) reader() {
 			responseLeg: dur(clientRecv - srvSend),
 			rtt:         dur(clientRecv - clientSend),
 		}
+		// Update rolling aggregates incrementally — no slice growth, and
+		// Summary stays O(1) even for long-running flows.
 		f.mu.Lock()
-		f.exchanges = append(f.exchanges, ex)
+		if ex.requestLeg > f.maxReqLeg {
+			f.maxReqLeg = ex.requestLeg
+		}
+		if ex.responseLeg > f.maxRespLeg {
+			f.maxRespLeg = ex.responseLeg
+		}
+		if ex.serverThink > f.maxThink {
+			f.maxThink = ex.serverThink
+		}
+		if ex.rtt > f.maxRTT {
+			f.maxRTT = ex.rtt
+			f.worstByRTT = ex
+		}
+		if f.numExch > 0 {
+			if gap := ex.arrival - f.prevArrival; gap > f.maxGap {
+				f.maxGap = gap
+			}
+		}
+		f.prevArrival = ex.arrival
+		f.numExch++
 		f.mu.Unlock()
 		f.lastSeqAck.Store(int64(seq))
 
@@ -328,12 +356,13 @@ func (f *probeFlow) reader() {
 // only — never an assertion threshold.
 type probeSummary struct {
 	sent, acked int64
-	exchanges   int
+	exchanges   int64
 	maxReqLeg   time.Duration
 	maxRespLeg  time.Duration
 	maxThink    time.Duration
 	maxRTT      time.Duration
 	maxGap      time.Duration // largest gap between successive acked arrivals
+	worstByRTT  probeExchange // exchange that observed maxRTT (zero if none)
 	broken      bool
 	firstErr    error
 	writeErr    error
@@ -342,36 +371,20 @@ type probeSummary struct {
 func (f *probeFlow) Summary() probeSummary {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s := probeSummary{
-		sent:      f.lastSeqSent.Load(),
-		acked:     f.lastSeqAck.Load(),
-		exchanges: len(f.exchanges),
-		broken:    f.brokenFlag.Load(),
-		firstErr:  f.firstErr,
-		writeErr:  f.writeErr,
+	return probeSummary{
+		sent:       f.lastSeqSent.Load(),
+		acked:      f.lastSeqAck.Load(),
+		exchanges:  f.numExch,
+		maxReqLeg:  f.maxReqLeg,
+		maxRespLeg: f.maxRespLeg,
+		maxThink:   f.maxThink,
+		maxRTT:     f.maxRTT,
+		maxGap:     f.maxGap,
+		worstByRTT: f.worstByRTT,
+		broken:     f.brokenFlag.Load(),
+		firstErr:   f.firstErr,
+		writeErr:   f.writeErr,
 	}
-	var prev time.Duration
-	for i, ex := range f.exchanges {
-		if ex.requestLeg > s.maxReqLeg {
-			s.maxReqLeg = ex.requestLeg
-		}
-		if ex.responseLeg > s.maxRespLeg {
-			s.maxRespLeg = ex.responseLeg
-		}
-		if ex.serverThink > s.maxThink {
-			s.maxThink = ex.serverThink
-		}
-		if ex.rtt > s.maxRTT {
-			s.maxRTT = ex.rtt
-		}
-		if i > 0 {
-			if gap := ex.arrival - prev; gap > s.maxGap {
-				s.maxGap = gap
-			}
-		}
-		prev = ex.arrival
-	}
-	return s
 }
 
 // Dump logs a compact diagnostic: the client-side summary, the worst
@@ -382,6 +395,11 @@ func (f *probeFlow) Dump(t *testing.T, srv *WorkloadServer, label string) {
 	s := f.Summary()
 	t.Logf("probe-dump %s: sent=%d acked=%d exchanges=%d broken=%v max_req_leg=%v max_resp_leg=%v max_think=%v max_rtt=%v max_gap=%v first_err=%v write_err=%v",
 		label, s.sent, s.acked, s.exchanges, s.broken, s.maxReqLeg, s.maxRespLeg, s.maxThink, s.maxRTT, s.maxGap, s.firstErr, s.writeErr)
+	if s.exchanges > 0 {
+		w := s.worstByRTT
+		t.Logf("probe-dump %s: worst-by-rtt seq=%d rtt=%v req_leg=%v server_think=%v resp_leg=%v",
+			label, w.seq, w.rtt, w.requestLeg, w.serverThink, w.responseLeg)
+	}
 	t.Logf("probe-dump %s: %s", label, f.localize(srv))
 }
 
