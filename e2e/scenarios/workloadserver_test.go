@@ -126,14 +126,14 @@ func TestWorkloadServer_Stream_OrderedChunksAndEnd(t *testing.T) {
 	}
 
 	start := time.Now()
-	var ttfb time.Duration
+	var firstResp time.Duration
 	for seq := 0; seq < chunks; seq++ {
 		typ, n, payload, err := readFrame(conn)
 		if err != nil {
 			t.Fatalf("read chunk %d: %v", seq, err)
 		}
 		if seq == 0 {
-			ttfb = time.Since(start)
+			firstResp = time.Since(start)
 		}
 		if typ != frameStreamChunk {
 			t.Fatalf("chunk %d: type %d, want frameStreamChunk", seq, typ)
@@ -160,8 +160,41 @@ func TestWorkloadServer_Stream_OrderedChunksAndEnd(t *testing.T) {
 	if typ != frameStreamEnd {
 		t.Fatalf("got type %d after last chunk, want frameStreamEnd", typ)
 	}
-	if ttfb > interval {
-		t.Logf("note: TTFB %v exceeded one interval %v (acceptable under load)", ttfb, interval)
+	if firstResp > interval {
+		t.Logf("note: first-response latency %v exceeded one interval %v (acceptable under load)", firstResp, interval)
+	}
+}
+
+func TestWorkloadServer_Stream_ProcessingDelayBeforeFirstChunk(t *testing.T) {
+	const (
+		chunks    = 3
+		chunkSize = 256
+		delay     = 120 * time.Millisecond
+	)
+	// No trickle interval: without the initial think time the first chunk
+	// would arrive in well under delay, so a first-chunk arrival >= delay
+	// isolates ProcessingDelay rather than inter-chunk pacing.
+	s := StartWorkloadServer(t, ServerBehavior{
+		Mode: ServerStream, StreamChunks: chunks, TrickleChunkSize: chunkSize, ProcessingDelay: delay,
+	})
+	conn := dialServer(t, s)
+
+	nonce := randNonce()
+	if err := writeFrame(conn, frameStreamStart, nonce, nil); err != nil {
+		t.Fatalf("write start: %v", err)
+	}
+
+	start := time.Now()
+	typ, _, _, err := readFrame(conn)
+	firstResp := time.Since(start)
+	if err != nil {
+		t.Fatalf("read first chunk: %v", err)
+	}
+	if typ != frameStreamChunk {
+		t.Fatalf("first frame type %d, want frameStreamChunk", typ)
+	}
+	if firstResp < delay {
+		t.Errorf("first-response latency %v < ProcessingDelay %v: initial think time not applied", firstResp, delay)
 	}
 }
 

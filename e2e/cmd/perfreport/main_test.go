@@ -877,14 +877,16 @@ func headerLine(out string) string {
 const rowAzureRun = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T120000.000Z-cccc","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
 
 // Streaming-family rows (metric_family="stream"). Old/new share a cell
-// across two runs so renderStreamCompare pairs them. ttfb_p95 jumps
-// 100ms->300ms (+200ms, a gated regression above the 50ms floor);
-// final_chunk_spread moves 50ms->60ms (+10ms, below the floor).
+// across two runs so renderStreamCompare pairs them. max_stream_gap_p95
+// jumps 40ms->140ms (+100ms, a gated jitter regression above the 50ms
+// floor); final_chunk_spread moves 50ms->60ms (+10ms, below the floor);
+// first_resp_p95 jumps 100ms->300ms but is informational, not gated.
 const (
-	streamRowOld = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T100000.000Z-aaaa","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","ttfb_p50_ns":80000000,"ttfb_p95_ns":100000000,"gap_p95_ns":20000000,"max_gap_ns":30000000,"final_chunk_spread_ns":50000000,"completion_spread_ns":51000000,"goodput_bytes_per_sec":1500000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2000000000}`
-	streamRowNew = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T120000.000Z-bbbb","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","ttfb_p50_ns":85000000,"ttfb_p95_ns":300000000,"gap_p95_ns":22000000,"max_gap_ns":33000000,"final_chunk_spread_ns":60000000,"completion_spread_ns":61000000,"goodput_bytes_per_sec":1400000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2100000000}`
+	streamRowOld = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T100000.000Z-aaaa","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","first_resp_p50_ns":80000000,"first_resp_p95_ns":100000000,"gap_p95_ns":20000000,"max_stream_gap_p95_ns":40000000,"max_gap_ns":30000000,"final_chunk_spread_ns":50000000,"completion_spread_ns":51000000,"goodput_bytes_per_sec":1500000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2000000000}`
+	streamRowNew = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T120000.000Z-bbbb","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","first_resp_p50_ns":85000000,"first_resp_p95_ns":300000000,"gap_p95_ns":22000000,"max_stream_gap_p95_ns":140000000,"max_gap_ns":33000000,"final_chunk_spread_ns":60000000,"completion_spread_ns":61000000,"goodput_bytes_per_sec":1400000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2100000000}`
 	// streamRowNewNoGated repeats streamRowNew's cell but drops both gated
-	// metrics, so a pairing produces no comparable gated metric.
+	// metrics (max_stream_gap_p95 and final_chunk_spread), so a pairing
+	// produces no comparable gated metric.
 	streamRowNewNoGated = `{"type":"row","schema":"perfmatrix/v1","metric_family":"stream","run":"20260601T120000.000Z-bbbb","backend":"mock","axes":{"auth":"sas","delay":"ff"},"scenario":"StreamS","mode":"SOCKS5","gap_p95_ns":22000000,"max_gap_ns":33000000,"goodput_bytes_per_sec":1400000,"stream_n":8,"success_n":8,"attempt_n":8,"wall_ns":2100000000}`
 )
 
@@ -922,17 +924,17 @@ func TestRenderStreamCompare_PairsAndRegressions(t *testing.T) {
 	if gs.streamComparable != 1 {
 		t.Fatalf("streamComparable=%d want 1", gs.streamComparable)
 	}
-	var ttfb *streamRegression
+	var maxgap *streamRegression
 	for i := range gs.streamRegressions {
-		if strings.HasSuffix(gs.streamRegressions[i].label, "ttfb_p95") {
-			ttfb = &gs.streamRegressions[i]
+		if strings.HasSuffix(gs.streamRegressions[i].label, "max_stream_gap_p95") {
+			maxgap = &gs.streamRegressions[i]
 		}
 	}
-	if ttfb == nil {
-		t.Fatalf("missing ttfb_p95 regression: %+v", gs.streamRegressions)
+	if maxgap == nil {
+		t.Fatalf("missing max_stream_gap_p95 regression: %+v", gs.streamRegressions)
 	}
-	if ttfb.absNs != 200000000 {
-		t.Errorf("ttfb_p95 absNs=%d want 200000000", ttfb.absNs)
+	if maxgap.absNs != 100000000 {
+		t.Errorf("max_stream_gap_p95 absNs=%d want 100000000", maxgap.absNs)
 	}
 }
 
@@ -945,15 +947,15 @@ func TestStreamGateVerdict_TripsAboveFloor(t *testing.T) {
 	if worst == nil {
 		t.Fatal("want a streaming regression to trip the gate")
 	}
-	if worst.absNs != 200000000 {
-		t.Errorf("worst absNs=%d want 200000000 (ttfb_p95)", worst.absNs)
+	if worst.absNs != 100000000 {
+		t.Errorf("worst absNs=%d want 100000000 (max_stream_gap_p95)", worst.absNs)
 	}
 }
 
 func TestStreamGateVerdict_FinalSpreadBelowFloorPasses(t *testing.T) {
-	// A run whose only change is final_chunk_spread +10ms (< 50ms floor)
-	// and ttfb unchanged must not trip.
-	steady := strings.Replace(streamRowNew, `"ttfb_p95_ns":300000000`, `"ttfb_p95_ns":100000000`, 1)
+	// A run whose only gated change is final_chunk_spread +10ms (< 50ms
+	// floor) — jitter (max_stream_gap_p95) held steady — must not trip.
+	steady := strings.Replace(streamRowNew, `"max_stream_gap_p95_ns":140000000`, `"max_stream_gap_p95_ns":40000000`, 1)
 	gs := streamGateStatsFor(t, streamRowOld, steady)
 	worst, err := streamGateVerdict(gs, 50*time.Millisecond)
 	if err != nil {
@@ -1012,7 +1014,7 @@ func TestRenderTable_MixedRttAndStreamSections(t *testing.T) {
 	if !strings.Contains(out, "PERF MATRIX (streaming") {
 		t.Errorf("missing streaming section:\n%s", out)
 	}
-	if !strings.Contains(out, "ttfb_p95") || !strings.Contains(out, "goodput") {
+	if !strings.Contains(out, "first_resp_p95") || !strings.Contains(out, "goodput") {
 		t.Errorf("streaming section missing expected columns:\n%s", out)
 	}
 }

@@ -32,6 +32,13 @@ type StreamShape struct {
 	// remaining StreamChunks-1 are spaced by this interval.
 	TrickleInterval time.Duration
 
+	// ProcessingDelay is the server's initial think time before the first
+	// chunk is pushed — a deterministic, subtractable stand-in for a
+	// backend that computes initial state before it starts streaming.
+	// Zero means the first chunk is pushed immediately, in which case
+	// first-response latency degenerates to a warm round-trip.
+	ProcessingDelay time.Duration
+
 	// TrickleChunkSize is the application payload bytes per chunk
 	// (excluding the 4-byte per-chunk sequence header the protocol adds).
 	TrickleChunkSize int
@@ -54,6 +61,7 @@ func (s StreamShape) serverBehavior() ServerBehavior {
 		TrickleInterval:  s.TrickleInterval,
 		TrickleChunkSize: s.TrickleChunkSize,
 		StreamChunks:     s.StreamChunks,
+		ProcessingDelay:  s.ProcessingDelay,
 	}
 }
 
@@ -116,7 +124,7 @@ func runStreamWorkload(t *testing.T, b Backend, s StreamShape) {
 // times are directly comparable for the fairness metrics (a per-stream t0
 // would fold goroutine-wakeup skew into the spread).
 type streamResult struct {
-	ttfb            time.Duration   // first chunk fully read, relative to release
+	firstResp       time.Duration   // first chunk fully read, relative to release
 	interGaps       []time.Duration // gaps between successive chunk arrivals
 	lastChunkOffset time.Duration   // last data chunk arrival, relative to release
 	endOffset       time.Duration   // clean stream-end frame arrival, relative to release
@@ -257,7 +265,7 @@ func runOneStream(conn net.Conn, s StreamShape, release time.Time) streamResult 
 
 		offset := arrival.Sub(release)
 		if seq == 0 {
-			res.ttfb = offset
+			res.firstResp = offset
 		} else {
 			res.interGaps = append(res.interGaps, arrival.Sub(prevArrival))
 		}
@@ -281,8 +289,8 @@ func runOneStream(conn net.Conn, s StreamShape, release time.Time) streamResult 
 // streamMetrics is the aggregate of one stream round, the streaming
 // counterpart to the RTT family's cold/warm distribution.
 type streamMetrics struct {
-	ttfbP50            time.Duration // start latency (first chunk), median across streams
-	ttfbP95            time.Duration // start latency tail
+	firstRespP50       time.Duration // start latency (first chunk), median across streams
+	firstRespP95       time.Duration // start latency tail
 	gapP95             time.Duration // pooled inter-chunk gap p95 (uniform degradation)
 	maxStreamGapP95    time.Duration // worst single stream's gap p95 (starvation-sensitive)
 	maxGap             time.Duration // largest single inter-chunk gap (diagnostic)
@@ -298,7 +306,7 @@ type streamMetrics struct {
 // metrics. Only successful streams contribute to the distributions.
 func aggregateStreams(results []streamResult, s StreamShape, wall time.Duration) streamMetrics {
 	m := streamMetrics{streamN: s.Streams, wall: wall}
-	var ttfbs []time.Duration
+	var firstResps []time.Duration
 	var pooledGaps []time.Duration
 	var lastOffsets, endOffsets []time.Duration
 	var totalBytes int
@@ -310,7 +318,7 @@ func aggregateStreams(results []streamResult, s StreamShape, wall time.Duration)
 			continue
 		}
 		m.successN++
-		ttfbs = append(ttfbs, r.ttfb)
+		firstResps = append(firstResps, r.firstResp)
 		pooledGaps = append(pooledGaps, r.interGaps...)
 		lastOffsets = append(lastOffsets, r.lastChunkOffset)
 		endOffsets = append(endOffsets, r.endOffset)
@@ -326,8 +334,8 @@ func aggregateStreams(results []streamResult, s StreamShape, wall time.Duration)
 		}
 	}
 
-	m.ttfbP50 = repr(ttfbs, 0.50)
-	m.ttfbP95 = repr(ttfbs, 0.95)
+	m.firstRespP50 = repr(firstResps, 0.50)
+	m.firstRespP95 = repr(firstResps, 0.95)
 	m.gapP95 = repr(pooledGaps, 0.95)
 	m.completionSpread = spread(endOffsets)
 	m.finalChunkSpread = spread(lastOffsets)
@@ -341,20 +349,21 @@ func aggregateStreams(results []streamResult, s StreamShape, wall time.Duration)
 }
 
 func logStreamSummary(t *testing.T, s StreamShape, addrs []string, m streamMetrics) {
-	t.Logf("stream-summary scenario=%s ttfb_p50=%v ttfb_p95=%v gap_p95=%v max_stream_gap_p95=%v max_gap=%v final_chunk_spread=%v completion_spread=%v goodput_bytes_per_sec=%d wall=%v streams=%d num_targets=%d success=%d/%d",
-		t.Name(), m.ttfbP50, m.ttfbP95, m.gapP95, m.maxStreamGapP95, m.maxGap, m.finalChunkSpread, m.completionSpread, m.goodputBytesPerSec,
+	t.Logf("stream-summary scenario=%s first_resp_p50=%v first_resp_p95=%v gap_p95=%v max_stream_gap_p95=%v max_gap=%v final_chunk_spread=%v completion_spread=%v goodput_bytes_per_sec=%d wall=%v streams=%d num_targets=%d success=%d/%d",
+		t.Name(), m.firstRespP50, m.firstRespP95, m.gapP95, m.maxStreamGapP95, m.maxGap, m.finalChunkSpread, m.completionSpread, m.goodputBytesPerSec,
 		m.wall, s.Streams, len(addrs), m.successN, s.Streams)
 }
 
 // streamBudget bounds a stream round's wall time. It covers the
 // concurrent cold connect (a couple of connect thresholds — all streams
 // dial at once, so this is not multiplied by stream count), the server's
-// total trickle duration with a generous safety factor for tunnel and
-// scheduler jitter, plus fixed slack, with a 60s floor.
+// initial think time before first output, its total trickle duration
+// with a generous safety factor for tunnel and scheduler jitter, plus
+// fixed slack, with a 60s floor.
 func streamBudget(threshold time.Duration, s StreamShape) time.Duration {
 	connect := 2 * threshold
 	trickle := time.Duration(s.StreamChunks) * s.TrickleInterval
-	budget := connect + trickle*3 + 10*time.Second
+	budget := connect + s.ProcessingDelay + trickle*3 + 10*time.Second
 	if budget < 60*time.Second {
 		budget = 60 * time.Second
 	}

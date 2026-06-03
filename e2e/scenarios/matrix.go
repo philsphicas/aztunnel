@@ -35,8 +35,8 @@ type perfMatrixRow struct {
 	wall     time.Duration
 
 	// Streaming family (family == "stream"). Zero on rtt rows.
-	ttfbP50            time.Duration
-	ttfbP95            time.Duration
+	firstRespP50       time.Duration
+	firstRespP95       time.Duration
 	gapP95             time.Duration
 	maxStreamGapP95    time.Duration
 	maxGap             time.Duration
@@ -145,15 +145,15 @@ func renderStreamTable(rows []perfMatrixRow) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\nPERF MATRIX (streaming; ttfb = first-chunk latency, spread = max−min across streams)\n")
+	b.WriteString("\nPERF MATRIX (streaming; first_resp = client-side time to first server output from release, spread = max−min across streams)\n")
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "axis\tscenario\tmode\tttfb_p50\tttfb_p95\tgap_p95\tmax_gap\tfinal_spread\tgoodput_KiB/s\tsuccess\twall")
+	_, _ = fmt.Fprintln(tw, "axis\tscenario\tmode\tfirst_resp_p50\tfirst_resp_p95\tmaxgap_p95\tmax_gap\tfinal_spread\tgoodput_KiB/s\tsuccess\twall")
 	for _, r := range stream {
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d/%d\t%s\n",
 			dash(r.axis), r.scenario, dash(r.mode),
-			durOrDash(r.ttfbP50, r.successN),
-			durOrDash(r.ttfbP95, r.successN),
-			durOrDash(r.gapP95, r.successN),
+			durOrDash(r.firstRespP50, r.successN),
+			durOrDash(r.firstRespP95, r.successN),
+			durOrDash(r.maxStreamGapP95, r.successN),
 			durOrDash(r.maxGap, r.successN),
 			durOrDash(r.finalChunkSpread, r.successN),
 			goodputCol(r),
@@ -260,8 +260,8 @@ func recordStreamMatrixRow(scenarioPath string, m streamMetrics) {
 		successN:           m.successN,
 		attemptN:           m.streamN,
 		wall:               m.wall,
-		ttfbP50:            m.ttfbP50,
-		ttfbP95:            m.ttfbP95,
+		firstRespP50:       m.firstRespP50,
+		firstRespP95:       m.firstRespP95,
 		gapP95:             m.gapP95,
 		maxStreamGapP95:    m.maxStreamGapP95,
 		maxGap:             m.maxGap,
@@ -310,8 +310,8 @@ type perfMatrixRecord struct {
 	// Streaming family (metric_family == "stream"). Duration fields are
 	// nullable pointers (null on rtt rows and when no stream succeeded);
 	// GoodputBytesPerSec is application payload bytes per second.
-	TTFBP50Ns          *int64 `json:"ttfb_p50_ns,omitempty"`
-	TTFBP95Ns          *int64 `json:"ttfb_p95_ns,omitempty"`
+	FirstRespP50Ns     *int64 `json:"first_resp_p50_ns,omitempty"`
+	FirstRespP95Ns     *int64 `json:"first_resp_p95_ns,omitempty"`
 	GapP95Ns           *int64 `json:"gap_p95_ns,omitempty"`
 	MaxStreamGapP95Ns  *int64 `json:"max_stream_gap_p95_ns,omitempty"`
 	MaxGapNs           *int64 `json:"max_gap_ns,omitempty"`
@@ -468,8 +468,8 @@ func (r perfMatrixRow) record() perfMatrixRecord {
 	if r.family == streamFamily {
 		rec.MetricFamily = streamFamily
 		rec.StreamN = r.attemptN
-		rec.TTFBP50Ns = nsIf(r.ttfbP50, r.successN)
-		rec.TTFBP95Ns = nsIf(r.ttfbP95, r.successN)
+		rec.FirstRespP50Ns = nsIf(r.firstRespP50, r.successN)
+		rec.FirstRespP95Ns = nsIf(r.firstRespP95, r.successN)
 		rec.GapP95Ns = nsIf(r.gapP95, r.successN)
 		rec.MaxStreamGapP95Ns = nsIf(r.maxStreamGapP95, r.successN)
 		rec.MaxGapNs = nsIf(r.maxGap, r.successN)

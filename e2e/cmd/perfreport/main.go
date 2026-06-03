@@ -77,8 +77,8 @@ type record struct {
 	WallNs       int64  `json:"wall_ns"`
 
 	// Streaming family (metric_family == "stream").
-	TTFBP50Ns          *int64 `json:"ttfb_p50_ns,omitempty"`
-	TTFBP95Ns          *int64 `json:"ttfb_p95_ns,omitempty"`
+	FirstRespP50Ns     *int64 `json:"first_resp_p50_ns,omitempty"`
+	FirstRespP95Ns     *int64 `json:"first_resp_p95_ns,omitempty"`
 	GapP95Ns           *int64 `json:"gap_p95_ns,omitempty"`
 	MaxStreamGapP95Ns  *int64 `json:"max_stream_gap_p95_ns,omitempty"`
 	MaxGapNs           *int64 `json:"max_gap_ns,omitempty"`
@@ -814,7 +814,7 @@ func renderStreamReportTable(w io.Writer, recs []record) error {
 	cols := axisColumns(recs)
 	warnMixedAxisKeys(w, recs, cols)
 	showRun := len(distinctRuns(recs)) >= 2
-	_, _ = fmt.Fprintln(w, "PERF MATRIX (streaming; ttfb = first-chunk latency, spread = max−min across streams)")
+	_, _ = fmt.Fprintln(w, "PERF MATRIX (streaming; first_resp = client-side time to first server output from release, spread = max−min across streams)")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 
 	header := []string{"backend"}
@@ -826,7 +826,7 @@ func renderStreamReportTable(w io.Writer, recs []record) error {
 	if showRun {
 		header = append(header, "run")
 	}
-	header = append(header, "scenario", "mode", "ttfb_p50", "ttfb_p95", "gap_p95", "max_gap", "final_spread", "goodput_KiB/s", "success", "wall")
+	header = append(header, "scenario", "mode", "first_resp_p50", "first_resp_p95", "maxgap_p95", "max_gap", "final_spread", "goodput_KiB/s", "success", "wall")
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, r := range recs {
@@ -843,7 +843,7 @@ func renderStreamReportTable(w io.Writer, recs []record) error {
 		}
 		cells = append(cells,
 			r.Scenario, dash(r.Mode),
-			durOrDash(r.TTFBP50Ns), durOrDash(r.TTFBP95Ns), durOrDash(r.GapP95Ns),
+			durOrDash(r.FirstRespP50Ns), durOrDash(r.FirstRespP95Ns), durOrDash(r.MaxStreamGapP95Ns),
 			durOrDash(r.MaxGapNs), durOrDash(r.FinalChunkSpreadNs),
 			goodputCell(r.GoodputBytesPerSec),
 			fmt.Sprintf("%d/%d", r.SuccessN, r.AttemptN), dur(r.WallNs),
@@ -887,10 +887,10 @@ type gateStats struct {
 }
 
 // streamRegression is one positive absolute increase of a gated streaming
-// metric (ttfb_p95 or final_chunk_spread) for a single cell. Streaming
-// metrics are gated on absolute deltas, not percentages, because an
-// injected trickle interval inflates the percentage denominator and would
-// hide an absolute fairness/latency regression.
+// metric (max_stream_gap_p95 or final_chunk_spread) for a single cell.
+// Streaming metrics are gated on absolute deltas, not percentages, because
+// an injected trickle interval inflates the percentage denominator and would
+// hide an absolute fairness/jitter regression.
 type streamRegression struct {
 	label string
 	absNs int64
@@ -1095,9 +1095,11 @@ var errNoStreamRows = errors.New("no streaming rows present")
 // the stream* fields of gateStats: streamPaired (cells matched on both
 // sides), streamComparable (paired cells with at least one gated metric
 // present on both sides), and streamRegressions (absolute increases of the
-// gated metrics ttfb_p95 and final_chunk_spread). Streaming metrics are
-// compared on absolute deltas, so an injected trickle interval can't
-// dilute a regression the way a percentage denominator would.
+// gated metrics max_stream_gap_p95 and final_chunk_spread). Streaming metrics
+// are compared on absolute deltas, so an injected trickle interval can't
+// dilute a regression the way a percentage denominator would. first_resp_p95
+// is shown for context but not gated: it tracks a warm round-trip plus the
+// server's injected think time, neither of which is a tunnel regression.
 func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (gateStats, error) {
 	var gs gateStats
 	recs = filterFamily(recs, streamFamily)
@@ -1176,7 +1178,8 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 		header = append(header, "mode")
 	}
 	header = append(header,
-		"ttfb_p95_base", "ttfb_p95_cand", "ttfb_p95_Δ",
+		"first_resp_p95_base", "first_resp_p95_cand", "first_resp_p95_Δ",
+		"maxgap_p95_base", "maxgap_p95_cand", "maxgap_p95_Δ",
 		"finalspread_base", "finalspread_cand", "finalspread_Δ",
 		"goodput_base", "goodput_cand")
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
@@ -1205,19 +1208,23 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 		if showMode {
 			cells = append(cells, dash(c.Mode))
 		}
-		bTTFB, nTTFB := ptrIf(bok, b.TTFBP95Ns), ptrIf(nok, n.TTFBP95Ns)
+		bFirstResp, nFirstResp := ptrIf(bok, b.FirstRespP95Ns), ptrIf(nok, n.FirstRespP95Ns)
+		bMaxGap, nMaxGap := ptrIf(bok, b.MaxStreamGapP95Ns), ptrIf(nok, n.MaxStreamGapP95Ns)
 		bSpread, nSpread := ptrIf(bok, b.FinalChunkSpreadNs), ptrIf(nok, n.FinalChunkSpreadNs)
-		cells = append(cells, absCompareTriplet(bTTFB, nTTFB)...)
+		cells = append(cells, absCompareTriplet(bFirstResp, nFirstResp)...)
+		cells = append(cells, absCompareTriplet(bMaxGap, nMaxGap)...)
 		cells = append(cells, absCompareTriplet(bSpread, nSpread)...)
 		cells = append(cells, goodputCell(ptrIf(bok, b.GoodputBytesPerSec)), goodputCell(ptrIf(nok, n.GoodputBytesPerSec)))
 		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
 
 		if bok && nok {
 			comparable := false
-			if abs, ok := absRegression(bTTFB, nTTFB); ok {
-				gs.streamRegressions = append(gs.streamRegressions, streamRegression{cellLabel(c) + " ttfb_p95", abs})
+			// first_resp is informational only (warm RTT + injected
+			// think time); the gate watches jitter and fairness.
+			if abs, ok := absRegression(bMaxGap, nMaxGap); ok {
+				gs.streamRegressions = append(gs.streamRegressions, streamRegression{cellLabel(c) + " max_stream_gap_p95", abs})
 			}
-			if bTTFB != nil && nTTFB != nil {
+			if bMaxGap != nil && nMaxGap != nil {
 				comparable = true
 			}
 			if abs, ok := absRegression(bSpread, nSpread); ok {
@@ -1294,7 +1301,7 @@ func gateVerdict(gs gateStats, failOverPct float64, floor time.Duration) (*regre
 const streamGateFloorMin = 50 * time.Millisecond
 
 // streamGateVerdict is the streaming-family analogue of gateVerdict. It
-// returns the worst gated streaming regression (ttfb_p95 or
+// returns the worst gated streaming regression (max_stream_gap_p95 or
 // final_chunk_spread) whose absolute increase exceeds the floor, or an
 // error when streaming cells paired but none yielded a comparable gated
 // metric (a paired-but-uncomparable comparison must not silently pass).
@@ -1305,7 +1312,7 @@ func streamGateVerdict(gs gateStats, floor time.Duration) (*streamRegression, er
 		return nil, nil
 	}
 	if gs.streamComparable == 0 {
-		return nil, errors.New("streaming cells paired but none carried a comparable gated metric (ttfb_p95 / final_chunk_spread) on both sides — nothing was gated")
+		return nil, errors.New("streaming cells paired but none carried a comparable gated metric (max_stream_gap_p95 / final_chunk_spread) on both sides — nothing was gated")
 	}
 	if floor < streamGateFloorMin {
 		floor = streamGateFloorMin
@@ -1372,7 +1379,7 @@ func applyGate(gs gateStats, failOverPct float64, failMinAbs string) {
 		if streamFloor < streamGateFloorMin {
 			streamFloor = streamGateFloorMin
 		}
-		fmt.Fprintf(os.Stderr, "perf-gate: OK — no streaming ttfb_p95/final_chunk_spread regression beyond %s across %d paired stream cell(s)\n",
+		fmt.Fprintf(os.Stderr, "perf-gate: OK — no streaming max_stream_gap_p95/final_chunk_spread regression beyond %s across %d paired stream cell(s)\n",
 			streamFloor, gs.streamPaired)
 	}
 }

@@ -195,7 +195,7 @@ space := $(empty) $(empty)
 PERF_MOCK_AUTH_LAYER = $(if $(strip $(E2E_AUTH)),,[^/]+/)
 PERF_MOCK_DELAY_LAYER = $(if $(filter all,$(E2E_DELAY)),[^/]+/,$(if $(word 2,$(sort $(subst $(comma),$(space),$(E2E_DELAY)))),[^/]+/,))
 PERF_AXIS_PREFIX_MOCK = $(PERF_MOCK_AUTH_LAYER)$(PERF_MOCK_DELAY_LAYER)
-PERF_ALL_SCENARIOS = ^(ConnectLatency|ShortSession|Serial_Conn|Parallel_Conn)
+PERF_ALL_SCENARIOS = ^(ConnectLatency|ShortSession|Serial_Conn|Parallel_Conn|Stream_)
 PERF_SCENARIO_FILTER = $(or $(PERF),$(PERF_ALL_SCENARIOS))
 
 perf-mock: ## Run performance characterization scenarios against the in-process mock relay

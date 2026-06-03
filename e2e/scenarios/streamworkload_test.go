@@ -55,8 +55,8 @@ func TestRunOneStream_HappyPath(t *testing.T) {
 	if got := len(res.interGaps); got != chunks-1 {
 		t.Errorf("interGaps=%d want %d", got, chunks-1)
 	}
-	if res.ttfb <= 0 {
-		t.Errorf("ttfb=%v want > 0", res.ttfb)
+	if res.firstResp <= 0 {
+		t.Errorf("firstResp=%v want > 0", res.firstResp)
 	}
 	if res.endOffset < res.lastChunkOffset {
 		t.Errorf("endOffset=%v before lastChunkOffset=%v", res.endOffset, res.lastChunkOffset)
@@ -195,8 +195,8 @@ func TestStreamShape_Validate(t *testing.T) {
 func TestAggregateStreams_MetricsAndSuccessCount(t *testing.T) {
 	ms := time.Millisecond
 	results := []streamResult{
-		{ttfb: 10 * ms, interGaps: []time.Duration{20 * ms, 22 * ms}, lastChunkOffset: 52 * ms, endOffset: 53 * ms, payloadBytes: 1000},
-		{ttfb: 14 * ms, interGaps: []time.Duration{21 * ms, 40 * ms}, lastChunkOffset: 75 * ms, endOffset: 76 * ms, payloadBytes: 1000},
+		{firstResp: 10 * ms, interGaps: []time.Duration{20 * ms, 22 * ms}, lastChunkOffset: 52 * ms, endOffset: 53 * ms, payloadBytes: 1000},
+		{firstResp: 14 * ms, interGaps: []time.Duration{21 * ms, 40 * ms}, lastChunkOffset: 75 * ms, endOffset: 76 * ms, payloadBytes: 1000},
 		{err: errBadMagic}, // failed stream must not contribute
 	}
 	s := StreamShape{Streams: 3}

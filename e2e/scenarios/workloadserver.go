@@ -26,10 +26,12 @@ import (
 //	                             ProcessingDelay then replies with RespSize
 //	                             bytes. Models asymmetric (eAPI-like) shapes.
 //	ServerStream               — long-lived server-paced trickle. After a
-//	                             single start frame the server pushes
-//	                             StreamChunks chunks of TrickleChunkSize
-//	                             bytes, spaced by TrickleInterval. Models
-//	                             gNMI-subscribe-like streaming.
+//	                             single start frame the server waits
+//	                             ProcessingDelay (initial think time before
+//	                             first output), then pushes StreamChunks
+//	                             chunks of TrickleChunkSize bytes, spaced by
+//	                             TrickleInterval. Models gNMI-subscribe-like
+//	                             streaming.
 //
 // The zero-config (ServerEcho) path deliberately short-circuits to a
 // literal io.Copy and never touches the framed protocol, so a bug in the
@@ -72,14 +74,17 @@ type ServerBehavior struct {
 	// (asymmetric) workloads are expressible.
 	RespSize int
 
-	// ProcessingDelay is the server-side think time inserted before each
-	// response (ServerRespond) — a deterministic, subtractable stand-in
-	// for backend processing.
+	// ProcessingDelay is the server-side think time — a deterministic,
+	// subtractable stand-in for backend processing. In ServerRespond it
+	// is inserted before each response; in ServerStream it is the initial
+	// think time before the first chunk is pushed (models a backend that
+	// computes initial state before it starts streaming).
 	ProcessingDelay time.Duration
 
 	// TrickleInterval is the gap between successive pushed chunks
-	// (ServerStream). The first chunk is sent immediately; the remaining
-	// StreamChunks-1 chunks are spaced by this interval.
+	// (ServerStream). The first chunk is sent immediately after
+	// ProcessingDelay; the remaining StreamChunks-1 chunks are spaced by
+	// this interval.
 	TrickleInterval time.Duration
 
 	// TrickleChunkSize is the payload size of each pushed chunk
@@ -286,8 +291,9 @@ func serveRespond(c net.Conn, b ServerBehavior) error {
 }
 
 // serveStream runs the ServerStream per-connection flow: await the start
-// frame, then push StreamChunks chunks (first immediately, the rest
-// spaced by TrickleInterval), then a clean stream-end frame. Each chunk
+// frame, wait ProcessingDelay (initial think time before first output),
+// then push StreamChunks chunks (first immediately, the rest spaced by
+// TrickleInterval), then a clean stream-end frame. Each chunk
 // carries a 4-byte big-endian sequence header followed by
 // TrickleChunkSize bytes of the stream nonce's continuous pattern (the
 // pattern offset spans chunks, so a reorder across chunk boundaries is
@@ -304,6 +310,9 @@ func serveStream(c net.Conn, b ServerBehavior) error {
 		return fmt.Errorf("serveStream: expected start frame, got type %d", typ)
 	}
 	chunk := make([]byte, chunkSeqLen+b.TrickleChunkSize)
+	if b.ProcessingDelay > 0 {
+		time.Sleep(b.ProcessingDelay)
+	}
 	for seq := 0; seq < b.StreamChunks; seq++ {
 		if seq > 0 && b.TrickleInterval > 0 {
 			time.Sleep(b.TrickleInterval)
