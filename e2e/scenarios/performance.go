@@ -84,6 +84,9 @@ func performanceCases() []scenarioCase {
 		// Streaming workload shapes (server-paced trickle).
 		{name: "Stream_Trickle_SOCKS5_FanOut", scope: AnyBackend, run: ScenarioStream_Trickle_SOCKS5_FanOut},
 		{name: "Stream_ConcurrentTrickle_SOCKS5_DistinctTargets", scope: AnyBackend, run: ScenarioStream_ConcurrentTrickle_SOCKS5_DistinctTargets},
+		// Duplex workload shapes (bidirectional probe).
+		{name: "Duplex_Probe_SOCKS5_FanOut", scope: AnyBackend, run: ScenarioDuplex_Probe_SOCKS5_FanOut},
+		{name: "Duplex_Probe_PortForward", scope: AnyBackend, run: ScenarioDuplex_Probe_PortForward},
 	}
 }
 
@@ -1379,6 +1382,70 @@ func ScenarioStream_ConcurrentTrickle_SOCKS5_DistinctTargets(t *testing.T, b Bac
 		TrickleChunkSize: TrickleChunkBytes,
 		StreamChunks:     TrickleChunks,
 		Mode:             ModeSOCKS5,
+	})
+}
+
+// DuplexFlows is the fan-out width for the duplex perf scenarios. 4 is
+// enough to surface per-flow ack fairness without dominating runtime on
+// the slow Azure backend.
+const DuplexFlows = 4
+
+// DuplexBodySize is the request and response body bytes per probe
+// exchange (excludes the 28-byte probe header). 512 bytes is the median
+// of typical small interactive traffic — small enough that latency
+// dominates throughput, big enough that the per-leg measurement isn't
+// noise.
+const DuplexBodySize = 512
+
+// DuplexInterval is the per-flow probe interval. 25 ms gives ~40
+// exchanges per second per flow — enough to populate the sample ring in
+// the steady-state window without saturating the link.
+const DuplexInterval = 25 * time.Millisecond
+
+// DuplexDuration is the steady-state observation window after the
+// release barrier. 5 s reliably yields ~200 samples per flow at the
+// default interval — enough for stable p95s.
+const DuplexDuration = 5 * time.Second
+
+// DuplexSampleSize is the per-flow ring-buffer size. 256 covers the
+// steady-state window at the default interval with headroom for the
+// MaxOutstanding=1 case; larger windows would need a larger ring.
+const DuplexSampleSize = 256
+
+// ScenarioDuplex_Probe_SOCKS5_FanOut runs DuplexFlows concurrent
+// probeFlows fanned out across DuplexFlows distinct ServerProbe targets
+// via SOCKS5. Each flow runs MaxOutstanding=1 paced exchanges for
+// DuplexDuration; the round records per-leg p50/p95 plus per-flow ack
+// fairness. The shape answers "what round-trip and per-leg latency
+// should I expect under sustained bidirectional load on this backend".
+func ScenarioDuplex_Probe_SOCKS5_FanOut(t *testing.T, b Backend) {
+	runDuplexWorkload(t, b, DuplexShape{
+		Flows:          DuplexFlows,
+		NumTargets:     DuplexFlows,
+		Mode:           ModeSOCKS5,
+		Interval:       DuplexInterval,
+		MaxOutstanding: 1,
+		BodySize:       DuplexBodySize,
+		Duration:       DuplexDuration,
+		SampleSize:     DuplexSampleSize,
+	})
+}
+
+// ScenarioDuplex_Probe_PortForward is the single-target PortForward
+// baseline for the duplex shape — same flow count and cadence, but no
+// SOCKS5 fan-out. The pair lets a reader compare per-leg latency
+// between the simpler PortForward path and the multi-target SOCKS5
+// path on the same backend.
+func ScenarioDuplex_Probe_PortForward(t *testing.T, b Backend) {
+	runDuplexWorkload(t, b, DuplexShape{
+		Flows:          DuplexFlows,
+		NumTargets:     1,
+		Mode:           ModePortForward,
+		Interval:       DuplexInterval,
+		MaxOutstanding: 1,
+		BodySize:       DuplexBodySize,
+		Duration:       DuplexDuration,
+		SampleSize:     DuplexSampleSize,
 	})
 }
 

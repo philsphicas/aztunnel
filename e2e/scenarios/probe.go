@@ -69,6 +69,17 @@ type ProbeConfig struct {
 	// in which case more than one request may sit in flight between an
 	// Interval tick and the matching ack.
 	MaxOutstanding int
+
+	// SampleSize, if > 0, enables per-exchange retention: probeFlow keeps
+	// a bounded ring of the most-recent SampleSize exchanges so a
+	// percentile aggregator (e.g., the duplex perf shape) can compute
+	// p50/p95 over the steady-state tail. SampleSize == 0 keeps the
+	// allocation-free rolling-aggregates-only behavior; topology
+	// scenarios that only need maxes and a worst-by-RTT snapshot leave
+	// it zero. "Most recent N" is a steady-state tail snapshot — not a
+	// statistical reservoir — which is what diagnostic percentiles
+	// want here.
+	SampleSize int
 }
 
 // probeExchange is one completed request/response, with the round-trip
@@ -110,11 +121,14 @@ type probeFlow struct {
 	maxRespLeg  time.Duration
 	maxThink    time.Duration
 	maxRTT      time.Duration
-	maxGap      time.Duration // largest gap between successive acked arrivals
-	prevArrival time.Duration // arrival of the previous exchange, for gap calc
-	worstByRTT  probeExchange // single highest-RTT exchange, for Dump
-	firstErr    error         // first read-side integrity/break error
-	writeErr    error         // first write-side error (does not mark broken)
+	maxGap      time.Duration   // largest gap between successive acked arrivals
+	prevArrival time.Duration   // arrival of the previous exchange, for gap calc
+	worstByRTT  probeExchange   // single highest-RTT exchange, for Dump
+	samples     []probeExchange // ring of most-recent exchanges if cfg.SampleSize > 0
+	sampleHead  int             // next write index into samples; samples[head] is oldest
+	sampleFull  bool            // true once samples has wrapped at least once
+	firstErr    error           // first read-side integrity/break error
+	writeErr    error           // first write-side error (does not mark broken)
 }
 
 // newProbeFlow wraps an established connection in a probeFlow. It does
@@ -136,12 +150,18 @@ func newProbeFlow(conn net.Conn, cfg ProbeConfig) *probeFlow {
 	if cfg.MaxOutstanding < 1 {
 		cfg.MaxOutstanding = 1
 	}
+	if cfg.SampleSize < 0 {
+		cfg.SampleSize = 0
+	}
 	f := &probeFlow{
 		conn:   conn,
 		nonce:  randNonce(),
 		cfg:    cfg,
 		stopCh: make(chan struct{}),
 		slots:  make(chan struct{}, cfg.MaxOutstanding),
+	}
+	if cfg.SampleSize > 0 {
+		f.samples = make([]probeExchange, cfg.SampleSize)
 	}
 	f.lastSeqSent.Store(-1)
 	f.lastSeqAck.Store(-1)
@@ -343,6 +363,16 @@ func (f *probeFlow) reader() {
 		}
 		f.prevArrival = ex.arrival
 		f.numExch++
+		// Append into the bounded ring sample if enabled. Wrapping keeps
+		// only the most-recent cfg.SampleSize exchanges.
+		if f.samples != nil {
+			f.samples[f.sampleHead] = ex
+			f.sampleHead++
+			if f.sampleHead >= len(f.samples) {
+				f.sampleHead = 0
+				f.sampleFull = true
+			}
+		}
 		f.mu.Unlock()
 		f.lastSeqAck.Store(int64(seq))
 
@@ -385,6 +415,30 @@ func (f *probeFlow) Summary() probeSummary {
 		firstErr:   f.firstErr,
 		writeErr:   f.writeErr,
 	}
+}
+
+// Samples returns a chronological snapshot of the per-exchange ring
+// buffer, oldest first. The slice is empty when SampleSize == 0 or no
+// exchange has completed yet. Callers can safely retain the returned
+// slice; it is a fresh copy.
+func (f *probeFlow) Samples() []probeExchange {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.samples) == 0 {
+		return nil
+	}
+	if !f.sampleFull {
+		// samples[0:sampleHead] are the only valid entries, in order.
+		out := make([]probeExchange, f.sampleHead)
+		copy(out, f.samples[:f.sampleHead])
+		return out
+	}
+	// Ring has wrapped: oldest entry is at sampleHead, newest is at
+	// sampleHead-1 (mod len). Walk from oldest forward.
+	out := make([]probeExchange, len(f.samples))
+	n := copy(out, f.samples[f.sampleHead:])
+	copy(out[n:], f.samples[:f.sampleHead])
+	return out
 }
 
 // Dump logs a compact diagnostic: the client-side summary, the worst

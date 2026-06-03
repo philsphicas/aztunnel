@@ -86,6 +86,25 @@ type record struct {
 	CompletionSpreadNs *int64 `json:"completion_spread_ns,omitempty"`
 	GoodputBytesPerSec *int64 `json:"goodput_bytes_per_sec,omitempty"`
 	StreamN            int    `json:"stream_n,omitempty"`
+
+	// Duplex family (metric_family == "duplex"). Per-leg p50/p95 from
+	// the steady-state sample population pooled across flows, plus
+	// throughput and per-flow ack fairness. BytesPerSecPerDir is the
+	// per-direction application payload throughput (DuplexShape uses
+	// symmetric BodySize so both legs carry the same byte count).
+	RTTP50Ns          *int64 `json:"rtt_p50_ns,omitempty"`
+	RTTP95Ns          *int64 `json:"rtt_p95_ns,omitempty"`
+	ReqLegP50Ns       *int64 `json:"req_leg_p50_ns,omitempty"`
+	ReqLegP95Ns       *int64 `json:"req_leg_p95_ns,omitempty"`
+	RespLegP50Ns      *int64 `json:"resp_leg_p50_ns,omitempty"`
+	RespLegP95Ns      *int64 `json:"resp_leg_p95_ns,omitempty"`
+	ThinkP50Ns        *int64 `json:"think_p50_ns,omitempty"`
+	ThinkP95Ns        *int64 `json:"think_p95_ns,omitempty"`
+	AcksPerSec        *int64 `json:"acks_per_sec,omitempty"`
+	BytesPerSecPerDir *int64 `json:"bytes_per_sec_per_dir,omitempty"`
+	AckSpread         *int64 `json:"ack_spread,omitempty"`
+	SampleN           int    `json:"sample_n,omitempty"`
+	FlowN             int    `json:"flow_n,omitempty"`
 }
 
 // streamFamily is the metric_family value for streaming rows; the rtt
@@ -93,6 +112,7 @@ type record struct {
 // keys and gating never confuse the families (an empty value from a
 // legacy v1 artifact is the rtt family).
 const streamFamily = "stream"
+const duplexFamily = "duplex"
 
 func recFamily(r record) string {
 	if r.MetricFamily == "" {
@@ -739,11 +759,14 @@ func sortRecs(recs []record) {
 }
 
 func renderTable(w io.Writer, recs []record) error {
-	var rtt, stream []record
+	var rtt, stream, duplex []record
 	for _, r := range recs {
-		if recFamily(r) == streamFamily {
+		switch recFamily(r) {
+		case streamFamily:
 			stream = append(stream, r)
-		} else {
+		case duplexFamily:
+			duplex = append(duplex, r)
+		default:
 			rtt = append(rtt, r)
 		}
 	}
@@ -757,6 +780,14 @@ func renderTable(w io.Writer, recs []record) error {
 			_, _ = fmt.Fprintln(w)
 		}
 		if err := renderStreamReportTable(w, stream); err != nil {
+			return err
+		}
+	}
+	if len(duplex) > 0 {
+		if len(rtt) > 0 || len(stream) > 0 {
+			_, _ = fmt.Fprintln(w)
+		}
+		if err := renderDuplexReportTable(w, duplex); err != nil {
 			return err
 		}
 	}
@@ -860,6 +891,63 @@ func goodputCell(bps *int64) string {
 		return "-"
 	}
 	return fmt.Sprintf("%.1f", float64(*bps)/1024)
+}
+
+// renderDuplexReportTable renders the duplex-family rows: per-leg p50/p95,
+// pooled exchange throughput, and per-flow ack fairness.
+func renderDuplexReportTable(w io.Writer, recs []record) error {
+	sortRecs(recs)
+	cols := axisColumns(recs)
+	warnMixedAxisKeys(w, recs, cols)
+	showRun := len(distinctRuns(recs)) >= 2
+	_, _ = fmt.Fprintln(w, "PERF MATRIX (duplex; per-leg latency under sustained bidirectional load, bytes/s is per direction, ack_spread = max−min acks across successful flows)")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+
+	header := []string{"backend"}
+	if len(cols) == 0 {
+		header = append(header, "axis")
+	} else {
+		header = append(header, cols...)
+	}
+	if showRun {
+		header = append(header, "run")
+	}
+	header = append(header, "scenario", "mode", "rtt_p50", "rtt_p95", "req_leg_p50", "req_leg_p95", "resp_leg_p50", "resp_leg_p95", "think_p95", "acks/s", "bytes/s", "ack_spread", "sample_n", "success", "wall")
+	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
+
+	for _, r := range recs {
+		cells := []string{dash(r.Backend)}
+		if len(cols) == 0 {
+			cells = append(cells, dash(r.Axis))
+		} else {
+			for _, k := range cols {
+				cells = append(cells, dash(r.Axes[k]))
+			}
+		}
+		if showRun {
+			cells = append(cells, dash(r.Run))
+		}
+		cells = append(cells,
+			r.Scenario, dash(r.Mode),
+			durOrDash(r.RTTP50Ns), durOrDash(r.RTTP95Ns),
+			durOrDash(r.ReqLegP50Ns), durOrDash(r.ReqLegP95Ns),
+			durOrDash(r.RespLegP50Ns), durOrDash(r.RespLegP95Ns),
+			durOrDash(r.ThinkP95Ns),
+			i64Cell(r.AcksPerSec), i64Cell(r.BytesPerSecPerDir), i64Cell(r.AckSpread),
+			fmt.Sprintf("%d", r.SampleN),
+			fmt.Sprintf("%d/%d", r.SuccessN, r.AttemptN), dur(r.WallNs),
+		)
+		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
+	}
+	return tw.Flush()
+}
+
+// i64Cell renders a nullable int64 metric, "-" when unmeasured.
+func i64Cell(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", *v)
 }
 
 // regression is one positive warm/cold p50 delta for a single cell, used

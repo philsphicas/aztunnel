@@ -408,3 +408,51 @@ func TestServeProbe_NonMonotonicSeq_Rejected(t *testing.T) {
 		t.Fatalf("expected frameError or close after duplicate seq, got typ=%d err=%v", typ, err)
 	}
 }
+
+// TestProbeFlow_Samples_RingBuffer drives a probeFlow with SampleSize > 0
+// and asserts the Samples() snapshot is bounded by SampleSize and
+// returns the most-recent N exchanges in chronological order. Without
+// SampleSize, Samples must return nil to confirm the allocation-free
+// path is preserved.
+func TestProbeFlow_Samples_RingBuffer(t *testing.T) {
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: 16})
+
+	t.Run("Disabled", func(t *testing.T) {
+		cfg := ProbeConfig{Interval: 5 * time.Millisecond, ReqSize: 16, RespSize: 16}
+		f, err := startProbeFlow(srv.Addr(), 5*time.Second, cfg)
+		if err != nil {
+			t.Fatalf("startProbeFlow: %v", err)
+		}
+		t.Cleanup(f.Stop)
+		if !waitProgress(f, 5, 2*time.Second) {
+			t.Fatalf("flow did not advance past seq 5")
+		}
+		if s := f.Samples(); s != nil {
+			t.Errorf("Samples() with SampleSize=0 = %d entries, want nil", len(s))
+		}
+	})
+
+	t.Run("Wrapped", func(t *testing.T) {
+		const ring = 4
+		cfg := ProbeConfig{Interval: 5 * time.Millisecond, ReqSize: 16, RespSize: 16, SampleSize: ring}
+		f, err := startProbeFlow(srv.Addr(), 5*time.Second, cfg)
+		if err != nil {
+			t.Fatalf("startProbeFlow: %v", err)
+		}
+		t.Cleanup(f.Stop)
+		// Drive well past the ring size so it has definitely wrapped.
+		if !waitProgress(f, int64(ring*4), 3*time.Second) {
+			t.Fatalf("flow did not advance past seq %d", ring*4)
+		}
+		samples := f.Samples()
+		if len(samples) != ring {
+			t.Fatalf("Samples() = %d, want %d", len(samples), ring)
+		}
+		// Chronological order: seqs must be strictly increasing.
+		for i := 1; i < len(samples); i++ {
+			if samples[i].seq <= samples[i-1].seq {
+				t.Errorf("samples not chronological at i=%d: %d <= %d", i, samples[i].seq, samples[i-1].seq)
+			}
+		}
+	})
+}

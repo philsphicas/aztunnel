@@ -43,6 +43,20 @@ type perfMatrixRow struct {
 	finalChunkSpread   time.Duration
 	completionSpread   time.Duration
 	goodputBytesPerSec int64
+
+	// Duplex family (family == "duplex"). Zero on other rows.
+	rttP50            time.Duration
+	rttP95            time.Duration
+	reqLegP50         time.Duration
+	reqLegP95         time.Duration
+	respLegP50        time.Duration
+	respLegP95        time.Duration
+	thinkP50          time.Duration
+	thinkP95          time.Duration
+	acksPerSec        int64
+	bytesPerSecPerDir int64
+	ackSpread         int64
+	sampleN           int
 }
 
 // perfMatrix collects rows across all scenarios in a run and renders
@@ -100,12 +114,12 @@ func (m *perfMatrix) drain() []perfMatrixRow {
 }
 
 // renderTable formats the rtt-family rows as the aligned human-readable
-// matrix. Streaming rows are rendered separately by renderStreamTable.
-// Returns "" if there are no rtt rows.
+// matrix. Streaming and duplex rows are rendered separately. Returns ""
+// if there are no rtt rows.
 func renderTable(rows []perfMatrixRow) string {
 	var rtt []perfMatrixRow
 	for _, r := range rows {
-		if r.family != streamFamily {
+		if r.family == "" {
 			rtt = append(rtt, r)
 		}
 	}
@@ -174,6 +188,42 @@ func goodputCol(r perfMatrixRow) string {
 		return "-"
 	}
 	return fmt.Sprintf("%.1f", float64(r.goodputBytesPerSec)/1024)
+}
+
+// renderDuplexTable formats the duplex-family rows as their own aligned
+// matrix (per-leg p50/p95 + throughput + fairness). Returns "" if there
+// are no duplex rows.
+func renderDuplexTable(rows []perfMatrixRow) string {
+	var duplex []perfMatrixRow
+	for _, r := range rows {
+		if r.family == duplexFamily {
+			duplex = append(duplex, r)
+		}
+	}
+	if len(duplex) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nPERF MATRIX (duplex; per-leg latency under sustained bidirectional load, bytes/s is per direction, ack_spread = max−min acks across successful flows)\n")
+	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "axis\tscenario\tmode\trtt_p50\trtt_p95\treq_leg_p50\treq_leg_p95\tresp_leg_p50\tresp_leg_p95\tthink_p95\tacks/s\tbytes/s\tack_spread\tsample_n\tsuccess\twall")
+	for _, r := range duplex {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d/%d\t%s\n",
+			dash(r.axis), r.scenario, dash(r.mode),
+			durOrDash(r.rttP50, r.sampleN),
+			durOrDash(r.rttP95, r.sampleN),
+			durOrDash(r.reqLegP50, r.sampleN),
+			durOrDash(r.reqLegP95, r.sampleN),
+			durOrDash(r.respLegP50, r.sampleN),
+			durOrDash(r.respLegP95, r.sampleN),
+			durOrDash(r.thinkP95, r.sampleN),
+			r.acksPerSec, r.bytesPerSecPerDir, r.ackSpread, r.sampleN,
+			r.successN, r.attemptN, round1(r.wall),
+		)
+	}
+	_ = tw.Flush()
+	b.WriteString("END PERF MATRIX\n")
+	return b.String()
 }
 
 func estCol(r perfMatrixRow) string {
@@ -273,6 +323,35 @@ func recordStreamMatrixRow(scenarioPath string, m streamMetrics) {
 	})
 }
 
+// recordDuplexMatrixRow distils a finished duplex round into one
+// duplex-family matrix row. The duplex metrics live in their own
+// columns; the rtt cold/warm and streaming fields stay zero.
+func recordDuplexMatrixRow(scenarioPath string, m duplexMetrics) {
+	axis, axes, scenario, mode := matrixIdentity(scenarioPath)
+	perfMatrixSink.add(perfMatrixRow{
+		axis:              axis,
+		axes:              axes,
+		scenario:          scenario,
+		mode:              mode,
+		family:            duplexFamily,
+		successN:          m.successN,
+		attemptN:          m.flowN,
+		wall:              m.wall,
+		rttP50:            m.rttP50,
+		rttP95:            m.rttP95,
+		reqLegP50:         m.reqLegP50,
+		reqLegP95:         m.reqLegP95,
+		respLegP50:        m.respLegP50,
+		respLegP95:        m.respLegP95,
+		thinkP50:          m.thinkP50,
+		thinkP95:          m.thinkP95,
+		acksPerSec:        m.acksPerSec,
+		bytesPerSecPerDir: m.bytesPerSecPerDir,
+		ackSpread:         m.ackSpread,
+		sampleN:           m.sampleN,
+	})
+}
+
 // perfMatrixSchema is the artifact schema tag carried by every emitted
 // record. Bump it on any breaking field change so consumers can branch.
 const perfMatrixSchema = "perfmatrix/v1"
@@ -321,6 +400,28 @@ type perfMatrixRecord struct {
 	CompletionSpreadNs *int64 `json:"completion_spread_ns,omitempty"`
 	GoodputBytesPerSec *int64 `json:"goodput_bytes_per_sec,omitempty"`
 	StreamN            int    `json:"stream_n,omitempty"`
+
+	// Duplex family (metric_family == "duplex"). Per-leg p50/p95 from
+	// the steady-state sample population pooled across flows, plus
+	// throughput and per-flow ack fairness. Duration fields are
+	// nullable pointers (null when no flow contributed any samples);
+	// the *PerSec and AckSpread counters use SampleN as their gate.
+	// BytesPerSecPerDir is the per-direction application payload
+	// throughput; DuplexShape currently uses a symmetric BodySize so
+	// both legs carry the same byte count.
+	RTTP50Ns          *int64 `json:"rtt_p50_ns,omitempty"`
+	RTTP95Ns          *int64 `json:"rtt_p95_ns,omitempty"`
+	ReqLegP50Ns       *int64 `json:"req_leg_p50_ns,omitempty"`
+	ReqLegP95Ns       *int64 `json:"req_leg_p95_ns,omitempty"`
+	RespLegP50Ns      *int64 `json:"resp_leg_p50_ns,omitempty"`
+	RespLegP95Ns      *int64 `json:"resp_leg_p95_ns,omitempty"`
+	ThinkP50Ns        *int64 `json:"think_p50_ns,omitempty"`
+	ThinkP95Ns        *int64 `json:"think_p95_ns,omitempty"`
+	AcksPerSec        *int64 `json:"acks_per_sec,omitempty"`
+	BytesPerSecPerDir *int64 `json:"bytes_per_sec_per_dir,omitempty"`
+	AckSpread         *int64 `json:"ack_spread,omitempty"`
+	SampleN           int    `json:"sample_n,omitempty"`
+	FlowN             int    `json:"flow_n,omitempty"`
 }
 
 // perfMatrixRunRecord is the leading "run" meta record that makes an
@@ -438,6 +539,7 @@ func nsIf(d time.Duration, n int) *int64 {
 // streamFamily is the metric_family value carried by streaming rows; the
 // rtt family is the empty string (so legacy v1 artifacts are unchanged).
 const streamFamily = "stream"
+const duplexFamily = "duplex"
 
 // i64If returns a pointer to v when n>0, else nil — the non-duration
 // counterpart of nsIf, used for the goodput counter so an all-failed
@@ -478,6 +580,22 @@ func (r perfMatrixRow) record() perfMatrixRecord {
 		rec.FinalChunkSpreadNs = nsIf(r.finalChunkSpread, r.successN)
 		rec.CompletionSpreadNs = nsIf(r.completionSpread, r.successN)
 		rec.GoodputBytesPerSec = i64If(r.goodputBytesPerSec, r.successN)
+	}
+	if r.family == duplexFamily {
+		rec.MetricFamily = duplexFamily
+		rec.FlowN = r.attemptN
+		rec.SampleN = r.sampleN
+		rec.RTTP50Ns = nsIf(r.rttP50, r.sampleN)
+		rec.RTTP95Ns = nsIf(r.rttP95, r.sampleN)
+		rec.ReqLegP50Ns = nsIf(r.reqLegP50, r.sampleN)
+		rec.ReqLegP95Ns = nsIf(r.reqLegP95, r.sampleN)
+		rec.RespLegP50Ns = nsIf(r.respLegP50, r.sampleN)
+		rec.RespLegP95Ns = nsIf(r.respLegP95, r.sampleN)
+		rec.ThinkP50Ns = nsIf(r.thinkP50, r.sampleN)
+		rec.ThinkP95Ns = nsIf(r.thinkP95, r.sampleN)
+		rec.AcksPerSec = i64If(r.acksPerSec, r.sampleN)
+		rec.BytesPerSecPerDir = i64If(r.bytesPerSecPerDir, r.sampleN)
+		rec.AckSpread = i64If(r.ackSpread, r.sampleN)
 	}
 	return rec
 }
@@ -537,6 +655,9 @@ func finishPerfMatrix(t logf) {
 		t.Logf("%s", table)
 	}
 	if table := renderStreamTable(rows); table != "" {
+		t.Logf("%s", table)
+	}
+	if table := renderDuplexTable(rows); table != "" {
 		t.Logf("%s", table)
 	}
 	if len(rows) == 0 {
