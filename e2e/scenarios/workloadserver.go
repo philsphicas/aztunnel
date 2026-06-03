@@ -102,6 +102,11 @@ type ServerBehavior struct {
 // Cleanup are used).
 func StartWorkloadServer(t testing.TB, behavior ServerBehavior) *WorkloadServer {
 	t.Helper()
+	switch behavior.Mode {
+	case ServerEcho, ServerRespond, ServerStream:
+	default:
+		t.Fatalf("workload server: unknown ServerBehavior.Mode %d", behavior.Mode)
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("workload server listen: %v", err)
@@ -152,6 +157,11 @@ func (s *WorkloadServer) handle(c net.Conn) {
 		_ = serveRespond(c, s.behavior)
 	case ServerStream:
 		_ = serveStream(c, s.behavior)
+	default:
+		// Modes are validated at construction (StartWorkloadServer); a
+		// value reaching here means the server was built another way with
+		// an invalid Mode. Fail loudly rather than silently closing.
+		panic(fmt.Sprintf("workload server: unknown ServerBehavior.Mode %d", s.behavior.Mode))
 	}
 }
 
@@ -327,16 +337,21 @@ func serveStream(c net.Conn, b ServerBehavior) error {
 }
 
 // randNonce returns a random 64-bit nonce used to seed a request's or
-// stream's deterministic payload pattern. Falls back to the wall clock if
-// the system RNG is unavailable (the nonce only needs to be distinct, not
-// unpredictable).
+// stream's deterministic payload pattern. Falls back to a process-monotonic
+// counter if the system RNG is unavailable: the nonce only needs to be
+// distinct within this process (client and server are the same test binary),
+// not unpredictable, and the counter is strictly distinct even under
+// concurrency or coarse clock resolution.
 func randNonce() uint64 {
 	var b [8]byte
 	if _, err := crand.Read(b[:]); err != nil {
-		return uint64(time.Now().UnixNano())
+		return nonceFallbackSeq.Add(1)
 	}
 	return binary.BigEndian.Uint64(b[:])
 }
+
+// nonceFallbackSeq guarantees distinct nonces on the crypto/rand fallback path.
+var nonceFallbackSeq atomic.Uint64
 
 // doRespondRequest performs one client-side framed request/response
 // exchange against a ServerRespond target: it sends reqSize bytes of the
