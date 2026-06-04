@@ -1577,13 +1577,13 @@ func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 			comparable := false
 			if b.RTTP50Ns != nil && n.RTTP50Ns != nil {
 				comparable = true
-				if pct, absNs, ok := pctRegression(b.RTTP50Ns, n.RTTP50Ns); ok {
+				if pct, absNs, ok := regressionPct(b.RTTP50Ns, n.RTTP50Ns); ok {
 					gs.duplexRegressions = append(gs.duplexRegressions, regression{cellLabel(c) + " rtt_p50", pct, absNs})
 				}
 			}
 			if b.RTTP95Ns != nil && n.RTTP95Ns != nil {
 				comparable = true
-				if pct, absNs, ok := pctRegression(b.RTTP95Ns, n.RTTP95Ns); ok {
+				if pct, absNs, ok := regressionPct(b.RTTP95Ns, n.RTTP95Ns); ok {
 					gs.duplexRegressions = append(gs.duplexRegressions, regression{cellLabel(c) + " rtt_p95", pct, absNs})
 				}
 			}
@@ -1598,19 +1598,9 @@ func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	return gs, nil
 }
 
-// pctRegression returns the positive percent slowdown and absolute
-// nanosecond increase of cand over base, ok=true only when cand is
-// actually slower. Mirrors the rtt family's percent gating shape.
-func pctRegression(base, cand *int64) (pct float64, absNs int64, ok bool) {
-	if base == nil || cand == nil || *base <= 0 {
-		return 0, 0, false
-	}
-	d := *cand - *base
-	if d <= 0 {
-		return 0, 0, false
-	}
-	return 100.0 * float64(d) / float64(*base), d, true
-}
+// absRegression returns the absolute positive increase of cand over base,
+// with ok=true only when both are present and cand is actually larger (a
+// tighter/faster candidate is not a regression).
 func absRegression(base, cand *int64) (absNs int64, ok bool) {
 	if base == nil || cand == nil {
 		return 0, false
