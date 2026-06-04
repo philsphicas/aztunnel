@@ -619,13 +619,21 @@ func localizeProbeError(srv *WorkloadServer, nonce uint64, err error) error {
 	if !ok {
 		return fmt.Errorf("%w: server has no record for nonce %d (request never reached the server: outbound break)", err, nonce)
 	}
+	// The server only creates a probeConnStat after readFrame returns
+	// AND the frame is a valid frameProbeReq with len(payload) >=
+	// probeHdrLen, so by the time we have a record lastSeqSeen has at
+	// minimum the value from the first request (or the first valid
+	// request after the constructor's initial -1, set by the
+	// monotonicity check below). The non-monotonic-seq and
+	// pattern-mismatch paths in serveProbe also write back a
+	// frameError, which the client surfaces as "server reported
+	// request integrity error" — that real cause is preserved here via
+	// %w; the cases below just attribute the leg.
 	switch {
-	case rec.lastSeqSeen < 0:
-		return fmt.Errorf("%w: server recorded the connection but read no request (outbound break before first frame)", err)
 	case rec.lastWriteStart == 0 || rec.lastWriteStart < rec.lastRecvNano:
 		return fmt.Errorf("%w: server read the request (recv=%v) but had not started its reply (server-path stall)", err, dur(rec.lastRecvNano))
 	case rec.lastWriteDone < rec.lastWriteStart:
-		return fmt.Errorf("%w: server began writing (write_start=%v) but the write did not complete (return-leg failure or server->tunnel write stuck; termErr=%v)", err, dur(rec.lastWriteStart), rec.termErr)
+		return fmt.Errorf("%w: server began writing (write_start=%v) but the write has not completed (return-leg failure or server->tunnel write stuck; termErr=%v)", err, dur(rec.lastWriteStart), rec.termErr)
 	default:
 		return fmt.Errorf("%w: server completed reply (write_done=%v) but the client never read it (return/response-leg break)", err, dur(rec.lastWriteDone))
 	}

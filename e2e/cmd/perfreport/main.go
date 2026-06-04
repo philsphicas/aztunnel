@@ -1341,6 +1341,9 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 			_, _ = fmt.Fprintf(w, "note: pairing streaming rows across runs — no within-run %s pairs found\n", dim)
 		}
 	}
+	if gs.streamPaired == 0 && dim != "run" {
+		return gs, fmt.Errorf("no streaming cells matched on both sides of %s %q..%q: tried within-run pairing (rows must share backend/scenario/mode/axes/run-id) and cross-run pairing (drops run id), neither produced a pair", dim, base, cand)
+	}
 
 	sortRecs(cellOrder)
 	cols := axisColumns(cellOrder)
@@ -1522,6 +1525,9 @@ func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 			crossRun = true
 			_, _ = fmt.Fprintf(w, "note: pairing duplex rows across runs — no within-run %s pairs found\n", dim)
 		}
+	}
+	if gs.duplexPaired == 0 && dim != "run" {
+		return gs, fmt.Errorf("no duplex cells matched on both sides of %s %q..%q: tried within-run pairing (rows must share backend/scenario/mode/axes/run-id) and cross-run pairing (drops run id), neither produced a pair", dim, base, cand)
 	}
 
 	sortRecs(cellOrder)

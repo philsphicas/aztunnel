@@ -1003,6 +1003,48 @@ func TestRenderDuplexCompare_NoDuplexRowsIsSkippable(t *testing.T) {
 	}
 }
 
+// TestRenderDuplexCompare_NoOverlapErrorsAfterFallback verifies the
+// post-fallback zero-pairs error fires: if duplex rows exist but
+// neither within-run nor cross-run pairing finds a match (e.g.
+// different scenarios), the compare must error rather than silently
+// rendering all-dash rows. Without this, --fail-over could exit 0 on
+// an RTT pass while the duplex section produced no comparable data.
+func TestRenderDuplexCompare_NoOverlapErrorsAfterFallback(t *testing.T) {
+	// Two duplex rows with the same auth on each side (so the auth
+	// compare picks them) but DIFFERENT scenarios. Neither within-run
+	// (different runs anyway) nor cross-run (still different scenarios)
+	// pairing produces a match.
+	rowB := strings.Replace(duplexRowOld, `"scenario":"Duplex_Probe_FanOut"`, `"scenario":"Duplex_PortForward"`, 1)
+	rowB = strings.Replace(rowB, `"axes":{"auth":"sas","delay":"zero"}`, `"axes":{"auth":"entra","delay":"zero"}`, 1)
+	rowB = strings.Replace(rowB, `"run":"20260601T100000.000Z-aaaa"`, `"run":"20260601T110000.000Z-bbbb"`, 1)
+	recs, _, err := load([]string{writeTemp(t, duplexRowOld, rowB)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = renderDuplexCompare(&strings.Builder{}, recs, "auth", "sas", "entra")
+	if err == nil || !strings.Contains(err.Error(), "no duplex cells matched on both sides") {
+		t.Errorf("want post-fallback no-overlap error, got %v", err)
+	}
+}
+
+// TestRenderStreamCompare_NoOverlapErrorsAfterFallback is the streaming
+// counterpart of the duplex post-fallback test. Without this, a
+// streaming side that paired nothing would silently render dashes and
+// let --fail-over exit 0 if rtt happened to pass.
+func TestRenderStreamCompare_NoOverlapErrorsAfterFallback(t *testing.T) {
+	rowB := strings.Replace(streamRowOld, `"scenario":"StreamS"`, `"scenario":"StreamOther"`, 1)
+	rowB = strings.Replace(rowB, `"axes":{"auth":"sas","delay":"ff"}`, `"axes":{"auth":"entra","delay":"ff"}`, 1)
+	rowB = strings.Replace(rowB, `"run":"20260601T100000.000Z-aaaa"`, `"run":"20260601T110000.000Z-bbbb"`, 1)
+	recs, _, err := load([]string{writeTemp(t, streamRowOld, rowB)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = renderStreamCompare(&strings.Builder{}, recs, "auth", "sas", "entra")
+	if err == nil || !strings.Contains(err.Error(), "no streaming cells matched on both sides") {
+		t.Errorf("want post-fallback no-overlap error, got %v", err)
+	}
+}
+
 func TestDuplexGateVerdict_PercentAndFloor(t *testing.T) {
 	gs := gateStats{
 		duplexPaired:     1,
