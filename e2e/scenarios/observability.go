@@ -311,12 +311,12 @@ func ScenarioControlSessionID_OnConnectedLine(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
 
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 	requireLogs(t, tun)
 
@@ -334,8 +334,8 @@ func ScenarioControlSessionID_OnConnectedLine(t *testing.T, b Backend) {
 	// and accept_ok log lines fire. Subsumes the legacy
 	// TestControl_Events_AzureSuccessPath, which used the same pair
 	// of substring matches against the listener log.
-	if err := runEchoOnce(tun.SenderAddr, "control-session-id-extend\n", 15*time.Second); err != nil {
-		t.Fatalf("echo to drive accept events: %v", err)
+	if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
+		t.Fatalf("probe to drive accept events: %v", err)
 	}
 	waitForLogLineContaining(t, lst.Logs, 10*time.Second, "accept_attempted")
 	waitForLogLineContaining(t, lst.Logs, 10*time.Second, "accept_ok")
@@ -646,16 +646,16 @@ func ScenarioMetrics_EndpointShape(t *testing.T, b Backend) {
 func ScenarioMetrics_BothSidesConverge(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 
 	for i := 0; i < 3; i++ {
-		if err := runEchoOnce(tun.SenderAddr, "metrics-converge\n", 15*time.Second); err != nil {
+		if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 			t.Fatalf("round-trip %d: %v", i, err)
 		}
 	}
@@ -685,19 +685,19 @@ func ScenarioMetrics_BothSidesConverge(t *testing.T, b Backend) {
 func ScenarioMetrics_DialDuration(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 
 	if tun.Senders[0].DialDurationSamples == nil {
 		t.Skipf("Metrics_DialDuration: %s backend does not expose DialDurationSamples", b.Name())
 	}
 
-	if err := runEchoOnce(tun.SenderAddr, "dial-duration\n", 15*time.Second); err != nil {
+	if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 		t.Fatalf("round-trip: %v", err)
 	}
 
@@ -723,12 +723,12 @@ func ScenarioMetrics_DialDuration(t *testing.T, b Backend) {
 func ScenarioListenerID_PropagatesAndChangesOnRestart(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 	requireLogs(t, tun)
 
@@ -738,10 +738,10 @@ func ScenarioListenerID_PropagatesAndChangesOnRestart(t *testing.T, b Backend) {
 
 	// Drive two flows; both must appear on the sender side with
 	// listener_id == idA.
-	if err := runEchoOnce(tun.SenderAddr, "flow-1\n", 15*time.Second); err != nil {
+	if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 		t.Fatalf("flow 1: %v", err)
 	}
-	if err := runEchoOnce(tun.SenderAddr, "flow-2\n", 15*time.Second); err != nil {
+	if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 		t.Fatalf("flow 2: %v", err)
 	}
 	obs := waitForNAcceptListenerIDs(t, tun.Senders[0].Logs, 2, 15*time.Second)
@@ -769,7 +769,7 @@ func ScenarioListenerID_PropagatesAndChangesOnRestart(t *testing.T, b Backend) {
 	deadline := time.Now().Add(60 * time.Second)
 	var lastObserved string
 	for time.Now().Before(deadline) {
-		_ = runEchoOnceBest(tun.SenderAddr, "probe\n", 10*time.Second)
+		_ = probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 10*time.Second)
 		ids := acceptListenerIDsSince(tun.Senders[0].Logs(), baseline)
 		if len(ids) > 0 {
 			lastObserved = ids[len(ids)-1]
@@ -976,13 +976,6 @@ func acceptListenerIDsSince(logs string, baseline int) []string {
 		return nil
 	}
 	return ids[baseline:]
-}
-
-// runEchoOnceBest is the same as runEchoOnce but swallows errors;
-// used by listener-id restart probes that tolerate transient
-// failures during relay state propagation.
-func runEchoOnceBest(addr, payload string, timeout time.Duration) error {
-	return runEchoOnce(addr, payload, timeout)
 }
 
 // acceptIDLineRe captures the accept_id slog attribute (16 base32

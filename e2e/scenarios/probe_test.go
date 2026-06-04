@@ -205,7 +205,7 @@ func TestProbeFlow_StopDoesNotBreakSurvivor(t *testing.T) {
 // TestProbeOnce_RoundTrip exercises the one-shot helper end-to-end.
 func TestProbeOnce_RoundTrip(t *testing.T) {
 	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: 64})
-	if err := probeOnce(srv.Addr(), 64, 64, 5*time.Second); err != nil {
+	if err := probeOnce(srv, srv.Addr(), 64, 64, 5*time.Second); err != nil {
 		t.Fatalf("probeOnce: %v", err)
 	}
 }
@@ -214,7 +214,7 @@ func TestProbeOnce_RoundTrip(t *testing.T) {
 // response-size mismatch instead of silently passing.
 func TestProbeOnce_WrongRespSize(t *testing.T) {
 	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: 64})
-	err := probeOnce(srv.Addr(), 64, 128, 5*time.Second)
+	err := probeOnce(srv, srv.Addr(), 64, 128, 5*time.Second)
 	if err == nil {
 		t.Fatalf("probeOnce expected error on resp-size mismatch")
 	}

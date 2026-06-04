@@ -1,10 +1,9 @@
 package scenarios
 
 import (
-	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -84,13 +83,13 @@ func topologyCases() []scenarioCase {
 func scenarioNMEcho(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   m,
 		NumSenders:     n,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 
 	const k = 8
@@ -101,7 +100,7 @@ func scenarioNMEcho(t *testing.T, b Backend, n, m int) {
 		go func(i int) {
 			defer wg.Done()
 			addr := tun.SenderAddrs[i%len(tun.SenderAddrs)]
-			if err := runEchoOnce(addr, fmt.Sprintf("hello %d\n", i), 15*time.Second); err != nil {
+			if err := probeOnce(srv, addr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 				errs <- fmt.Errorf("flow %d via %s: %w", i, addr, err)
 			}
 		}(i)
@@ -126,13 +125,13 @@ func scenarioNMEcho(t *testing.T, b Backend, n, m int) {
 func scenarioDistributionPerListener(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   m,
 		NumSenders:     n,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 
 	const (
@@ -149,9 +148,8 @@ func scenarioDistributionPerListener(t *testing.T, b Backend, n, m int) {
 				t.Fatalf("convergence deadline exceeded after %d echoes", sent)
 			}
 			addr := tun.SenderAddrs[sent%len(tun.SenderAddrs)]
-			payload := fmt.Sprintf("ser-%d\n", sent)
-			if err := runEchoOnce(addr, payload, 10*time.Second); err != nil {
-				t.Fatalf("echo %d via %s: %v", sent, addr, err)
+			if err := probeOnce(srv, addr, defaultProbeBody, defaultProbeBody, 10*time.Second); err != nil {
+				t.Fatalf("probe %d via %s: %v", sent, addr, err)
 			}
 			sent++
 		}
@@ -195,13 +193,13 @@ func scenarioDistributionPerListener(t *testing.T, b Backend, n, m int) {
 func scenarioDistributionPerSender(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   m,
 		NumSenders:     n,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 
 	const (
@@ -218,9 +216,8 @@ func scenarioDistributionPerSender(t *testing.T, b Backend, n, m int) {
 				t.Fatalf("convergence deadline exceeded after %d echoes", sent)
 			}
 			addr := tun.SenderAddrs[sent%len(tun.SenderAddrs)]
-			payload := fmt.Sprintf("ser-%d\n", sent)
-			if err := runEchoOnce(addr, payload, 10*time.Second); err != nil {
-				t.Fatalf("echo %d via %s: %v", sent, addr, err)
+			if err := probeOnce(srv, addr, defaultProbeBody, defaultProbeBody, 10*time.Second); err != nil {
+				t.Fatalf("probe %d via %s: %v", sent, addr, err)
 			}
 			sent++
 		}
@@ -387,7 +384,7 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 	}
 
 	// A fresh dial after drop must succeed via the surviving listener.
-	if err := probeOnce(tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
+	if err := probeOnce(echo, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 		t.Errorf("post-drop fresh dial: %v", err)
 	}
 }
@@ -450,7 +447,7 @@ func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 	for newListener.Completed() == 0 && sent < kMax && time.Now().Before(probeDeadline) {
 		for i := 0; i < kBatch && sent < kMax && time.Now().Before(probeDeadline); i++ {
 			addr := tun.SenderAddrs[sent%len(tun.SenderAddrs)]
-			if err := probeOnce(addr, defaultProbeBody, defaultProbeBody, 10*time.Second); err != nil {
+			if err := probeOnce(srv, addr, defaultProbeBody, defaultProbeBody, 10*time.Second); err != nil {
 				t.Fatalf("probe %d via %s: %v", sent, addr, err)
 			}
 			sent++
@@ -497,14 +494,14 @@ func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 func scenarioMaxConnBackPressure(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	const maxConn = 2
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   m,
 		NumSenders:     n,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 		MaxConnections: maxConn,
 	})
 
@@ -544,11 +541,10 @@ func scenarioMaxConnBackPressure(t *testing.T, b Backend, n, m int) {
 		go func(i int) {
 			defer wg.Done()
 			addr := tun.SenderAddrs[i%len(tun.SenderAddrs)]
-			payload := fmt.Sprintf("mc-%d\n", i)
 			deadline := time.Now().Add(overall)
 			var lastErr error
 			for time.Now().Before(deadline) {
-				err := echoWithHold(addr, payload, holdDur, 5*time.Second)
+				err := probeWithHold(srv, addr, holdDur, 5*time.Second)
 				if err == nil {
 					return
 				}
@@ -578,14 +574,14 @@ func scenarioMaxConnBackPressure(t *testing.T, b Backend, n, m int) {
 	}
 }
 
-// echoWithHold dials addr, exchanges payload once, holds the bridge
-// open for hold (no I/O during the hold so the sender's bridge sits
-// idle), then closes. Used by scenarioMaxConnBackPressure to give the
-// 20 ms metric sampler a chance to observe the steady-state Active
-// count across all listeners — short echoes that complete in single-
-// digit milliseconds race the sampler and produce observed=0
-// spuriously.
-func echoWithHold(addr, payload string, hold, timeout time.Duration) error {
+// probeWithHold dials addr, runs one probe exchange against srv, holds
+// the bridge open (idle) for hold, then closes. Used by
+// scenarioMaxConnBackPressure to give the 20 ms metric sampler a chance
+// to observe the steady-state Active count across all listeners; short
+// exchanges that complete in single-digit milliseconds race the sampler
+// and produce observed=0 spuriously. On failure the returned error
+// carries the same per-leg server-side attribution probeOnce provides.
+func probeWithHold(srv *WorkloadServer, addr string, hold, timeout time.Duration) error {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -593,45 +589,29 @@ func echoWithHold(addr, payload string, hold, timeout time.Duration) error {
 	defer conn.Close() //nolint:errcheck // best-effort
 	_ = conn.SetDeadline(time.Now().Add(timeout + hold))
 
-	if err := writeFull(conn, []byte(payload)); err != nil {
+	nonce := randNonce()
+	buf := make([]byte, probeHdrLen+defaultProbeBody)
+	binary.BigEndian.PutUint64(buf[probeOffClient:], uint64(probeNanos()))
+	fillPattern(buf[probeHdrLen:], nonce, 0)
+	if err := writeFrame(conn, frameProbeReq, nonce, buf); err != nil {
 		return fmt.Errorf("write: %w", err)
 	}
-	buf := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, buf); err != nil {
+	typ, n, payload, err := readFrame(conn)
+	if err != nil {
 		return fmt.Errorf("read: %w", err)
 	}
-	if !bytes.Equal(buf, []byte(payload)) {
-		return fmt.Errorf("echo mismatch: got %q want %q", buf, payload)
+	if n != nonce || typ != frameProbeResp || len(payload) < probeHdrLen {
+		return fmt.Errorf("bad probe response: typ=%d nonce=%d hdrlen=%d", typ, n, len(payload))
 	}
+	// Hold the conn open so the sampler observes the elevated Active
+	// count; both server and client retain their bridge bookkeeping
+	// until the deferred Close fires after the sleep.
 	time.Sleep(hold)
+	_, _ = srv.ConsumeProbeRecord(nonce) // free server record before return
 	return nil
 }
 
 // --- helpers --------------------------------------------------------
-
-// runEchoOnce opens one connection, writes payload, reads it back,
-// and closes. Returns an error if any step fails or if the echo does
-// not round-trip exactly.
-func runEchoOnce(addr, payload string, timeout time.Duration) error {
-	conn, err := net.DialTimeout("tcp", addr, timeout)
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
-	}
-	defer conn.Close() //nolint:errcheck // best-effort
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-
-	if err := writeFull(conn, []byte(payload)); err != nil {
-		return fmt.Errorf("write: %w", err)
-	}
-	buf := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		return fmt.Errorf("read: %w", err)
-	}
-	if !bytes.Equal(buf, []byte(payload)) {
-		return fmt.Errorf("echo mismatch: got %q want %q", buf, payload)
-	}
-	return nil
-}
 
 // drainErrors returns the first error from a closed channel, with a
 // summary mention of how many additional errors followed.
@@ -721,17 +701,17 @@ func ScenarioListenerRestart_Recovers(t *testing.T, b Backend) {
 	t.Helper()
 	AssertNoLeaks(t)
 
-	echo := StartPlainEcho(t)
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   1,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 
 	// Pre-restart round-trip.
-	if err := runEchoOnce(tun.SenderAddr, "before-restart\n", 15*time.Second); err != nil {
-		t.Fatalf("pre-restart echo: %v", err)
+	if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
+		t.Fatalf("pre-restart probe: %v", err)
 	}
 
 	// Stop the listener and attach a fresh one.
@@ -748,12 +728,12 @@ func ScenarioListenerRestart_Recovers(t *testing.T, b Backend) {
 	deadline := time.Now().Add(20 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		if err := runEchoOnce(tun.SenderAddr, "after-restart\n", 5*time.Second); err == nil {
+		if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 5*time.Second); err == nil {
 			return
 		} else {
 			lastErr = err
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	t.Fatalf("post-restart echo never succeeded within 20s: %v", lastErr)
+	t.Fatalf("post-restart probe never succeeded within 20s: %v", lastErr)
 }

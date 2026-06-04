@@ -532,7 +532,43 @@ func (f *probeFlow) localize(srv *WorkloadServer) string {
 // ServerProbe target reached at addr (one dial, one request, one verified
 // response). It is the framed replacement for runEchoOnce in scenarios
 // whose target is a ServerProbe server.
-func probeOnce(addr string, reqSize, respSize int, timeout time.Duration) error {
+//
+// On failure, if srv is non-nil, the returned error is enriched with the
+// server's per-nonce record interpretation (request reached server vs.
+// server stalled vs. return-leg break), giving the same per-leg
+// localization the held-flow scenarios get from probeFlow.Dump. Pass nil
+// for srv when the caller can't easily get a *WorkloadServer reference;
+// the dial/read/integrity error still surfaces, just without leg
+// attribution.
+func probeOnce(srv *WorkloadServer, addr string, reqSize, respSize int, timeout time.Duration) error {
+	nonce := randNonce()
+	err := probeOnceCore(addr, nonce, reqSize, respSize, timeout)
+	if err == nil || srv == nil {
+		return err
+	}
+	// Server may have produced a record before the exchange failed;
+	// consume it (delete-on-read) so the entry doesn't linger. localize
+	// on a fresh probeFlow shape isn't applicable here (no live acked
+	// counter), but the raw record fields tell the story.
+	rec, ok := srv.ConsumeProbeRecord(nonce)
+	if !ok {
+		return fmt.Errorf("%w: server has no record for nonce %d (request never reached the server: outbound break)", err, nonce)
+	}
+	switch {
+	case rec.lastSeqSeen < 0:
+		return fmt.Errorf("%w: server recorded the connection but read no request (outbound break before first frame)", err)
+	case rec.lastWriteStart == 0 || rec.lastWriteStart < rec.lastRecvNano:
+		return fmt.Errorf("%w: server read the request (recv=%v) but had not started its reply (server-path stall)", err, dur(rec.lastRecvNano))
+	case rec.lastWriteDone < rec.lastWriteStart:
+		return fmt.Errorf("%w: server began writing (write_start=%v) but the write did not complete (return-leg failure or server->tunnel write stuck; termErr=%v)", err, dur(rec.lastWriteStart), rec.termErr)
+	default:
+		return fmt.Errorf("%w: server completed reply (write_done=%v) but the client never read it (return/response-leg break)", err, dur(rec.lastWriteDone))
+	}
+}
+
+// probeOnceCore is the raw single-exchange driver; probeOnce wraps it
+// with optional server-side localization on failure.
+func probeOnceCore(addr string, nonce uint64, reqSize, respSize int, timeout time.Duration) error {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -540,7 +576,6 @@ func probeOnce(addr string, reqSize, respSize int, timeout time.Duration) error 
 	defer conn.Close() //nolint:errcheck // best-effort
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
-	nonce := randNonce()
 	buf := make([]byte, probeHdrLen+reqSize)
 	binary.BigEndian.PutUint64(buf[probeOffClient:], uint64(probeNanos()))
 	fillPattern(buf[probeHdrLen:], nonce, 0)
