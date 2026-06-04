@@ -118,6 +118,17 @@ func (b *azureBackend) Cell(values map[string]string) scenarios.Backend {
 	return &azureBackend{authName: auth, acquireEnv: b.acquireEnv}
 }
 
+// Pins reports the dimensions pinned (not advertised as axes) on this
+// azureBackend. Only the auth dimension is dimensional on this backend;
+// the placement / delay shape is the real Azure environment and isn't
+// modelled here.
+func (b *azureBackend) Pins() map[string]string {
+	if b.axis != nil || b.authName == "" {
+		return nil
+	}
+	return map[string]string{"auth": b.authName}
+}
+
 // ConnectLatencyThreshold returns the per-backend connect-latency
 // ceiling for the Performance suite. Azure pays the real Azure
 // Relay control-plane rendezvous round-trip (~950 ms typical),

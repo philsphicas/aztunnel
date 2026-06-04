@@ -145,3 +145,85 @@ func TestFinishPerfMatrix_ExplicitWriteIsFatal(t *testing.T) {
 		t.Fatalf("explicit PERF_MATRIX_JSONL write failure must Errorf exactly once, got %d", rec.errorfN)
 	}
 }
+
+// TestPerfMatrixBackend_PrefersEnvOverSink verifies the env var wins
+// over a sink-registered backend name when both are set.
+func TestPerfMatrixBackend_PrefersEnvOverSink(t *testing.T) {
+	perfMatrixSink.setBackendName("mock")
+	t.Cleanup(func() { perfMatrixSink.setBackendName("") })
+	t.Setenv("PERF_MATRIX_BACKEND", "ci-override")
+	if got := perfMatrixBackend(); got != "ci-override" {
+		t.Errorf("perfMatrixBackend()=%q with env set, want ci-override", got)
+	}
+}
+
+// TestPerfMatrixBackend_FallsBackToSink verifies the sink-registered
+// backend name is used when the env var is empty — the "just works"
+// path for a normal `make e2e-mock` invocation.
+func TestPerfMatrixBackend_FallsBackToSink(t *testing.T) {
+	perfMatrixSink.setBackendName("mock")
+	t.Cleanup(func() { perfMatrixSink.setBackendName("") })
+	t.Setenv("PERF_MATRIX_BACKEND", "")
+	if got := perfMatrixBackend(); got != "mock" {
+		t.Errorf("perfMatrixBackend()=%q with sink-set name, want mock", got)
+	}
+}
+
+// TestPerfMatrixBackend_EmptyWhenNeitherSet documents the legacy
+// behavior — if a caller bypasses RunAllScenarios and doesn't set the
+// env, the label stays empty (it can't be inferred from nothing).
+func TestPerfMatrixBackend_EmptyWhenNeitherSet(t *testing.T) {
+	perfMatrixSink.setBackendName("")
+	t.Setenv("PERF_MATRIX_BACKEND", "")
+	if got := perfMatrixBackend(); got != "" {
+		t.Errorf("perfMatrixBackend()=%q with nothing set, want empty", got)
+	}
+}
+
+// TestMatrixIdentity_PinsMergedIntoAxes verifies that a row recorded
+// from a single-cell run (no axis sub-layers) still carries the pinned
+// dimensional identity from setPins. This is the property that makes
+// cross-run comparison along a pinned dimension work.
+func TestMatrixIdentity_PinsMergedIntoAxes(t *testing.T) {
+	perfMatrixSink.setAxisNames(nil)
+	perfMatrixSink.setPins(map[string]string{"auth": "sas", "delay": "zero"})
+	t.Cleanup(func() {
+		perfMatrixSink.setAxisNames(nil)
+		perfMatrixSink.setPins(nil)
+	})
+
+	axis, axes, scenario, mode := matrixIdentity("TestE2E_Mock/Duplex_Probe_SOCKS5_FanOut")
+	if axis != "" {
+		t.Errorf("axis=%q with no axis layers, want empty", axis)
+	}
+	if scenario != "Duplex_Probe_FanOut" || mode != "SOCKS5" {
+		t.Errorf("scenario/mode = %q/%q, want Duplex_Probe_FanOut/SOCKS5", scenario, mode)
+	}
+	if got, want := axes["auth"], "sas"; got != want {
+		t.Errorf("axes[auth]=%q, want %q", got, want)
+	}
+	if got, want := axes["delay"], "zero"; got != want {
+		t.Errorf("axes[delay]=%q, want %q", got, want)
+	}
+}
+
+// TestMatrixIdentity_AxisValuesWinOverPins verifies that when a
+// dimension is both pinned (shouldn't happen, but guard) and varied as
+// an axis, the per-cell axis value wins so the cell isn't silently
+// mislabelled.
+func TestMatrixIdentity_AxisValuesWinOverPins(t *testing.T) {
+	perfMatrixSink.setAxisNames([]string{"delay"})
+	perfMatrixSink.setPins(map[string]string{"delay": "zero", "auth": "sas"})
+	t.Cleanup(func() {
+		perfMatrixSink.setAxisNames(nil)
+		perfMatrixSink.setPins(nil)
+	})
+
+	_, axes, _, _ := matrixIdentity("TestE2E_Mock/default/Duplex_Probe_SOCKS5_FanOut")
+	if got, want := axes["delay"], "default"; got != want {
+		t.Errorf("axes[delay]=%q, want %q (axis value should win over pin)", got, want)
+	}
+	if got, want := axes["auth"], "sas"; got != want {
+		t.Errorf("axes[auth]=%q, want %q (pin should still appear)", got, want)
+	}
+}

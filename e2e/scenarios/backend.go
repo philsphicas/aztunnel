@@ -137,6 +137,17 @@ type Backend interface {
 	// no testing.TB to fail on cleanly).
 	Cell(values map[string]string) Backend
 
+	// Pins returns the dimensional values this Backend has baked in
+	// rather than advertised as axes — the configuration knobs a run
+	// is using but not sweeping. Combined with the per-cell axis
+	// values from Axes/Cell, this gives every recorded matrix row a
+	// complete identity (e.g., {"auth":"sas","delay":"zero"}) so
+	// cross-run and cross-cell comparisons work regardless of which
+	// dimensions happened to be axes vs pinned for any given run.
+	// Backends that have nothing pinned (or no dimensional knobs at
+	// all) return nil.
+	Pins() map[string]string
+
 	// ConnectLatencyThreshold is the per-backend ceiling for a single
 	// fresh-connection round-trip (Dial → 1-byte write → 1-byte echo
 	// read → Close). It feeds the echo-workload scenarios' per-round

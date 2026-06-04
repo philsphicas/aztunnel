@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -805,10 +806,44 @@ func TestRenderCompare_ByLegacyAxis(t *testing.T) {
 	}
 }
 
-func TestRenderCompare_NoOverlapNonRunErrors(t *testing.T) {
-	// mock and azure live in separate runs, so a backend compare has no
-	// residual that exists on both sides.
+func TestRenderCompare_CrossRunFallback(t *testing.T) {
+	// mock and azure live in separate runs but share scenario/mode/axes,
+	// so a backend compare cannot pair them within a run. The cross-run
+	// fallback should pair them anyway, with a note announcing the
+	// cross-run pairing, because that comparison ("what does the real
+	// network cost on top of the mock?") is exactly what someone asks
+	// when they compare backends across two runs.
 	recs, _, err := load([]string{writeTemp(t, rowR1SasNN, rowAzureRun)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	gs, err := renderCompare(&b, recs, "backend", "mock", "azure")
+	if err != nil {
+		t.Fatalf("cross-run compare should succeed, got: %v", err)
+	}
+	if gs.paired == 0 {
+		t.Errorf("expected at least one paired cell via cross-run fallback")
+	}
+	out := b.String()
+	if !strings.Contains(out, "note: pairing rows across runs") {
+		t.Errorf("expected cross-run fallback note, got:\n%s", out)
+	}
+	// The two paired rows came from different runs; a single "run"
+	// column would arbitrarily pick one of them and misrepresent the
+	// comparison. It should be hidden in cross-run mode.
+	if hdr := headerLine(out); strings.Contains(hdr, "\trun\t") || strings.HasSuffix(hdr, "\trun") {
+		t.Errorf("cross-run compare should not show a run column (each side is a different run):\n%s", out)
+	}
+}
+
+func TestRenderCompare_TrueNoOverlapErrors(t *testing.T) {
+	// rowR1SasNN: backend=mock, scenario=S, mode=PortForward.
+	// rowDifferentScenario: backend=azure, scenario=DIFFERENT (otherwise
+	// matching). Cross-run fallback can't bridge the different scenarios,
+	// so the comparison legitimately has no pairs and errors.
+	const rowDifferentScenario = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T120000.000Z-cccc","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"DIFFERENT","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
+	recs, _, err := load([]string{writeTemp(t, rowR1SasNN, rowDifferentScenario)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,6 +863,53 @@ func TestRenderCompare_UnknownValueListsAvailable(t *testing.T) {
 	_, err = renderCompare(&b, recs, "auth", "sas", "ntlm")
 	if err == nil || !strings.Contains(err.Error(), "available: entra, sas") {
 		t.Errorf("expected available-values error, got %v", err)
+	}
+}
+
+// TestRenderCompare_CrossRunPicksNewest verifies that when multiple
+// runs share the same residual key after dropping run id (the typical
+// multi-run history case for cross-run pairing), the pair maps pick
+// the newest run deterministically rather than whichever rec the
+// iteration order happened to last assign.
+func TestRenderCompare_CrossRunPicksNewest(t *testing.T) {
+	// Three baseline mock-sas rows with successively newer run ids,
+	// plus one azure-sas candidate. Cross-run pairing drops run id,
+	// so all three baseline rows collide on the same residual key.
+	// The pair must pick the newest (rid ccc), not whichever came
+	// last in input order — so reverse the input to defeat that
+	// accidental property.
+	mkRow := func(run string, warmNs int64) string {
+		return fmt.Sprintf(`{"type":"row","schema":"perfmatrix/v1","run":%q,"backend":"mock","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":250000000,"warm_p50_ns":%d,"warm_p95_ns":23000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":360000000}`, run, warmNs)
+	}
+	baseOld := mkRow("20260601T100000.000Z-aaa", 10_000_000)
+	baseMid := mkRow("20260601T110000.000Z-bbb", 20_000_000)
+	baseNew := mkRow("20260601T120000.000Z-ccc", 30_000_000)
+	const cand = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T130000.000Z-ddd","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
+
+	// Reverse input order: oldest LAST. A naive `m[k] = r` would
+	// pick the oldest row instead of the newest. Assert we pick ccc.
+	recs, _, err := load([]string{writeTemp(t, cand, baseNew, baseMid, baseOld)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if _, err := renderCompare(&b, recs, "backend", "mock", "azure"); err != nil {
+		t.Fatalf("renderCompare: %v", err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "note: pairing rows across runs") {
+		t.Errorf("expected cross-run fallback note:\n%s", out)
+	}
+	// The Δ% column distinguishes which baseline was paired:
+	//   baseline=ccc(30ms) vs cand(210ms) → +600.0%
+	//   baseline=bbb(20ms) vs cand(210ms) → +950.0%
+	//   baseline=aaa(10ms) vs cand(210ms) → +2000.0%
+	// Asserting +600% confirms the newest baseline (ccc) was picked.
+	if !strings.Contains(out, "+600.0%") {
+		t.Errorf("expected +600.0%% warm delta (newest baseline 30ms vs cand 210ms); got:\n%s", out)
+	}
+	if strings.Contains(out, "+950.0%") || strings.Contains(out, "+2000.0%") {
+		t.Errorf("older baseline was paired — newest-wins broken:\n%s", out)
 	}
 }
 
@@ -872,6 +954,130 @@ func headerLine(out string) string {
 		}
 	}
 	return ""
+}
+
+// Duplex-family rows (metric_family="duplex"). Old/new share a cell
+// across two runs so renderDuplexCompare pairs them via the cross-run
+// fallback. rtt_p50 moves 5ms->10ms (+100%, a gated regression);
+// rtt_p95 moves 9ms->18ms (also gated).
+const (
+	duplexRowOld = `{"type":"row","schema":"perfmatrix/v1","metric_family":"duplex","run":"20260601T100000.000Z-aaaa","backend":"mock","axes":{"auth":"sas","delay":"zero"},"scenario":"Duplex_Probe_FanOut","mode":"SOCKS5","rtt_p50_ns":5000000,"rtt_p95_ns":9000000,"req_leg_p50_ns":2000000,"req_leg_p95_ns":4000000,"resp_leg_p50_ns":2000000,"resp_leg_p95_ns":4000000,"think_p50_ns":1000,"think_p95_ns":3000,"acks_per_sec":100,"bytes_per_sec_per_dir":5000,"ack_spread":2,"sample_n":50,"flow_n":4,"success_n":4,"attempt_n":4,"wall_ns":2000000000}`
+	duplexRowNew = `{"type":"row","schema":"perfmatrix/v1","metric_family":"duplex","run":"20260601T120000.000Z-bbbb","backend":"mock","axes":{"auth":"sas","delay":"default"},"scenario":"Duplex_Probe_FanOut","mode":"SOCKS5","rtt_p50_ns":10000000,"rtt_p95_ns":18000000,"req_leg_p50_ns":4000000,"req_leg_p95_ns":8000000,"resp_leg_p50_ns":4000000,"resp_leg_p95_ns":8000000,"think_p50_ns":1000,"think_p95_ns":3000,"acks_per_sec":50,"bytes_per_sec_per_dir":2500,"ack_spread":1,"sample_n":50,"flow_n":4,"success_n":4,"attempt_n":4,"wall_ns":2100000000}`
+)
+
+func TestRenderDuplexCompare_CrossRunDeltas(t *testing.T) {
+	recs, _, err := load([]string{writeTemp(t, duplexRowOld, duplexRowNew)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	gs, err := renderDuplexCompare(&b, recs, "delay", "zero", "default")
+	if err != nil {
+		t.Fatalf("renderDuplexCompare: %v", err)
+	}
+	out := b.String()
+	// rtt_p50 5ms -> 10ms = +100%; rtt_p95 9ms -> 18ms = +100%.
+	if !strings.Contains(out, "+100.0%") {
+		t.Errorf("expected +100%% delta on rtt p50/p95:\n%s", out)
+	}
+	if !strings.Contains(out, "note: pairing duplex rows across runs") {
+		t.Errorf("expected cross-run note for separate-run duplex compare:\n%s", out)
+	}
+	if gs.duplexPaired != 1 || gs.duplexComparable != 1 {
+		t.Errorf("paired=%d comparable=%d; want 1/1", gs.duplexPaired, gs.duplexComparable)
+	}
+	if len(gs.duplexRegressions) != 2 {
+		t.Errorf("expected 2 regressions (rtt_p50 + rtt_p95), got %d", len(gs.duplexRegressions))
+	}
+}
+
+func TestRenderDuplexCompare_NoDuplexRowsIsSkippable(t *testing.T) {
+	// Only rtt rows; renderDuplexCompare must signal nothing to compare.
+	recs, _, err := load([]string{writeTemp(t, rowR1SasNN, rowR1EntraNN)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = renderDuplexCompare(&strings.Builder{}, recs, "auth", "sas", "entra")
+	if !errors.Is(err, errNoDuplexRows) {
+		t.Errorf("want errNoDuplexRows, got %v", err)
+	}
+}
+
+// TestRenderDuplexCompare_NoOverlapErrorsAfterFallback verifies the
+// post-fallback zero-pairs error fires: if duplex rows exist but
+// neither within-run nor cross-run pairing finds a match (e.g.
+// different scenarios), the compare must error rather than silently
+// rendering all-dash rows. Without this, --fail-over could exit 0 on
+// an RTT pass while the duplex section produced no comparable data.
+func TestRenderDuplexCompare_NoOverlapErrorsAfterFallback(t *testing.T) {
+	// Two duplex rows with the same auth on each side (so the auth
+	// compare picks them) but DIFFERENT scenarios. Neither within-run
+	// (different runs anyway) nor cross-run (still different scenarios)
+	// pairing produces a match.
+	rowB := strings.Replace(duplexRowOld, `"scenario":"Duplex_Probe_FanOut"`, `"scenario":"Duplex_PortForward"`, 1)
+	rowB = strings.Replace(rowB, `"axes":{"auth":"sas","delay":"zero"}`, `"axes":{"auth":"entra","delay":"zero"}`, 1)
+	rowB = strings.Replace(rowB, `"run":"20260601T100000.000Z-aaaa"`, `"run":"20260601T110000.000Z-bbbb"`, 1)
+	recs, _, err := load([]string{writeTemp(t, duplexRowOld, rowB)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = renderDuplexCompare(&strings.Builder{}, recs, "auth", "sas", "entra")
+	if err == nil || !strings.Contains(err.Error(), "no duplex cells matched on both sides") {
+		t.Errorf("want post-fallback no-overlap error, got %v", err)
+	}
+}
+
+// TestRenderStreamCompare_NoOverlapErrorsAfterFallback is the streaming
+// counterpart of the duplex post-fallback test. Without this, a
+// streaming side that paired nothing would silently render dashes and
+// let --fail-over exit 0 if rtt happened to pass.
+func TestRenderStreamCompare_NoOverlapErrorsAfterFallback(t *testing.T) {
+	rowB := strings.Replace(streamRowOld, `"scenario":"StreamS"`, `"scenario":"StreamOther"`, 1)
+	rowB = strings.Replace(rowB, `"axes":{"auth":"sas","delay":"ff"}`, `"axes":{"auth":"entra","delay":"ff"}`, 1)
+	rowB = strings.Replace(rowB, `"run":"20260601T100000.000Z-aaaa"`, `"run":"20260601T110000.000Z-bbbb"`, 1)
+	recs, _, err := load([]string{writeTemp(t, streamRowOld, rowB)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = renderStreamCompare(&strings.Builder{}, recs, "auth", "sas", "entra")
+	if err == nil || !strings.Contains(err.Error(), "no streaming cells matched on both sides") {
+		t.Errorf("want post-fallback no-overlap error, got %v", err)
+	}
+}
+
+func TestDuplexGateVerdict_PercentAndFloor(t *testing.T) {
+	gs := gateStats{
+		duplexPaired:     1,
+		duplexComparable: 1,
+		duplexRegressions: []regression{
+			{label: "small", pct: 5, absNs: int64(2 * time.Millisecond)},        // below pct
+			{label: "big-noisy", pct: 200, absNs: int64(10 * time.Microsecond)}, // below abs floor
+			{label: "real", pct: 50, absNs: int64(30 * time.Millisecond)},       // breaches both
+		},
+	}
+	worst, err := duplexGateVerdict(gs, 30, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("verdict err: %v", err)
+	}
+	if worst == nil || worst.label != "real" {
+		t.Errorf("worst=%+v, want label=real", worst)
+	}
+}
+
+func TestDuplexGateVerdict_PairedButUncomparableErrors(t *testing.T) {
+	gs := gateStats{duplexPaired: 1, duplexComparable: 0}
+	_, err := duplexGateVerdict(gs, 10, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "duplex cells paired but none carried a comparable") {
+		t.Errorf("want paired-but-uncomparable error, got %v", err)
+	}
+}
+
+func TestDuplexGateVerdict_NoPairsIsNoOp(t *testing.T) {
+	gs := gateStats{}
+	worst, err := duplexGateVerdict(gs, 10, time.Millisecond)
+	if err != nil || worst != nil {
+		t.Errorf("no-pairs duplex gate must be (nil, nil), got worst=%v err=%v", worst, err)
+	}
 }
 
 const rowAzureRun = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T120000.000Z-cccc","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
@@ -1040,8 +1246,10 @@ func TestCompare_StreamOnlyArtifactStillGates(t *testing.T) {
 		t.Fatal(err)
 	}
 	// RTT side: nothing to compare (no rtt rows) -> skippable, not fatal.
-	if _, rttErr := renderCompare(&strings.Builder{}, recs, "run", "previous", "latest"); !errors.Is(rttErr, errNotEnoughRuns) {
-		t.Fatalf("rtt renderCompare err = %v, want errNotEnoughRuns", rttErr)
+	// Either errNotEnoughRuns or errNoRTTRows is acceptable — both are
+	// in the orchestration's "skippable" set.
+	if _, rttErr := renderCompare(&strings.Builder{}, recs, "run", "previous", "latest"); !errors.Is(rttErr, errNotEnoughRuns) && !errors.Is(rttErr, errNoRTTRows) {
+		t.Fatalf("rtt renderCompare err = %v, want errNotEnoughRuns or errNoRTTRows", rttErr)
 	}
 	// Streaming side: pairs and trips the gate on its own.
 	sgs, sErr := renderStreamCompare(&strings.Builder{}, recs, "run", "previous", "latest")

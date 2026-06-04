@@ -76,6 +76,14 @@ type MockBackend struct {
 	// token-acquisition cost is taken from DelayProfile.TokenAcquire.
 	authName string
 
+	// delayName is the registered profile name DelayProfile was
+	// resolved from. Tracked so Pins() can report it on every recorded
+	// matrix row even when delay is pinned (not advertised as an axis),
+	// which is what makes cross-run comparison work. Empty for backends
+	// constructed without a profile name (the historical zero-value
+	// MockBackend usage in features_test / entracred_test).
+	delayName string
+
 	// authAxis and delayAxis put this backend in factory mode for the
 	// dimension they describe: when non-nil, Axes() advertises that
 	// dimension and Cell() pins it per cell. They are set only by
@@ -153,6 +161,7 @@ func NewMatrixBackend(authNames, delayNames []string) *MockBackend {
 	if len(delayNames) == 1 {
 		// ProfileByName already validated this name above.
 		b.DelayProfile, _ = server.ProfileByName(delayNames[0])
+		b.delayName = delayNames[0]
 	} else {
 		b.delayAxis = &namedAxis{name: "delay", values: append([]string(nil), delayNames...)}
 	}
@@ -191,6 +200,7 @@ func (b *MockBackend) Cell(values map[string]string) scenarios.Backend {
 	cell := &MockBackend{
 		DelayProfile: b.DelayProfile,
 		authName:     b.authName,
+		delayName:    b.delayName,
 	}
 	want := 0
 	if b.authAxis != nil {
@@ -215,11 +225,31 @@ func (b *MockBackend) Cell(values map[string]string) scenarios.Backend {
 			panic("MockBackend.Cell: " + err.Error())
 		}
 		cell.DelayProfile = p
+		cell.delayName = v
 	}
 	if len(values) != want {
 		panic(fmt.Sprintf("MockBackend.Cell: expected %d axis value(s), got %d", want, len(values)))
 	}
 	return cell
+}
+
+// Pins reports the dimensions pinned (not advertised as axes) on this
+// MockBackend, so every recorded matrix row carries its full identity
+// regardless of which dimensions happened to be axes for this run.
+// Empty names (e.g. on a directly-constructed zero-value MockBackend)
+// are omitted so they don't pollute the matrix's named-axis columns.
+func (b *MockBackend) Pins() map[string]string {
+	pins := map[string]string{}
+	if b.authAxis == nil && b.authName != "" {
+		pins["auth"] = b.authName
+	}
+	if b.delayAxis == nil && b.delayName != "" {
+		pins["delay"] = b.delayName
+	}
+	if len(pins) == 0 {
+		return nil
+	}
+	return pins
 }
 
 // mockLatencyFloor is the minimum per-connection latency ceiling. It
