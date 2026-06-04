@@ -223,6 +223,25 @@ func TestProbeOnce_WrongRespSize(t *testing.T) {
 	}
 }
 
+// TestProbeOnce_FreesServerRecordOnSuccess verifies high-volume callers
+// (Distribution_*, Metrics_*) don't accumulate per-nonce records on the
+// success path. probeOnce must consume the record when srv is non-nil,
+// mirroring probeWithHold.
+func TestProbeOnce_FreesServerRecordOnSuccess(t *testing.T) {
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: 32})
+	for i := 0; i < 50; i++ {
+		if err := probeOnce(srv, srv.Addr(), 32, 32, 5*time.Second); err != nil {
+			t.Fatalf("probeOnce[%d]: %v", i, err)
+		}
+	}
+	srv.probeMu.Lock()
+	n := len(srv.probeStats)
+	srv.probeMu.Unlock()
+	if n != 0 {
+		t.Errorf("probeStats has %d residual entries after 50 successful probeOnce calls; want 0 (success path must ConsumeProbeRecord)", n)
+	}
+}
+
 // TestServeProbe_NonceChange_Rejected verifies that the server rejects a
 // frame whose nonce differs from the first frame on the same connection.
 // Without this, a buggy client mixing nonces would be silently verified

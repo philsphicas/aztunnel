@@ -543,7 +543,21 @@ func (f *probeFlow) localize(srv *WorkloadServer) string {
 // attribution.
 func probeOnce(srv *WorkloadServer, addr string, reqSize, respSize int, timeout time.Duration) error {
 	nonce := randNonce()
-	return localizeProbeError(srv, nonce, probeOnceCore(addr, nonce, reqSize, respSize, timeout))
+	err := probeOnceCore(addr, nonce, reqSize, respSize, timeout)
+	if err != nil {
+		// localizeProbeError consumes the server record (delete-on-read)
+		// while enriching the error with per-leg attribution.
+		return localizeProbeError(srv, nonce, err)
+	}
+	// Success path: the exchange validated cleanly. Free the server's
+	// per-nonce record so a high-volume caller (Distribution_*,
+	// observability triggers, etc.) doesn't accumulate one terminal
+	// record per dial for the WorkloadServer's lifetime. nil srv is a
+	// no-op.
+	if srv != nil {
+		_, _ = srv.ConsumeProbeRecord(nonce)
+	}
+	return nil
 }
 
 // probeOnceCore is the raw single-exchange driver; probeOnce wraps it
