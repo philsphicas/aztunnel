@@ -657,20 +657,15 @@ func isAxisDim(dim string) bool {
 // residualKey identifies a row by every identity dimension EXCEPT the one
 // under comparison, so two rows differing only in that dimension (e.g.
 // auth=sas vs auth=entra of the same run/scenario/mode) collapse to one
-// comparison cell. Run is part of the residual for non-run dimensions, so
-// comparisons stay apples-to-apples within a single run.
-func residualKey(r record, dim string) string {
-	return residualKeyOpts(r, dim, false)
-}
-
-// residualKeyOpts is the configurable form of residualKey. When
-// crossRun is true the run id is dropped from the identity, so two rows
-// from different runs that agree on every other dimension pair up.
-// renderCompare uses this as a fallback when within-run pairing
-// produces zero matches, which is the typical situation when a user has
-// done two separate single-value runs (e.g. E2E_DELAY=zero in one and
-// E2E_DELAY=default in another) and wants to compare them.
-func residualKeyOpts(r record, dim string, crossRun bool) string {
+// comparison cell. When crossRun is true the run id is dropped from the
+// identity too, so two rows from different runs that agree on every
+// other dimension pair up. renderCompare/renderStreamCompare/
+// renderDuplexCompare use the crossRun=true mode as a fallback when
+// within-run pairing produces zero matches, which is the typical
+// situation when a user has done two separate single-value runs (e.g.
+// E2E_DELAY=zero in one and E2E_DELAY=default in another) and wants to
+// compare them.
+func residualKey(r record, dim string, crossRun bool) string {
 	backend, scenario, mode, run := r.Backend, r.Scenario, r.Mode, r.Run
 	switch dim {
 	case "backend":
@@ -943,7 +938,7 @@ func renderDuplexReportTable(w io.Writer, recs []record) error {
 	if showRun {
 		header = append(header, "run")
 	}
-	header = append(header, "scenario", "mode", "rtt_p50", "rtt_p95", "req_leg_p50", "req_leg_p95", "resp_leg_p50", "resp_leg_p95", "think_p95", "acks/s", "bytes/s", "ack_spread", "sample_n", "success", "wall")
+	header = append(header, "scenario", "mode", "rtt_p50", "rtt_p95", "req_leg_p50", "req_leg_p95", "resp_leg_p50", "resp_leg_p95", "think_p50", "think_p95", "acks/s", "bytes/s", "ack_spread", "sample_n", "success", "wall")
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, r := range recs {
@@ -963,7 +958,7 @@ func renderDuplexReportTable(w io.Writer, recs []record) error {
 			durOrDash(r.RTTP50Ns), durOrDash(r.RTTP95Ns),
 			durOrDash(r.ReqLegP50Ns), durOrDash(r.ReqLegP95Ns),
 			durOrDash(r.RespLegP50Ns), durOrDash(r.RespLegP95Ns),
-			durOrDash(r.ThinkP95Ns),
+			durOrDash(r.ThinkP50Ns), durOrDash(r.ThinkP95Ns),
 			i64Cell(r.AcksPerSec), i64Cell(r.BytesPerSecPerDir), i64Cell(r.AckSpread),
 			fmt.Sprintf("%d", r.SampleN),
 			fmt.Sprintf("%d/%d", r.SuccessN, r.AttemptN), dur(r.WallNs),
@@ -1109,7 +1104,7 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 			if v != base && v != cand {
 				continue
 			}
-			k := residualKeyOpts(r, dim, crossRun)
+			k := residualKey(r, dim, crossRun)
 			if v == base {
 				baseByCell[k] = r
 			} else {
@@ -1195,7 +1190,7 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, c := range cellOrder {
-		k := residualKeyOpts(c, dim, crossRun)
+		k := residualKey(c, dim, crossRun)
 		b, bok := baseByCell[k]
 		n, nok := candByCell[k]
 		var cells []string
@@ -1289,7 +1284,7 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 			if !ok || (v != base && v != cand) {
 				continue
 			}
-			k := residualKeyOpts(r, dim, crossRun)
+			k := residualKey(r, dim, crossRun)
 			if v == base {
 				baseByCell[k] = r
 			} else {
@@ -1367,7 +1362,7 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, c := range cellOrder {
-		k := residualKeyOpts(c, dim, crossRun)
+		k := residualKey(c, dim, crossRun)
 		b, bok := baseByCell[k]
 		n, nok := candByCell[k]
 		var cells []string
@@ -1474,7 +1469,7 @@ func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 			if !ok || (v != base && v != cand) {
 				continue
 			}
-			k := residualKeyOpts(r, dim, crossRun)
+			k := residualKey(r, dim, crossRun)
 			if v == base {
 				baseByCell[k] = r
 			} else {
@@ -1549,7 +1544,7 @@ func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, c := range cellOrder {
-		k := residualKeyOpts(c, dim, crossRun)
+		k := residualKey(c, dim, crossRun)
 		b, bok := baseByCell[k]
 		n, nok := candByCell[k]
 		var cells []string

@@ -439,10 +439,6 @@ func TestProbeFlow_WaitFirstAck_FailsFastOnWriteError(t *testing.T) {
 	}
 }
 
-// and asserts the Samples() snapshot is bounded by SampleSize and
-// returns the most-recent N exchanges in chronological order. Without
-// SampleSize, Samples must return nil to confirm the allocation-free
-// path is preserved.
 // TestProbeFlow_Samples_RingBuffer drives a probeFlow with SampleSize > 0
 // and asserts the Samples() snapshot is bounded by SampleSize and
 // returns the most-recent N exchanges in chronological order. Without

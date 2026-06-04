@@ -176,14 +176,28 @@ func (f *probeFlow) Start() {
 }
 
 // Stop signals shutdown, closes the connection to unblock any in-flight
-// read/write, and waits for both goroutines. It is idempotent.
+// read/write, and waits for both goroutines. It is idempotent. The
+// reader may have already signalled done via recordReadErr; Stop's
+// stopOnce coordinates with it so close(stopCh) and conn.Close are each
+// invoked at most once.
 func (f *probeFlow) Stop() {
+	f.stopping.Store(true)
+	f.signalDone()
+	f.wg.Wait()
+}
+
+// signalDone closes stopCh and the underlying connection at most once,
+// waking any goroutine selecting on stopCh (e.g. the duplex round loop)
+// and unblocking peer-side read/writes that would otherwise hang until
+// the runtime closed the conn at process exit. Called by both Stop()
+// (external caller) and recordReadErr() (the flow itself observing a
+// read-side break), so a broken flow doesn't have to wait for an
+// external Stop before its waiters wake up.
+func (f *probeFlow) signalDone() {
 	f.stopOnce.Do(func() {
-		f.stopping.Store(true)
 		close(f.stopCh)
 		_ = f.conn.Close()
 	})
-	f.wg.Wait()
 }
 
 // broken reports whether the flow has observed a read-side break. It is a
@@ -230,8 +244,11 @@ func (f *probeFlow) writeError() error {
 	return f.writeErr
 }
 
-// recordReadErr latches the first read-side error and marks the flow
-// broken. recordWriteErr latches the first write-side error only.
+// recordReadErr latches the first read-side error, marks the flow
+// broken, and signals done so waiters (and the peer-side server) unblock
+// promptly instead of waiting for an external Stop. recordWriteErr only
+// latches the error — the flow is not considered broken on write failures
+// because the canonical signal for a torn bridge is a read-side close.
 func (f *probeFlow) recordReadErr(err error) {
 	f.mu.Lock()
 	if f.firstErr == nil {
@@ -239,6 +256,7 @@ func (f *probeFlow) recordReadErr(err error) {
 	}
 	f.mu.Unlock()
 	f.brokenFlag.Store(true)
+	f.signalDone()
 }
 
 func (f *probeFlow) recordWriteErr(err error) {

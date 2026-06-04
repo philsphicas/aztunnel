@@ -221,9 +221,11 @@ func runDuplexRound(t *testing.T, tun *Tunnel, addrs []string, srvs []*WorkloadS
 			<-release
 
 			f.Start()
-			// Run for Duration, then Stop. Any read-side break terminates
-			// the flow early via reader's defer; Stop after that is a
-			// no-op.
+			// Run for Duration. A read-side break causes the flow's
+			// reader to call signalDone (close stopCh + conn), which
+			// wakes the select below so a broken flow reports
+			// promptly instead of sitting until the full Duration.
+			// Stop afterwards is a no-op for an already-broken flow.
 			deadline := releaseTime.Add(s.Duration)
 			select {
 			case <-time.After(time.Until(deadline)):

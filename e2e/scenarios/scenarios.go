@@ -41,6 +41,13 @@ func RunAllScenarios(t *testing.T, b Backend) {
 	perfMatrixSink.setPins(b.Pins())
 	t.Cleanup(func() {
 		finishPerfMatrix(t)
+		// Clear sink identity so any subsequent test in the same
+		// process (or a second RunAllScenarios call) starts from a
+		// clean slate instead of inheriting this run's labels. drain()
+		// inside finishPerfMatrix already cleared the rows.
+		perfMatrixSink.setAxisNames(nil)
+		perfMatrixSink.setBackendName("")
+		perfMatrixSink.setPins(nil)
 	})
 	forEachCell(t, axes, func(t *testing.T, cell map[string]string) {
 		cellBackend := b.Cell(cell)

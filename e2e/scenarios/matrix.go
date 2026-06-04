@@ -256,9 +256,9 @@ func renderDuplexTable(rows []perfMatrixRow) string {
 	var b strings.Builder
 	b.WriteString("\nPERF MATRIX (duplex; per-leg latency under sustained bidirectional load, bytes/s is per direction, ack_spread = max−min acks across successful flows)\n")
 	tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "axis\tscenario\tmode\trtt_p50\trtt_p95\treq_leg_p50\treq_leg_p95\tresp_leg_p50\tresp_leg_p95\tthink_p95\tacks/s\tbytes/s\tack_spread\tsample_n\tsuccess\twall")
+	_, _ = fmt.Fprintln(tw, "axis\tscenario\tmode\trtt_p50\trtt_p95\treq_leg_p50\treq_leg_p95\tresp_leg_p50\tresp_leg_p95\tthink_p50\tthink_p95\tacks/s\tbytes/s\tack_spread\tsample_n\tsuccess\twall")
 	for _, r := range duplex {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d/%d\t%s\n",
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d/%d\t%s\n",
 			dash(r.axis), r.scenario, dash(r.mode),
 			durOrDash(r.rttP50, r.sampleN),
 			durOrDash(r.rttP95, r.sampleN),
@@ -266,6 +266,7 @@ func renderDuplexTable(rows []perfMatrixRow) string {
 			durOrDash(r.reqLegP95, r.sampleN),
 			durOrDash(r.respLegP50, r.sampleN),
 			durOrDash(r.respLegP95, r.sampleN),
+			durOrDash(r.thinkP50, r.sampleN),
 			durOrDash(r.thinkP95, r.sampleN),
 			r.acksPerSec, r.bytesPerSecPerDir, r.ackSpread, r.sampleN,
 			r.successN, r.attemptN, round1(r.wall),
