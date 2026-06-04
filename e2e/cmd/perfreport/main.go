@@ -180,36 +180,48 @@ func main() {
 		// Compare each metric family independently: filtering, a stream-only
 		// artifact, or a mid-migration history can leave one family with too
 		// few runs while the other has a real comparison to gate. Attempt
-		// both before deciding to skip, so a streaming regression is never
-		// silently dropped because the RTT side happened to be sparse.
+		// each before deciding to skip, so a regression in any family is
+		// never silently dropped because another family happened to be sparse.
 		gs, rttErr := renderCompare(os.Stdout, recs, *compareBy, base, cand)
 		sgs, streamErr := renderStreamCompare(os.Stdout, recs, *compareBy, base, cand)
+		dgs, duplexErr := renderDuplexCompare(os.Stdout, recs, *compareBy, base, cand)
 
-		// errNotEnoughRuns / errNoStreamRows mean "nothing to compare yet"
-		// for that family — skippable. Any other error is fatal.
-		rttSkippable := rttErr != nil && errors.Is(rttErr, errNotEnoughRuns)
+		// errNotEnoughRuns / errNoRTTRows / errNoStreamRows / errNoDuplexRows
+		// mean "nothing to compare yet" for that family — skippable. Any
+		// other error is fatal.
+		rttSkippable := rttErr != nil && (errors.Is(rttErr, errNotEnoughRuns) || errors.Is(rttErr, errNoRTTRows))
 		streamSkippable := streamErr != nil && (errors.Is(streamErr, errNoStreamRows) || errors.Is(streamErr, errNotEnoughRuns))
+		duplexSkippable := duplexErr != nil && (errors.Is(duplexErr, errNoDuplexRows) || errors.Is(duplexErr, errNotEnoughRuns))
 		if rttErr != nil && !rttSkippable {
 			fail(rttErr)
 		}
 		if streamErr != nil && !streamSkippable {
 			fail(streamErr)
 		}
+		if duplexErr != nil && !duplexSkippable {
+			fail(duplexErr)
+		}
 
-		// Merge the streaming accounting into the shared gateStats only when
-		// the streaming comparison actually ran.
+		// Merge per-family accounting into the shared gateStats only when
+		// that family's comparison actually ran.
 		if streamErr == nil {
 			gs.streamPaired = sgs.streamPaired
 			gs.streamComparable = sgs.streamComparable
 			gs.streamRegressions = sgs.streamRegressions
 			gs.missingInCand = append(gs.missingInCand, sgs.missingInCand...)
 		}
+		if duplexErr == nil {
+			gs.duplexPaired = dgs.duplexPaired
+			gs.duplexComparable = dgs.duplexComparable
+			gs.duplexRegressions = dgs.duplexRegressions
+			gs.missingInCand = append(gs.missingInCand, dgs.missingInCand...)
+		}
 
-		// Neither family produced a comparison: a bootstrap gate run skips
+		// No family produced a comparison: a bootstrap gate run skips
 		// (exit 0); a plain compare surfaces the error.
-		if rttErr != nil && streamErr != nil {
+		if rttErr != nil && streamErr != nil && duplexErr != nil {
 			if *failOver > 0 {
-				fmt.Fprintf(os.Stderr, "perf-gate: nothing to compare yet (skipping) — rtt: %v; stream: %v\n", rttErr, streamErr)
+				fmt.Fprintf(os.Stderr, "perf-gate: nothing to compare yet (skipping) — rtt: %v; stream: %v; duplex: %v\n", rttErr, streamErr, duplexErr)
 				return
 			}
 			fail(rttErr)
@@ -716,6 +728,11 @@ func resolveDimValue(dim, sel string, recs []record) (string, error) {
 // a gate (--fail-over) can treat it as a skip rather than a failure.
 var errNotEnoughRuns = errors.New("not enough runs to compare")
 
+// errNoRTTRows signals that a comparison input carried no rtt rows at
+// all (the run only produced stream / duplex output). Callers skip the
+// rtt comparison rather than failing.
+var errNoRTTRows = errors.New("no rtt rows present")
+
 // resolveRun maps a run selector to a concrete run id. "latest" and
 // "previous" pick the 1st and 2nd newest runs; otherwise the value must
 // equal a run id or be an unambiguous prefix of exactly one.
@@ -987,6 +1004,10 @@ type gateStats struct {
 	streamPaired      int
 	streamComparable  int
 	streamRegressions []streamRegression
+
+	duplexPaired      int
+	duplexComparable  int
+	duplexRegressions []regression // percent-based, same shape as rtt
 }
 
 // streamRegression is one positive absolute increase of a gated streaming
@@ -1052,6 +1073,9 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 	// rows are compared separately by renderStreamCompare with their own
 	// columns and gate.
 	recs = filterFamily(recs, "rtt")
+	if len(recs) == 0 {
+		return gs, errNoRTTRows
+	}
 	base, err := resolveDimValue(dim, baseSel, recs)
 	if err != nil {
 		return gs, fmt.Errorf("baseline %q: %w", baseSel, err)
@@ -1402,9 +1426,196 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	return gs, nil
 }
 
-// absRegression returns the absolute positive increase of cand over base,
-// with ok=true only when both are present and cand is actually larger (a
-// tighter/faster candidate is not a regression).
+// errNoDuplexRows signals that a comparison input carried no duplex
+// rows at all, so the duplex comparison is a clean no-op (not a gate
+// failure). The caller skips duplex when it sees this.
+var errNoDuplexRows = errors.New("no duplex rows present")
+
+// renderDuplexCompare matches duplex-family cells across two values of a
+// dimension and prints the duplex metrics side by side. It populates the
+// duplex* fields of gateStats: duplexPaired (cells matched on both
+// sides), duplexComparable (paired cells with at least one gated metric
+// present on both sides), and duplexRegressions (percent increases of
+// the gated metrics rtt_p50 and rtt_p95).
+//
+// Duplex metrics are compared on percent deltas (same as rtt), because
+// the duplex shape produces real measured timings that scale with
+// backend latency rather than with an injected interval.
+func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (gateStats, error) {
+	var gs gateStats
+	recs = filterFamily(recs, duplexFamily)
+	if len(recs) == 0 {
+		return gs, errNoDuplexRows
+	}
+	base, err := resolveDimValue(dim, baseSel, recs)
+	if err != nil {
+		return gs, fmt.Errorf("baseline %q: %w", baseSel, err)
+	}
+	cand, err := resolveDimValue(dim, candSel, recs)
+	if err != nil {
+		return gs, fmt.Errorf("candidate %q: %w", candSel, err)
+	}
+	if base == cand {
+		return gs, fmt.Errorf("baseline and candidate resolve to the same %s %q", dim, base)
+	}
+
+	baseByCell := map[string]record{}
+	candByCell := map[string]record{}
+	cellOrder := []record{}
+	seen := map[string]bool{}
+	crossRun := false
+	buildMaps := func(crossRun bool) {
+		baseByCell = map[string]record{}
+		candByCell = map[string]record{}
+		cellOrder = []record{}
+		seen = map[string]bool{}
+		for _, r := range recs {
+			v, ok := dimValue(r, dim)
+			if !ok || (v != base && v != cand) {
+				continue
+			}
+			k := residualKeyOpts(r, dim, crossRun)
+			if v == base {
+				baseByCell[k] = r
+			} else {
+				candByCell[k] = r
+			}
+			if !seen[k] {
+				seen[k] = true
+				cellOrder = append(cellOrder, r)
+			}
+		}
+	}
+	buildMaps(false)
+	for k, br := range baseByCell {
+		if _, ok := candByCell[k]; ok {
+			gs.duplexPaired++
+		} else {
+			gs.missingInCand = append(gs.missingInCand, cellLabel(br))
+		}
+	}
+	if gs.duplexPaired == 0 && dim != "run" {
+		gs.missingInCand = nil
+		buildMaps(true)
+		for k, br := range baseByCell {
+			if _, ok := candByCell[k]; ok {
+				gs.duplexPaired++
+			} else {
+				gs.missingInCand = append(gs.missingInCand, cellLabel(br))
+			}
+		}
+		if gs.duplexPaired > 0 {
+			crossRun = true
+			_, _ = fmt.Fprintf(w, "note: pairing duplex rows across runs — no within-run %s pairs found\n", dim)
+		}
+	}
+
+	sortRecs(cellOrder)
+	cols := axisColumns(cellOrder)
+	namedAxes := len(cols) > 0
+	if isAxisDim(dim) {
+		cols = removeStr(cols, dim)
+	}
+	showBackend := dim != "backend"
+	showScenario := dim != "scenario"
+	showMode := dim != "mode"
+	showRun := dim != "run" && len(distinctRuns(cellOrder)) > 1
+
+	_, _ = fmt.Fprintf(w, "PERF COMPARE (duplex)  %s: baseline=%s  candidate=%s  (Δ%% = (candidate−baseline)/baseline; negative is faster)\n", dim, base, cand)
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	var header []string
+	if showBackend {
+		header = append(header, "backend")
+	}
+	if namedAxes {
+		header = append(header, cols...)
+	} else if dim != "axis" {
+		header = append(header, "axis")
+	}
+	if showRun {
+		header = append(header, "run")
+	}
+	if showScenario {
+		header = append(header, "scenario")
+	}
+	if showMode {
+		header = append(header, "mode")
+	}
+	header = append(header,
+		"rtt_p50_base", "rtt_p50_cand", "rtt_p50_Δ%",
+		"rtt_p95_base", "rtt_p95_cand", "rtt_p95_Δ%",
+		"req_leg_p95_base", "req_leg_p95_cand", "req_leg_p95_Δ%",
+		"resp_leg_p95_base", "resp_leg_p95_cand", "resp_leg_p95_Δ%")
+	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
+
+	for _, c := range cellOrder {
+		k := residualKeyOpts(c, dim, crossRun)
+		b, bok := baseByCell[k]
+		n, nok := candByCell[k]
+		var cells []string
+		if showBackend {
+			cells = append(cells, dash(c.Backend))
+		}
+		if namedAxes {
+			for _, key := range cols {
+				cells = append(cells, dash(c.Axes[key]))
+			}
+		} else if dim != "axis" {
+			cells = append(cells, dash(c.Axis))
+		}
+		if showRun {
+			cells = append(cells, dash(c.Run))
+		}
+		if showScenario {
+			cells = append(cells, c.Scenario)
+		}
+		if showMode {
+			cells = append(cells, dash(c.Mode))
+		}
+		cells = append(cells, compareTriplet(ptrIf(bok, b.RTTP50Ns), ptrIf(nok, n.RTTP50Ns))...)
+		cells = append(cells, compareTriplet(ptrIf(bok, b.RTTP95Ns), ptrIf(nok, n.RTTP95Ns))...)
+		cells = append(cells, compareTriplet(ptrIf(bok, b.ReqLegP95Ns), ptrIf(nok, n.ReqLegP95Ns))...)
+		cells = append(cells, compareTriplet(ptrIf(bok, b.RespLegP95Ns), ptrIf(nok, n.RespLegP95Ns))...)
+		_, _ = fmt.Fprintln(tw, strings.Join(cells, "\t"))
+
+		if bok && nok {
+			comparable := false
+			if b.RTTP50Ns != nil && n.RTTP50Ns != nil {
+				comparable = true
+				if pct, absNs, ok := pctRegression(b.RTTP50Ns, n.RTTP50Ns); ok {
+					gs.duplexRegressions = append(gs.duplexRegressions, regression{cellLabel(c) + " rtt_p50", pct, absNs})
+				}
+			}
+			if b.RTTP95Ns != nil && n.RTTP95Ns != nil {
+				comparable = true
+				if pct, absNs, ok := pctRegression(b.RTTP95Ns, n.RTTP95Ns); ok {
+					gs.duplexRegressions = append(gs.duplexRegressions, regression{cellLabel(c) + " rtt_p95", pct, absNs})
+				}
+			}
+			if comparable {
+				gs.duplexComparable++
+			}
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return gs, err
+	}
+	return gs, nil
+}
+
+// pctRegression returns the positive percent slowdown and absolute
+// nanosecond increase of cand over base, ok=true only when cand is
+// actually slower. Mirrors the rtt family's percent gating shape.
+func pctRegression(base, cand *int64) (pct float64, absNs int64, ok bool) {
+	if base == nil || cand == nil || *base <= 0 {
+		return 0, 0, false
+	}
+	d := *cand - *base
+	if d <= 0 {
+		return 0, 0, false
+	}
+	return 100.0 * float64(d) / float64(*base), d, true
+}
 func absRegression(base, cand *int64) (absNs int64, ok bool) {
 	if base == nil || cand == nil {
 		return 0, false
@@ -1437,7 +1648,7 @@ func absCompareTriplet(base, cand *int64) []string {
 // the absolute floor (nil when none do), or an error when the comparison
 // paired no cells (the gate must never silently pass on nothing).
 func gateVerdict(gs gateStats, failOverPct float64, floor time.Duration) (*regression, error) {
-	if gs.paired == 0 && gs.streamPaired == 0 {
+	if gs.paired == 0 && gs.streamPaired == 0 && gs.duplexPaired == 0 {
 		return nil, errors.New("no cells paired across baseline and candidate — nothing was compared")
 	}
 	var worst *regression
@@ -1487,6 +1698,31 @@ func streamGateVerdict(gs gateStats, floor time.Duration) (*streamRegression, er
 	return worst, nil
 }
 
+// duplexGateVerdict is the duplex-family analogue of gateVerdict. Duplex
+// metrics are percent-gated (same shape as rtt) because they're real
+// measured timings that scale with backend latency rather than an
+// injected interval. Returns the worst gated duplex regression that
+// breaches BOTH failOverPct and the floor; (nil, nil) when no duplex
+// cells paired; an error when paired-but-uncomparable.
+func duplexGateVerdict(gs gateStats, failOverPct float64, floor time.Duration) (*regression, error) {
+	if gs.duplexPaired == 0 {
+		return nil, nil
+	}
+	if gs.duplexComparable == 0 {
+		return nil, errors.New("duplex cells paired but none carried a comparable gated metric (rtt_p50 / rtt_p95) on both sides — nothing was gated")
+	}
+	var worst *regression
+	for i := range gs.duplexRegressions {
+		r := &gs.duplexRegressions[i]
+		if r.pct > failOverPct && time.Duration(r.absNs) > floor {
+			if worst == nil || r.pct > worst.pct {
+				worst = r
+			}
+		}
+	}
+	return worst, nil
+}
+
 // It exits non-zero when any paired warm/cold p50 cell regressed by more
 // than failOverPct AND by more than the failMinAbs duration floor (so a
 // large percent on a tiny baseline can't flake the gate). A comparison
@@ -1510,6 +1746,10 @@ func applyGate(gs gateStats, failOverPct float64, failMinAbs string) {
 	if err != nil {
 		fail(fmt.Errorf("perf-gate: %w", err))
 	}
+	duplexWorst, err := duplexGateVerdict(gs, failOverPct, floor)
+	if err != nil {
+		fail(fmt.Errorf("perf-gate: %w", err))
+	}
 	failed := false
 	if worst != nil {
 		fmt.Fprintf(os.Stderr, "perf-gate: FAIL — %s regressed %+.1f%% (+%s), exceeding --fail-over %.1f%% / --fail-min-abs %s\n",
@@ -1523,6 +1763,11 @@ func applyGate(gs gateStats, failOverPct float64, failMinAbs string) {
 		}
 		fmt.Fprintf(os.Stderr, "perf-gate: FAIL — %s regressed +%s (absolute), exceeding streaming floor %s\n",
 			streamWorst.label, time.Duration(streamWorst.absNs).Round(time.Millisecond), streamFloor)
+		failed = true
+	}
+	if duplexWorst != nil {
+		fmt.Fprintf(os.Stderr, "perf-gate: FAIL — %s regressed %+.1f%% (+%s), exceeding --fail-over %.1f%% / --fail-min-abs %s\n",
+			duplexWorst.label, duplexWorst.pct, time.Duration(duplexWorst.absNs).Round(time.Millisecond), failOverPct, floor)
 		failed = true
 	}
 	if failed {

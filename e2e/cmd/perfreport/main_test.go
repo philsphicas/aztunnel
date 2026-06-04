@@ -901,6 +901,88 @@ func headerLine(out string) string {
 	return ""
 }
 
+// Duplex-family rows (metric_family="duplex"). Old/new share a cell
+// across two runs so renderDuplexCompare pairs them via the cross-run
+// fallback. rtt_p50 moves 5ms->10ms (+100%, a gated regression);
+// rtt_p95 moves 9ms->18ms (also gated).
+const (
+	duplexRowOld = `{"type":"row","schema":"perfmatrix/v1","metric_family":"duplex","run":"20260601T100000.000Z-aaaa","backend":"mock","axes":{"auth":"sas","delay":"zero"},"scenario":"Duplex_Probe_FanOut","mode":"SOCKS5","rtt_p50_ns":5000000,"rtt_p95_ns":9000000,"req_leg_p50_ns":2000000,"req_leg_p95_ns":4000000,"resp_leg_p50_ns":2000000,"resp_leg_p95_ns":4000000,"think_p50_ns":1000,"think_p95_ns":3000,"acks_per_sec":100,"bytes_per_sec_per_dir":5000,"ack_spread":2,"sample_n":50,"flow_n":4,"success_n":4,"attempt_n":4,"wall_ns":2000000000}`
+	duplexRowNew = `{"type":"row","schema":"perfmatrix/v1","metric_family":"duplex","run":"20260601T120000.000Z-bbbb","backend":"mock","axes":{"auth":"sas","delay":"default"},"scenario":"Duplex_Probe_FanOut","mode":"SOCKS5","rtt_p50_ns":10000000,"rtt_p95_ns":18000000,"req_leg_p50_ns":4000000,"req_leg_p95_ns":8000000,"resp_leg_p50_ns":4000000,"resp_leg_p95_ns":8000000,"think_p50_ns":1000,"think_p95_ns":3000,"acks_per_sec":50,"bytes_per_sec_per_dir":2500,"ack_spread":1,"sample_n":50,"flow_n":4,"success_n":4,"attempt_n":4,"wall_ns":2100000000}`
+)
+
+func TestRenderDuplexCompare_CrossRunDeltas(t *testing.T) {
+	recs, _, err := load([]string{writeTemp(t, duplexRowOld, duplexRowNew)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	gs, err := renderDuplexCompare(&b, recs, "delay", "zero", "default")
+	if err != nil {
+		t.Fatalf("renderDuplexCompare: %v", err)
+	}
+	out := b.String()
+	// rtt_p50 5ms -> 10ms = +100%; rtt_p95 9ms -> 18ms = +100%.
+	if !strings.Contains(out, "+100.0%") {
+		t.Errorf("expected +100%% delta on rtt p50/p95:\n%s", out)
+	}
+	if !strings.Contains(out, "note: pairing duplex rows across runs") {
+		t.Errorf("expected cross-run note for separate-run duplex compare:\n%s", out)
+	}
+	if gs.duplexPaired != 1 || gs.duplexComparable != 1 {
+		t.Errorf("paired=%d comparable=%d; want 1/1", gs.duplexPaired, gs.duplexComparable)
+	}
+	if len(gs.duplexRegressions) != 2 {
+		t.Errorf("expected 2 regressions (rtt_p50 + rtt_p95), got %d", len(gs.duplexRegressions))
+	}
+}
+
+func TestRenderDuplexCompare_NoDuplexRowsIsSkippable(t *testing.T) {
+	// Only rtt rows; renderDuplexCompare must signal nothing to compare.
+	recs, _, err := load([]string{writeTemp(t, rowR1SasNN, rowR1EntraNN)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = renderDuplexCompare(&strings.Builder{}, recs, "auth", "sas", "entra")
+	if !errors.Is(err, errNoDuplexRows) {
+		t.Errorf("want errNoDuplexRows, got %v", err)
+	}
+}
+
+func TestDuplexGateVerdict_PercentAndFloor(t *testing.T) {
+	gs := gateStats{
+		duplexPaired:     1,
+		duplexComparable: 1,
+		duplexRegressions: []regression{
+			{label: "small", pct: 5, absNs: int64(2 * time.Millisecond)},        // below pct
+			{label: "big-noisy", pct: 200, absNs: int64(10 * time.Microsecond)}, // below abs floor
+			{label: "real", pct: 50, absNs: int64(30 * time.Millisecond)},       // breaches both
+		},
+	}
+	worst, err := duplexGateVerdict(gs, 30, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("verdict err: %v", err)
+	}
+	if worst == nil || worst.label != "real" {
+		t.Errorf("worst=%+v, want label=real", worst)
+	}
+}
+
+func TestDuplexGateVerdict_PairedButUncomparableErrors(t *testing.T) {
+	gs := gateStats{duplexPaired: 1, duplexComparable: 0}
+	_, err := duplexGateVerdict(gs, 10, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "duplex cells paired but none carried a comparable") {
+		t.Errorf("want paired-but-uncomparable error, got %v", err)
+	}
+}
+
+func TestDuplexGateVerdict_NoPairsIsNoOp(t *testing.T) {
+	gs := gateStats{}
+	worst, err := duplexGateVerdict(gs, 10, time.Millisecond)
+	if err != nil || worst != nil {
+		t.Errorf("no-pairs duplex gate must be (nil, nil), got worst=%v err=%v", worst, err)
+	}
+}
+
 const rowAzureRun = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T120000.000Z-cccc","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
 
 // Streaming-family rows (metric_family="stream"). Old/new share a cell
@@ -1067,8 +1149,10 @@ func TestCompare_StreamOnlyArtifactStillGates(t *testing.T) {
 		t.Fatal(err)
 	}
 	// RTT side: nothing to compare (no rtt rows) -> skippable, not fatal.
-	if _, rttErr := renderCompare(&strings.Builder{}, recs, "run", "previous", "latest"); !errors.Is(rttErr, errNotEnoughRuns) {
-		t.Fatalf("rtt renderCompare err = %v, want errNotEnoughRuns", rttErr)
+	// Either errNotEnoughRuns or errNoRTTRows is acceptable — both are
+	// in the orchestration's "skippable" set.
+	if _, rttErr := renderCompare(&strings.Builder{}, recs, "run", "previous", "latest"); !errors.Is(rttErr, errNotEnoughRuns) && !errors.Is(rttErr, errNoRTTRows) {
+		t.Fatalf("rtt renderCompare err = %v, want errNotEnoughRuns or errNoRTTRows", rttErr)
 	}
 	// Streaming side: pairs and trips the gate on its own.
 	sgs, sErr := renderStreamCompare(&strings.Builder{}, recs, "run", "previous", "latest")
