@@ -825,8 +825,15 @@ func TestRenderCompare_CrossRunFallback(t *testing.T) {
 	if gs.paired == 0 {
 		t.Errorf("expected at least one paired cell via cross-run fallback")
 	}
-	if !strings.Contains(b.String(), "note: pairing rows across runs") {
-		t.Errorf("expected cross-run fallback note, got:\n%s", b.String())
+	out := b.String()
+	if !strings.Contains(out, "note: pairing rows across runs") {
+		t.Errorf("expected cross-run fallback note, got:\n%s", out)
+	}
+	// The two paired rows came from different runs; a single "run"
+	// column would arbitrarily pick one of them and misrepresent the
+	// comparison. It should be hidden in cross-run mode.
+	if hdr := headerLine(out); strings.Contains(hdr, "\trun\t") || strings.HasSuffix(hdr, "\trun") {
+		t.Errorf("cross-run compare should not show a run column (each side is a different run):\n%s", out)
 	}
 }
 

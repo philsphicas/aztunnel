@@ -1180,7 +1180,7 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 	showBackend := dim != "backend"
 	showScenario := dim != "scenario"
 	showMode := dim != "mode"
-	showRun := dim != "run" && len(distinctRuns(cellOrder)) > 1
+	showRun := dim != "run" && !crossRun && len(distinctRuns(cellOrder)) > 1
 
 	_, _ = fmt.Fprintf(w, "PERF COMPARE  %s: baseline=%s  candidate=%s  (Δ%% = (candidate−baseline)/baseline; negative is faster)\n", dim, base, cand)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -1351,7 +1351,7 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	showBackend := dim != "backend"
 	showScenario := dim != "scenario"
 	showMode := dim != "mode"
-	showRun := dim != "run" && len(distinctRuns(cellOrder)) > 1
+	showRun := dim != "run" && !crossRun && len(distinctRuns(cellOrder)) > 1
 
 	_, _ = fmt.Fprintf(w, "PERF COMPARE (streaming)  %s: baseline=%s  candidate=%s  (Δ = candidate−baseline; negative is faster/tighter)\n", dim, base, cand)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
@@ -1533,7 +1533,7 @@ func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	showBackend := dim != "backend"
 	showScenario := dim != "scenario"
 	showMode := dim != "mode"
-	showRun := dim != "run" && len(distinctRuns(cellOrder)) > 1
+	showRun := dim != "run" && !crossRun && len(distinctRuns(cellOrder)) > 1
 
 	_, _ = fmt.Fprintf(w, "PERF COMPARE (duplex)  %s: baseline=%s  candidate=%s  (Δ%% = (candidate−baseline)/baseline; negative is faster)\n", dim, base, cand)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
