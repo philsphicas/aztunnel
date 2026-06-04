@@ -65,8 +65,9 @@ type perfMatrixRow struct {
 type perfMatrix struct {
 	mu          sync.Mutex
 	rows        []perfMatrixRow
-	axisNames   []string // ordered axis names for this run (from Backend.Axes()), used to label path segments
-	backendName string   // backend name registered by the entry point; PERF_MATRIX_BACKEND env var overrides this in perfMatrixBackend()
+	axisNames   []string          // ordered axis names for this run (from Backend.Axes()), used to label path segments
+	backendName string            // backend name registered by the entry point; PERF_MATRIX_BACKEND env var overrides this in perfMatrixBackend()
+	pins        map[string]string // dimensional values pinned by the entry-point Backend (not advertised as axes); merged into every row's axes map so cross-run comparison sees the full identity
 }
 
 var perfMatrixSink perfMatrix
@@ -106,6 +107,38 @@ func (m *perfMatrix) snapshotBackendName() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.backendName
+}
+
+// setPins records the dimensional values pinned by the entry-point
+// Backend (auth=sas when E2E_AUTH=sas, delay=zero when E2E_DELAY=zero,
+// etc.). Every recorded row's axes map includes these pins in addition
+// to the per-cell axis values, so a row from a single-delay run still
+// carries its delay identity and is comparable to a row from a different
+// run with a different pinned delay.
+func (m *perfMatrix) setPins(pins map[string]string) {
+	m.mu.Lock()
+	if len(pins) == 0 {
+		m.pins = nil
+	} else {
+		m.pins = make(map[string]string, len(pins))
+		for k, v := range pins {
+			m.pins[k] = v
+		}
+	}
+	m.mu.Unlock()
+}
+
+func (m *perfMatrix) snapshotPins() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.pins) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m.pins))
+	for k, v := range m.pins {
+		out[k] = v
+	}
+	return out
 }
 
 // drain returns the recorded rows in a stable sort order and clears the
@@ -275,13 +308,26 @@ func round1(d time.Duration) time.Duration {
 // matrixIdentity derives the axis path, named axes, scenario, and mode
 // columns from a sub-test path (t.Name()), shared by the rtt and stream
 // recorders so both families label cells identically.
+//
+// The named axes map merges per-cell axis values (from the sub-test
+// path) with run-wide pinned dimensions (from perfMatrixSink.pins). Pins
+// give a row from a single-value run its full identity — e.g., a row
+// recorded under E2E_DELAY=zero (no delay axis sub-layer) still has
+// axes["delay"]="zero" — so cross-run comparison along the pinned
+// dimension works.
 func matrixIdentity(scenarioPath string) (axis string, axes map[string]string, scenario, mode string) {
 	names := perfMatrixSink.snapshotAxisNames()
+	pins := perfMatrixSink.snapshotPins()
 	axisVals, leaf := splitScenarioPath(scenarioPath, len(names))
 	scenario, mode = splitMode(leaf)
 	axis = strings.Join(axisVals, "/")
-	if len(axisVals) > 0 {
-		axes = make(map[string]string, len(axisVals))
+	if len(axisVals) > 0 || len(pins) > 0 {
+		axes = make(map[string]string, len(axisVals)+len(pins))
+		// Pins first so per-cell axis values win if the same key
+		// appears in both (shouldn't happen, but explicit > implicit).
+		for k, v := range pins {
+			axes[k] = v
+		}
 		for i, v := range axisVals {
 			key := fmt.Sprintf("axis%d", i)
 			if i < len(names) && names[i] != "" {
