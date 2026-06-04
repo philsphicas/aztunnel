@@ -683,6 +683,25 @@ func residualKey(r record, dim string, crossRun bool) string {
 	return recFamily(r) + "\x00" + backend + "\x00" + canonicalAxesExcept(r, dim) + "\x00" + scenario + "\x00" + mode + "\x00" + run
 }
 
+// putNewestByCell stores r at key k in m, preferring the newer of r and
+// any existing entry. "Newer" is determined by lexicographic Run id
+// comparison (run ids are UTC-timestamp-prefixed by newRunID, so
+// lexicographic ascending matches chronological order).
+//
+// This matters in cross-run pairing: when residualKey(crossRun=true)
+// drops the run id, multiple runs with the same residual can map to the
+// same key. A plain `m[k] = r` would pick by input order — non-
+// deterministic on multi-run artifacts and prone to comparing against a
+// stale run. Within-run pairing carries the run id in the key, so
+// collisions only happen on legitimate duplicate data points and the
+// newest-wins rule is harmless.
+func putNewestByCell(m map[string]record, k string, r record) {
+	if existing, ok := m[k]; ok && existing.Run >= r.Run {
+		return
+	}
+	m[k] = r
+}
+
 // distinctDimValues returns the sorted-ascending set of non-empty values a
 // dimension takes across recs (empty values are not selectable).
 func distinctDimValues(recs []record, dim string) []string {
@@ -1106,9 +1125,9 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 			}
 			k := residualKey(r, dim, crossRun)
 			if v == base {
-				baseByCell[k] = r
+				putNewestByCell(baseByCell, k, r)
 			} else {
-				candByCell[k] = r
+				putNewestByCell(candByCell, k, r)
 			}
 			if !seen[k] {
 				seen[k] = true
@@ -1146,7 +1165,7 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 		}
 	}
 	if gs.paired == 0 && dim != "run" {
-		return gs, fmt.Errorf("no cells matched on both sides of %s %q..%q; non-run comparisons require rows to share every other dimension (run id, backend, scenario, mode, all axes) for at least one cell — narrow with filters or compare runs instead", dim, base, cand)
+		return gs, fmt.Errorf("no cells matched on both sides of %s %q..%q: tried within-run pairing (rows must share backend/scenario/mode/axes/run-id) and cross-run pairing (drops run id), neither produced a pair — narrow with filters or compare runs instead", dim, base, cand)
 	}
 	if excluded > 0 {
 		_, _ = fmt.Fprintf(w, "warning: %d rows lack dimension %q and were excluded from the comparison\n", excluded, dim)
@@ -1286,9 +1305,9 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 			}
 			k := residualKey(r, dim, crossRun)
 			if v == base {
-				baseByCell[k] = r
+				putNewestByCell(baseByCell, k, r)
 			} else {
-				candByCell[k] = r
+				putNewestByCell(candByCell, k, r)
 			}
 			if !seen[k] {
 				seen[k] = true
@@ -1471,9 +1490,9 @@ func renderDuplexCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 			}
 			k := residualKey(r, dim, crossRun)
 			if v == base {
-				baseByCell[k] = r
+				putNewestByCell(baseByCell, k, r)
 			} else {
-				candByCell[k] = r
+				putNewestByCell(candByCell, k, r)
 			}
 			if !seen[k] {
 				seen[k] = true

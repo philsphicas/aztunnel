@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -855,6 +856,53 @@ func TestRenderCompare_UnknownValueListsAvailable(t *testing.T) {
 	_, err = renderCompare(&b, recs, "auth", "sas", "ntlm")
 	if err == nil || !strings.Contains(err.Error(), "available: entra, sas") {
 		t.Errorf("expected available-values error, got %v", err)
+	}
+}
+
+// TestRenderCompare_CrossRunPicksNewest verifies that when multiple
+// runs share the same residual key after dropping run id (the typical
+// multi-run history case for cross-run pairing), the pair maps pick
+// the newest run deterministically rather than whichever rec the
+// iteration order happened to last assign.
+func TestRenderCompare_CrossRunPicksNewest(t *testing.T) {
+	// Three baseline mock-sas rows with successively newer run ids,
+	// plus one azure-sas candidate. Cross-run pairing drops run id,
+	// so all three baseline rows collide on the same residual key.
+	// The pair must pick the newest (rid ccc), not whichever came
+	// last in input order — so reverse the input to defeat that
+	// accidental property.
+	mkRow := func(run string, warmNs int64) string {
+		return fmt.Sprintf(`{"type":"row","schema":"perfmatrix/v1","run":%q,"backend":"mock","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":250000000,"warm_p50_ns":%d,"warm_p95_ns":23000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":360000000}`, run, warmNs)
+	}
+	baseOld := mkRow("20260601T100000.000Z-aaa", 10_000_000)
+	baseMid := mkRow("20260601T110000.000Z-bbb", 20_000_000)
+	baseNew := mkRow("20260601T120000.000Z-ccc", 30_000_000)
+	const cand = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T130000.000Z-ddd","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"S","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
+
+	// Reverse input order: oldest LAST. A naive `m[k] = r` would
+	// pick the oldest row instead of the newest. Assert we pick ccc.
+	recs, _, err := load([]string{writeTemp(t, cand, baseNew, baseMid, baseOld)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	if _, err := renderCompare(&b, recs, "backend", "mock", "azure"); err != nil {
+		t.Fatalf("renderCompare: %v", err)
+	}
+	out := b.String()
+	if !strings.Contains(out, "note: pairing rows across runs") {
+		t.Errorf("expected cross-run fallback note:\n%s", out)
+	}
+	// The Δ% column distinguishes which baseline was paired:
+	//   baseline=ccc(30ms) vs cand(210ms) → +600.0%
+	//   baseline=bbb(20ms) vs cand(210ms) → +950.0%
+	//   baseline=aaa(10ms) vs cand(210ms) → +2000.0%
+	// Asserting +600% confirms the newest baseline (ccc) was picked.
+	if !strings.Contains(out, "+600.0%") {
+		t.Errorf("expected +600.0%% warm delta (newest baseline 30ms vs cand 210ms); got:\n%s", out)
+	}
+	if strings.Contains(out, "+950.0%") || strings.Contains(out, "+2000.0%") {
+		t.Errorf("older baseline was paired — newest-wins broken:\n%s", out)
 	}
 }
 

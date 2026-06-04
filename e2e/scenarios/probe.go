@@ -542,28 +542,7 @@ func (f *probeFlow) localize(srv *WorkloadServer) string {
 // attribution.
 func probeOnce(srv *WorkloadServer, addr string, reqSize, respSize int, timeout time.Duration) error {
 	nonce := randNonce()
-	err := probeOnceCore(addr, nonce, reqSize, respSize, timeout)
-	if err == nil || srv == nil {
-		return err
-	}
-	// Server may have produced a record before the exchange failed;
-	// consume it (delete-on-read) so the entry doesn't linger. localize
-	// on a fresh probeFlow shape isn't applicable here (no live acked
-	// counter), but the raw record fields tell the story.
-	rec, ok := srv.ConsumeProbeRecord(nonce)
-	if !ok {
-		return fmt.Errorf("%w: server has no record for nonce %d (request never reached the server: outbound break)", err, nonce)
-	}
-	switch {
-	case rec.lastSeqSeen < 0:
-		return fmt.Errorf("%w: server recorded the connection but read no request (outbound break before first frame)", err)
-	case rec.lastWriteStart == 0 || rec.lastWriteStart < rec.lastRecvNano:
-		return fmt.Errorf("%w: server read the request (recv=%v) but had not started its reply (server-path stall)", err, dur(rec.lastRecvNano))
-	case rec.lastWriteDone < rec.lastWriteStart:
-		return fmt.Errorf("%w: server began writing (write_start=%v) but the write did not complete (return-leg failure or server->tunnel write stuck; termErr=%v)", err, dur(rec.lastWriteStart), rec.termErr)
-	default:
-		return fmt.Errorf("%w: server completed reply (write_done=%v) but the client never read it (return/response-leg break)", err, dur(rec.lastWriteDone))
-	}
+	return localizeProbeError(srv, nonce, probeOnceCore(addr, nonce, reqSize, respSize, timeout))
 }
 
 // probeOnceCore is the raw single-exchange driver; probeOnce wraps it
@@ -575,7 +554,14 @@ func probeOnceCore(addr string, nonce uint64, reqSize, respSize int, timeout tim
 	}
 	defer conn.Close() //nolint:errcheck // best-effort
 	_ = conn.SetDeadline(time.Now().Add(timeout))
+	return probeExchangeOnConn(conn, nonce, reqSize, respSize)
+}
 
+// probeExchangeOnConn drives one probe request/response on an already-
+// dialed connection. Factored out so callers that need to keep the conn
+// open after the exchange (e.g. probeWithHold for the metric sampler)
+// can reuse the same validation as probeOnceCore.
+func probeExchangeOnConn(conn net.Conn, nonce uint64, reqSize, respSize int) error {
 	buf := make([]byte, probeHdrLen+reqSize)
 	binary.BigEndian.PutUint64(buf[probeOffClient:], uint64(probeNanos()))
 	fillPattern(buf[probeHdrLen:], nonce, 0)
@@ -604,6 +590,30 @@ func probeOnceCore(addr string, nonce uint64, reqSize, respSize int, timeout tim
 		return fmt.Errorf("response pattern mismatch at offset %d", off)
 	}
 	return nil
+}
+
+// localizeProbeError consumes the server-side record for nonce and
+// returns err enriched with a per-leg attribution (or the original err
+// when srv is nil). Always consumes the record on a non-nil srv so a
+// failed exchange does not leak a probeStats entry.
+func localizeProbeError(srv *WorkloadServer, nonce uint64, err error) error {
+	if err == nil || srv == nil {
+		return err
+	}
+	rec, ok := srv.ConsumeProbeRecord(nonce)
+	if !ok {
+		return fmt.Errorf("%w: server has no record for nonce %d (request never reached the server: outbound break)", err, nonce)
+	}
+	switch {
+	case rec.lastSeqSeen < 0:
+		return fmt.Errorf("%w: server recorded the connection but read no request (outbound break before first frame)", err)
+	case rec.lastWriteStart == 0 || rec.lastWriteStart < rec.lastRecvNano:
+		return fmt.Errorf("%w: server read the request (recv=%v) but had not started its reply (server-path stall)", err, dur(rec.lastRecvNano))
+	case rec.lastWriteDone < rec.lastWriteStart:
+		return fmt.Errorf("%w: server began writing (write_start=%v) but the write did not complete (return-leg failure or server->tunnel write stuck; termErr=%v)", err, dur(rec.lastWriteStart), rec.termErr)
+	default:
+		return fmt.Errorf("%w: server completed reply (write_done=%v) but the client never read it (return/response-leg break)", err, dur(rec.lastWriteDone))
+	}
 }
 
 // startProbeFlow dials addr, wraps the connection in a probeFlow, starts

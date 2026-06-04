@@ -2,7 +2,6 @@ package scenarios
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"net"
 	"sync"
@@ -574,13 +573,18 @@ func scenarioMaxConnBackPressure(t *testing.T, b Backend, n, m int) {
 	}
 }
 
-// probeWithHold dials addr, runs one probe exchange against srv, holds
-// the bridge open (idle) for hold, then closes. Used by
-// scenarioMaxConnBackPressure to give the 20 ms metric sampler a chance
-// to observe the steady-state Active count across all listeners; short
-// exchanges that complete in single-digit milliseconds race the sampler
-// and produce observed=0 spuriously. On failure the returned error
-// carries the same per-leg server-side attribution probeOnce provides.
+// probeWithHold dials addr, runs one probe exchange against srv with
+// the same validation probeOnce performs (header, nonce, response
+// size, pattern), holds the bridge open (idle) for hold, then closes.
+// Used by scenarioMaxConnBackPressure to give the 20 ms metric sampler
+// a chance to observe the steady-state Active count across all
+// listeners; short exchanges that complete in single-digit milliseconds
+// race the sampler and produce observed=0 spuriously.
+//
+// On failure the returned error carries the same per-leg server-side
+// attribution probeOnce provides (outbound break vs. server stall vs.
+// return-leg failure), and the server-side record is always consumed
+// so a partial exchange does not leak a probeStats entry.
 func probeWithHold(srv *WorkloadServer, addr string, hold, timeout time.Duration) error {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
@@ -590,24 +594,15 @@ func probeWithHold(srv *WorkloadServer, addr string, hold, timeout time.Duration
 	_ = conn.SetDeadline(time.Now().Add(timeout + hold))
 
 	nonce := randNonce()
-	buf := make([]byte, probeHdrLen+defaultProbeBody)
-	binary.BigEndian.PutUint64(buf[probeOffClient:], uint64(probeNanos()))
-	fillPattern(buf[probeHdrLen:], nonce, 0)
-	if err := writeFrame(conn, frameProbeReq, nonce, buf); err != nil {
-		return fmt.Errorf("write: %w", err)
-	}
-	typ, n, payload, err := readFrame(conn)
-	if err != nil {
-		return fmt.Errorf("read: %w", err)
-	}
-	if n != nonce || typ != frameProbeResp || len(payload) < probeHdrLen {
-		return fmt.Errorf("bad probe response: typ=%d nonce=%d hdrlen=%d", typ, n, len(payload))
+	if err := probeExchangeOnConn(conn, nonce, defaultProbeBody, defaultProbeBody); err != nil {
+		return localizeProbeError(srv, nonce, err)
 	}
 	// Hold the conn open so the sampler observes the elevated Active
 	// count; both server and client retain their bridge bookkeeping
 	// until the deferred Close fires after the sleep.
 	time.Sleep(hold)
-	_, _ = srv.ConsumeProbeRecord(nonce) // free server record before return
+	// Successful exchange — drop the record so it doesn't linger.
+	_, _ = srv.ConsumeProbeRecord(nonce)
 	return nil
 }
 
