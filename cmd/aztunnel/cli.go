@@ -52,6 +52,29 @@ type BindFlags struct {
 	TCPKeepAlive time.Duration `name:"tcp-keepalive" help:"TCP keepalive interval." default:"30s"`
 }
 
+// MuxFlags holds stream-multiplexing flags shared across port-forward
+// and socks5-proxy.
+//
+// Whether mux is used is controlled by --max-protocol-version: setting
+// the sender's ceiling to 2 (or higher) opts in to stream multiplexing;
+// the default ceiling of 1 keeps the legacy per-connection rendezvous
+// path (will be raised to 2 in a future release). When mux is in use the
+// sender establishes a persistent relay WebSocket lazily on the first
+// connection that needs one — that first connection still pays the
+// full ~1-2s rendezvous, and subsequent connections reuse the smux
+// session and skip the per-connection rendezvous. With --mux-sessions
+// > 1 each additional session is dialed lazily too.
+//
+// The sender automatically falls back to the v1 path when the listener
+// does not support a requested v2 handshake, so --max-protocol-version=2
+// is always safe even against a mixed listener fleet.
+type MuxFlags struct {
+	MaxProtocolVersion        int           `name:"max-protocol-version" env:"AZTUNNEL_MAX_PROTOCOL_VERSION" help:"Highest aztunnel relay protocol version this sender will attempt. 1 = legacy per-connection rendezvous. 2 = stream multiplexing over a small pool of long-lived rendezvous (lower per-connection latency for many-connection workloads). The sender silently uses a lower version when the listener does not support the requested one, so 2 is always safe to set." default:"${defaultSenderMaxProtocolVersion}"`
+	MuxSessions               int           `name:"mux-sessions" env:"AZTUNNEL_MUX_SESSIONS" help:"Maximum number of persistent relay rendezvous WebSockets the mux pool will maintain. Only effective with --max-protocol-version=2. Larger values may spread concurrent traffic across multiple HA listeners; Azure Relay listener selection is opaque, so empirical testing recommended." default:"2"`
+	MaxStreamsPerSession      int           `name:"max-streams-per-session" env:"AZTUNNEL_MAX_STREAMS_PER_SESSION" help:"Maximum concurrent streams per mux session before back-pressure kicks in. New connections wait for a slot; the port-forward and SOCKS5 paths cap that wait at an internal 60s mux admission timeout, after which the connection is dropped (and aztunnel_mux_pool_saturated_total increments). Only effective with --max-protocol-version=2." default:"256" hidden:""`
+	MuxStreamHandshakeTimeout time.Duration `name:"mux-stream-handshake-timeout" env:"AZTUNNEL_MUX_STREAM_HANDSHAKE_TIMEOUT" help:"Per-stream envelope+response timeout. Must exceed the listener's --connect-timeout because the listener dials the target before writing the response. Only effective with --max-protocol-version=2." default:"60s" hidden:""`
+}
+
 // RelaySenderCmd is a grouping command for relay sender subcommands.
 type RelaySenderCmd struct {
 	PortForward PortForwardCmd `cmd:"" name:"port-forward" help:"Forward a local port through the relay to a specific target."`

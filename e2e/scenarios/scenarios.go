@@ -20,33 +20,56 @@ import (
 
 // RunAllScenarios runs every scenario suite (Core, Topology,
 // Reliability, Observability, Performance) against b. It enumerates
-// b.Axes() exactly once and runs all suites inside each cell, so the
-// auth dimension (or any future axis) appears once in the rendered
-// sub-test path even though every suite runs inside it.
+// the full axis stack (b.Axes() outer + the mux v1/v2 axis innermost)
+// exactly once, so each suite sees a fully-cell-pinned backend and
+// the rendered sub-test path reads as
+// `<entry>/<outer-cell-values>/<mux>/<scenario>` without Go's #01/#02
+// disambiguation suffixes.
+//
+// EVERY suite runs under both v1 (legacy) and v2 (mux) sender code
+// paths. This is the only place the project asserts v2 actually works
+// end-to-end for non-perf functionality — half-close, SOCKS5
+// distinct-targets, error propagation, bridge cause logs, listener-id
+// and bridge-id correlation, the metrics surface (other than the
+// explicitly-mux scenarios). Wrapping only the perf suite (as an
+// earlier iteration did) leaves the bulk of v2 behavior unverified.
+//
+// Scenarios that pin SenderMaxProtocolVersion explicitly (e.g. the
+// topology / observability scenarios whose contracts depend on
+// per-rendezvous semantics, or the mux-fallback scenarios that need
+// v2 specifically) keep their pin in BOTH the v1 and v2 cells —
+// WithMuxAxis only fills SenderMaxProtocolVersion when the caller
+// hasn't already set it. Those scenarios run twice with the same
+// effective configuration; the duplication is harmless and avoids the
+// alternative (a per-scenario skip mechanism) until it's actually felt.
 //
 // Call this from test entry points (TestE2E_Azure, TestE2E_Mock)
 // rather than calling the individual Run*Scenarios in sequence —
-// independent forEachCell calls would render the axis layer once per
-// suite and Go would disambiguate the second-and-later instances with
-// #01/#02/... suffixes.
+// each Run*Scenarios expects a fully-pinned backend (no axes left to
+// enumerate); driving them directly would skip the mux fan-out.
 func RunAllScenarios(t *testing.T, b Backend) {
 	t.Helper()
 	axes := b.Axes()
-	names := make([]string, len(axes))
-	for i, a := range axes {
-		names[i] = a.Name()
+	names := make([]string, 0, len(axes)+1)
+	for _, a := range axes {
+		names = append(names, a.Name())
 	}
+	// The mux axis is innermost (added inside each outer cell).
+	names = append(names, MuxAxisName)
 	perfMatrixSink.setAxisNames(names)
 	t.Cleanup(func() {
 		finishPerfMatrix(t)
 	})
-	forEachCell(t, axes, func(t *testing.T, cell map[string]string) {
-		cellBackend := b.Cell(cell)
-		RunCoreScenarios(t, cellBackend)
-		RunTopologyScenarios(t, cellBackend)
-		RunReliabilityScenarios(t, cellBackend)
-		RunObservabilityScenarios(t, cellBackend)
-		RunPerformanceScenarios(t, cellBackend)
+	forEachCell(t, axes, func(t *testing.T, outerCell map[string]string) {
+		muxBackend := WithMuxAxis(b.Cell(outerCell))
+		forEachCell(t, muxBackend.Axes(), func(t *testing.T, muxCell map[string]string) {
+			pinned := muxBackend.Cell(muxCell)
+			RunCoreScenarios(t, pinned)
+			RunTopologyScenarios(t, pinned)
+			RunReliabilityScenarios(t, pinned)
+			RunObservabilityScenarios(t, pinned)
+			RunPerformanceScenarios(t, pinned)
+		})
 	})
 }
 

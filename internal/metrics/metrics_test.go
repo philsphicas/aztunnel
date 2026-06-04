@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -494,6 +495,11 @@ func TestNilMetrics(t *testing.T) {
 	m.ObserveDialDuration("sender", 0.1)
 	m.ObserveTokenFetch("entra", "ok", 0.1)
 	m.SetControlChannelConnected(true)
+	m.MuxSessionOpened("sender")
+	m.MuxSessionClosed("sender")
+	m.RecordMuxRotation("sender", time.Second, MuxRotationScheduled)
+	m.ObserveMuxStreamOpen("sender", 0.01)
+	m.MuxPoolSaturated("sender")
 
 	// Calling Done on a nil *ConnectionTracker must not panic.
 	var nilTracker *ConnectionTracker
@@ -567,4 +573,418 @@ func labelKey(sample *dto.Metric, names ...string) string {
 		parts[i] = values[n]
 	}
 	return strings.Join(parts, "/")
+}
+
+// TestMuxMetrics_Lifecycle verifies the gauge / counter / histogram
+// flow for mux session lifecycle and rotation accounting.
+func TestMuxMetrics_Lifecycle(t *testing.T) {
+	m := New()
+
+	// Two sessions open; one closed normally; one rotated by force.
+	m.MuxSessionOpened("sender")
+	m.MuxSessionOpened("sender")
+	if got := getGauge(t, m.muxSessionsActive, "sender"); got != 2 {
+		t.Errorf("mux_sessions_active{sender} = %v, want 2", got)
+	}
+
+	m.MuxSessionClosed("sender")
+	m.RecordMuxRotation("sender", 50*time.Minute, MuxRotationScheduled)
+	if got := getCounter(t, m.muxRotationsTotal, "sender", MuxRotationScheduled); got != 1 {
+		t.Errorf("mux_rotations_total{sender,scheduled} = %v, want 1", got)
+	}
+
+	m.MuxSessionClosed("sender")
+	m.RecordMuxRotation("sender", 55*time.Minute, MuxRotationForced)
+	if got := getCounter(t, m.muxRotationsTotal, "sender", MuxRotationForced); got != 1 {
+		t.Errorf("mux_rotations_total{sender,forced} = %v, want 1", got)
+	}
+
+	if got := getGauge(t, m.muxSessionsActive, "sender"); got != 0 {
+		t.Errorf("mux_sessions_active{sender} = %v, want 0 after both closed", got)
+	}
+
+	// Histogram observations are written without panicking; verify
+	// total count via Write.
+	dtoH := &dto.Metric{}
+	if err := m.muxSessionAge.WithLabelValues("sender").(prometheus.Histogram).Write(dtoH); err != nil {
+		t.Fatalf("write mux_session_age: %v", err)
+	}
+	if got := dtoH.GetHistogram().GetSampleCount(); got != 2 {
+		t.Errorf("mux_session_age sample count = %d, want 2", got)
+	}
+}
+
+// TestMuxMetrics_StreamOpenAndSaturation verifies the stream-open
+// histogram and pool-saturation counter.
+func TestMuxMetrics_StreamOpenAndSaturation(t *testing.T) {
+	m := New()
+
+	m.ObserveMuxStreamOpen("sender", 0.005)
+	m.ObserveMuxStreamOpen("sender", 0.1)
+	m.MuxPoolSaturated("sender")
+	m.MuxPoolSaturated("sender")
+	m.MuxPoolSaturated("sender")
+
+	dtoH := &dto.Metric{}
+	if err := m.muxStreamOpenDuration.WithLabelValues("sender").(prometheus.Histogram).Write(dtoH); err != nil {
+		t.Fatalf("write mux_stream_open: %v", err)
+	}
+	if got := dtoH.GetHistogram().GetSampleCount(); got != 2 {
+		t.Errorf("mux_stream_open_seconds sample count = %d, want 2", got)
+	}
+
+	if got := getCounter(t, m.muxPoolSaturatedTotal, "sender"); got != 3 {
+		t.Errorf("mux_pool_saturated_total{sender} = %v, want 3", got)
+	}
+}
+
+// halfCloseConn is a net.Pipe-backed conn that records whether CloseWrite
+// was called, so tests can verify half-close semantics without needing a
+// real *net.TCPConn. CloseWrite only records — it does not tear down the
+// underlying pipe, mirroring TCPConn semantics (FIN sent, but local reads
+// remain open).
+type halfCloseConn struct {
+	net.Conn
+	closeWriteCalled int32 // accessed via atomic
+}
+
+func (h *halfCloseConn) CloseWrite() error {
+	atomic.StoreInt32(&h.closeWriteCalled, 1)
+	return nil
+}
+
+func (h *halfCloseConn) sawCloseWrite() bool {
+	return atomic.LoadInt32(&h.closeWriteCalled) == 1
+}
+
+// TestTrackedStreamBridge_HalfCloseOnEOF verifies that when one side of the
+// bridge sees EOF, CloseWrite is called on the OPPOSITE side rather than
+// fully closing the bridge. This is the SSH/HTTP-1.0 use case.
+func TestTrackedStreamBridge_HalfCloseOnEOF(t *testing.T) {
+	t.Parallel()
+
+	// We need 4 endpoints: stream-local / stream-remote, conn-local / conn-remote.
+	// The bridge runs between stream-local and conn-local.
+	streamLocal, streamRemote := net.Pipe()
+	connLocal, connRemote := net.Pipe()
+
+	// Wrap conn-local so we can observe CloseWrite calls.
+	hcConn := &halfCloseConn{Conn: connLocal}
+
+	bridgeDone := make(chan error, 1)
+	go func() {
+		var m *Metrics // nil-safe
+		_, err := m.TrackedStreamBridge(context.Background(),
+			streamLocal, hcConn, "test", "target:80")
+		bridgeDone <- err
+	}()
+
+	// Send a request from the stream side, expect it to arrive on the conn side.
+	want := []byte("REQUEST")
+	if _, err := streamRemote.Write(want); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	buf := make([]byte, len(want))
+	if _, err := io.ReadFull(connRemote, buf); err != nil {
+		t.Fatalf("read request: %v", err)
+	}
+	if string(buf) != string(want) {
+		t.Errorf("got %q, want %q", buf, want)
+	}
+
+	// Half-close stream → bridge sees EOF on its read-from-stream side and
+	// should propagate that to conn via CloseWrite.
+	if err := streamRemote.Close(); err != nil {
+		t.Fatalf("close stream-remote: %v", err)
+	}
+
+	// Wait for the bridge to detect EOF and call CloseWrite on conn-local.
+	deadline := time.Now().Add(2 * time.Second)
+	for !hcConn.sawCloseWrite() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !hcConn.sawCloseWrite() {
+		t.Fatal("expected CloseWrite to be called on conn after stream EOF")
+	}
+
+	// Clean up so the bridge can exit.
+	_ = connRemote.Close()
+
+	select {
+	case err := <-bridgeDone:
+		if err != nil {
+			t.Errorf("bridge returned unexpected error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not exit")
+	}
+}
+
+// TestTrackedStreamBridge_NoCloseWriter exercises the fallback path: a conn
+// that doesn't implement CloseWriter must still cleanly terminate.
+func TestTrackedStreamBridge_NoCloseWriter(t *testing.T) {
+	t.Parallel()
+
+	streamLocal, streamRemote := net.Pipe()
+	connLocal, connRemote := net.Pipe()
+
+	bridgeDone := make(chan error, 1)
+	go func() {
+		var m *Metrics
+		_, err := m.TrackedStreamBridge(context.Background(),
+			streamLocal, connLocal, "test", "target:80")
+		bridgeDone <- err
+	}()
+
+	// One side EOFs.
+	_ = streamRemote.Close()
+
+	// Bridge falls back to Close on conn-local.
+	deadline := time.Now().Add(2 * time.Second)
+	exited := false
+	for time.Now().Before(deadline) {
+		// connRemote.Read should error once connLocal is closed.
+		_ = connRemote.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+		buf := make([]byte, 1)
+		if _, err := connRemote.Read(buf); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+				exited = true
+				break
+			}
+			// timeout — keep polling
+		}
+	}
+	_ = connRemote.Close()
+	if !exited {
+		t.Error("conn-local was not closed after stream EOF")
+	}
+
+	select {
+	case <-bridgeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not exit")
+	}
+}
+
+// TestTrackedStreamBridge_RecordsBytes verifies the metric counters are
+// updated for both directions and a clean close registers as success.
+func TestTrackedStreamBridge_RecordsBytes(t *testing.T) {
+	t.Parallel()
+
+	m := New()
+	streamLocal, streamRemote := net.Pipe()
+	connLocal, connRemote := net.Pipe()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.TrackedStreamBridge(context.Background(),
+			streamLocal, connLocal, "sender", "target:1234")
+		done <- err
+	}()
+
+	want := []byte("PING")
+	go func() {
+		_, _ = streamRemote.Write(want)
+		_ = streamRemote.Close()
+	}()
+	buf := make([]byte, len(want))
+	if _, err := io.ReadFull(connRemote, buf); err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	_ = connRemote.Close()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not exit")
+	}
+
+	// from_relay = stream → conn = 4 bytes ("PING")
+	from := getCounter(t, m.bytesTotal, "sender", "target:1234", "from_relay")
+	if from < float64(len(want)) {
+		t.Errorf("from_relay bytes = %v, want >=%d", from, len(want))
+	}
+	// One completed connection, success status.
+	total := getCounter(t, m.connectionsTotal, "sender", "target:1234", "success")
+	if total != 1 {
+		t.Errorf("connectionsTotal{success} = %v, want 1", total)
+	}
+}
+
+// TestTrackedStreamBridge_NilReceiver verifies the nil-receiver fast path.
+func TestTrackedStreamBridge_NilReceiver(t *testing.T) {
+	t.Parallel()
+	streamLocal, streamRemote := net.Pipe()
+	connLocal, connRemote := net.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		var m *Metrics
+		_, err := m.TrackedStreamBridge(context.Background(),
+			streamLocal, connLocal, "x", "y")
+		done <- err
+	}()
+	_ = streamRemote.Close()
+	_ = connRemote.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("nil-receiver bridge did not exit")
+	}
+}
+
+// erroringConn wraps a net.Conn but forces Read to return a non-EOF
+// error immediately, simulating a connection reset / TLS error /
+// network glitch on the stream side.
+type erroringConn struct {
+	net.Conn
+}
+
+func (e *erroringConn) Read(p []byte) (int, error) {
+	return 0, fmt.Errorf("simulated connection reset")
+}
+
+// TestTrackedStreamBridge_RealErrorTriggersFullTeardown is the regression
+// test for the hang-on-real-error bug: when one direction's io.CopyBuffer
+// returns a non-EOF error and the opposite direction is parked on Read
+// with no incoming data, the bridge previously called CloseWriteOrClose
+// on only one side and blocked indefinitely in wg.Wait — holding the
+// mux stream and pool slot. CloseWrite on a real TCP / smux conn does
+// NOT tear down the read direction (mirrors FIN, not RST), so direction
+// A's blocked Read was never unblocked.
+//
+// The fix cancels the bridge ctx on any non-EOF error so the shutdown
+// goroutine closes BOTH ends. This test asserts the bridge returns
+// within a bounded time after a stream-side read error.
+func TestTrackedStreamBridge_RealErrorTriggersFullTeardown(t *testing.T) {
+	t.Parallel()
+
+	streamLocal, _ := net.Pipe()
+	connLocal, _ := net.Pipe()
+
+	// halfCloseConn mirrors TCPConn / smux semantics: CloseWrite() is a
+	// no-op signal, the underlying pipe stays open. Without the fix,
+	// direction B's closeWriteOrClose(conn) call resolves to a no-op
+	// here, and direction A's Read on conn never unblocks.
+	hcConn := &halfCloseConn{Conn: connLocal}
+	errStream := &erroringConn{Conn: streamLocal}
+
+	bridgeDone := make(chan error, 1)
+	go func() {
+		var m *Metrics // nil-safe; we don't need recording for this test
+		_, err := m.TrackedStreamBridge(context.Background(),
+			errStream, hcConn, "test", "target:80")
+		bridgeDone <- err
+	}()
+
+	select {
+	case err := <-bridgeDone:
+		if err == nil {
+			t.Error("bridge returned nil error; expected the simulated reset to propagate")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not exit within 3s after a real read error (hang on idle opposite direction)")
+	}
+}
+
+// TestTrackedStreamBridge_OuterCtxCancelRecordsError is the regression
+// test for the outer-context cancellation reporting path: when the
+// caller cancels the bridge ctx (e.g. on listener shutdown), the
+// internal close-on-cancel goroutine tears down both endpoints. Both
+// copy goroutines therefore observe only closed-pipe errors, which
+// normalize to nil. Without explicit propagation, the bridge would
+// then report status="success" for a forcibly-aborted bridge. The fix
+// sets bridgeErr = outerCtx.Err() when bridgeErr would otherwise be
+// nil.
+func TestTrackedStreamBridge_OuterCtxCancelRecordsError(t *testing.T) {
+	t.Parallel()
+
+	streamLocal, streamRemote := net.Pipe()
+	connLocal, connRemote := net.Pipe()
+	t.Cleanup(func() {
+		_ = streamRemote.Close()
+		_ = connRemote.Close()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	bridgeDone := make(chan error, 1)
+	go func() {
+		var m *Metrics // nil-safe; we only need the error contract
+		_, err := m.TrackedStreamBridge(ctx, streamLocal, connLocal, "test", "target:80")
+		bridgeDone <- err
+	}()
+
+	// Bridge is now parked on Read on both directions. Cancel the
+	// outer ctx → close-on-cancel goroutine closes both endpoints,
+	// io.Copy returns net.ErrClosed which normalizes to nil, then the
+	// outerCtx.Err() check must rescue the cancellation as bridgeErr.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-bridgeDone:
+		if err == nil {
+			t.Fatal("bridge returned nil error after outer-ctx cancel; expected ctx.Canceled")
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("bridge err = %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not exit within 3s after outer-ctx cancel")
+	}
+}
+
+// unexpectedEOFConn returns io.ErrUnexpectedEOF from Read, simulating a
+// truncated read on the stream side (e.g. an smux session that died
+// mid-stream).
+type unexpectedEOFConn struct {
+	net.Conn
+}
+
+func (u *unexpectedEOFConn) Read(p []byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+// TestTrackedStreamBridge_UnexpectedEOFTriggersFullTeardown is the
+// regression guard for the iter-9 Copilot finding: io.ErrUnexpectedEOF
+// is a truncated read, not an orderly half-close. It MUST trigger the
+// hard-teardown (cancel ctx) path so both endpoints are closed. The
+// half-close path (CloseWrite on the opposite direction only) leaves
+// the opposite direction parked on Read if it's idle — the bridge
+// would then hang holding the mux stream and pool slot.
+func TestTrackedStreamBridge_UnexpectedEOFTriggersFullTeardown(t *testing.T) {
+	t.Parallel()
+
+	streamLocal, _ := net.Pipe()
+	connLocal, _ := net.Pipe()
+
+	// halfCloseConn mirrors TCPConn / smux semantics: CloseWrite() is a
+	// no-op signal that does NOT unblock a parked Read. If the bridge
+	// took the half-close path on ErrUnexpectedEOF, direction A's Read
+	// on this conn would never unblock.
+	hcConn := &halfCloseConn{Conn: connLocal}
+	errStream := &unexpectedEOFConn{Conn: streamLocal}
+
+	bridgeDone := make(chan error, 1)
+	go func() {
+		var m *Metrics // nil-safe
+		_, err := m.TrackedStreamBridge(context.Background(),
+			errStream, hcConn, "test", "target:80")
+		bridgeDone <- err
+	}()
+
+	select {
+	case err := <-bridgeDone:
+		if err == nil {
+			t.Error("bridge returned nil error; ErrUnexpectedEOF must propagate as a real failure")
+		}
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Errorf("bridge error = %v, want errors.Is(..., io.ErrUnexpectedEOF) = true", err)
+		}
+		if hcConn.sawCloseWrite() {
+			t.Error("CloseWrite called on opposite side after ErrUnexpectedEOF; hard-teardown path expected (cancel ctx + Close), not half-close")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("bridge did not exit within 3s after ErrUnexpectedEOF on the stream side (hang on idle opposite direction)")
+	}
 }

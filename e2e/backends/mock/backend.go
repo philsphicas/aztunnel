@@ -417,15 +417,16 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 		done := make(chan struct{})
 
 		cfg := listener.Config{
-			Endpoint:       host,
-			EntityPath:     entity,
-			TokenProvider:  b.newTokenProvider(m),
-			ClientOptions:  clientOpts,
-			AllowList:      opts.AllowedTargets,
-			MaxConnections: opts.MaxConnections,
-			ConnectTimeout: opts.ConnectTimeout,
-			Logger:         slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-			Metrics:        m,
+			Endpoint:           host,
+			EntityPath:         entity,
+			TokenProvider:      b.newTokenProvider(m),
+			ClientOptions:      clientOpts,
+			AllowList:          opts.AllowedTargets,
+			MaxConnections:     opts.MaxConnections,
+			ConnectTimeout:     opts.ConnectTimeout,
+			Logger:             slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+			Metrics:            m,
+			MaxProtocolVersion: opts.ListenerMaxProtocolVersion,
 		}
 
 		wg.Add(1)
@@ -500,26 +501,32 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 			switch opts.SenderMode {
 			case scenarios.ModePortForward:
 				err = sender.PortForward(sctx, sender.PortForwardConfig{
-					Endpoint:      host,
-					EntityPath:    entity,
-					TokenProvider: senderTP,
-					ClientOptions: clientOpts,
-					Target:        opts.Target,
-					BindAddress:   "127.0.0.1:0",
-					Logger:        senderLogger,
-					Metrics:       m,
-					Ready:         ready,
+					Endpoint:             host,
+					EntityPath:           entity,
+					TokenProvider:        senderTP,
+					ClientOptions:        clientOpts,
+					Target:               opts.Target,
+					BindAddress:          "127.0.0.1:0",
+					Logger:               senderLogger,
+					Metrics:              m,
+					Ready:                ready,
+					MaxProtocolVersion:   opts.SenderMaxProtocolVersion,
+					MuxSessions:          opts.MuxSessions,
+					MaxStreamsPerSession: opts.MaxStreamsPerSession,
 				})
 			case scenarios.ModeSOCKS5:
 				err = sender.SOCKS5Proxy(sctx, sender.SOCKS5Config{
-					Endpoint:      host,
-					EntityPath:    entity,
-					TokenProvider: senderTP,
-					ClientOptions: clientOpts,
-					BindAddress:   "127.0.0.1:0",
-					Logger:        senderLogger,
-					Metrics:       m,
-					Ready:         ready,
+					Endpoint:             host,
+					EntityPath:           entity,
+					TokenProvider:        senderTP,
+					ClientOptions:        clientOpts,
+					BindAddress:          "127.0.0.1:0",
+					Logger:               senderLogger,
+					Metrics:              m,
+					Ready:                ready,
+					MaxProtocolVersion:   opts.SenderMaxProtocolVersion,
+					MuxSessions:          opts.MuxSessions,
+					MaxStreamsPerSession: opts.MaxStreamsPerSession,
 				})
 			}
 			if err != nil && sctx.Err() == nil && ctx.Err() == nil {
@@ -545,13 +552,16 @@ func (b *MockBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenario
 		}
 
 		return &scenarios.Sender{
-			Addr:                addr.String(),
-			Completed:           counterReader(m, "aztunnel_connections_total"),
-			Active:              gaugeReader(m, "aztunnel_active_connections"),
-			DialDurationSamples: histogramSampleCount(m, "aztunnel_dial_duration_seconds"),
-			TokenFetchOK:        tokenFetchOKReader(m),
-			Stop:                stop,
-			Logs:                logs.String,
+			Addr:                  addr.String(),
+			Completed:             counterReader(m, "aztunnel_connections_total"),
+			Active:                gaugeReader(m, "aztunnel_active_connections"),
+			DialDurationSamples:   histogramSampleCount(m, "aztunnel_dial_duration_seconds"),
+			TokenFetchOK:          tokenFetchOKReader(m),
+			MuxSessionsActive:     gaugeReader(m, "aztunnel_mux_sessions_active"),
+			MuxStreamOpenSamples:  histogramSampleCount(m, "aztunnel_mux_stream_open_seconds"),
+			MuxPoolSaturatedTotal: counterReader(m, "aztunnel_mux_pool_saturated_total"),
+			Stop:                  stop,
+			Logs:                  logs.String,
 		}
 	}
 
@@ -765,13 +775,14 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 		go func() {
 			defer wg.Done()
 			err := listener.ListenAndServe(lctx, listener.Config{
-				Endpoint:      host,
-				EntityPath:    entity,
-				TokenProvider: listenerProvider,
-				ClientOptions: clientOpts,
-				AllowList:     opts.AllowedTargets,
-				Logger:        listenerLogger,
-				Metrics:       metrics.New(),
+				Endpoint:           host,
+				EntityPath:         entity,
+				TokenProvider:      listenerProvider,
+				ClientOptions:      clientOpts,
+				AllowList:          opts.AllowedTargets,
+				Logger:             listenerLogger,
+				Metrics:            metrics.New(),
+				MaxProtocolVersion: opts.ListenerMaxProtocolVersion,
 			})
 			if err != nil && lctx.Err() == nil && ctx.Err() == nil {
 				listenerLogger.Debug("listener exited", "err", err)
@@ -803,15 +814,16 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 		go func() {
 			defer wg.Done()
 			err := listener.ListenAndServe(lctx, listener.Config{
-				Endpoint:       host,
-				EntityPath:     entity,
-				TokenProvider:  listenerProvider,
-				ClientOptions:  clientOpts,
-				AllowList:      opts.AllowedTargets,
-				MaxConnections: opts.MaxConnections,
-				ConnectTimeout: opts.ConnectTimeout,
-				Logger:         listenerLogger,
-				Metrics:        m,
+				Endpoint:           host,
+				EntityPath:         entity,
+				TokenProvider:      listenerProvider,
+				ClientOptions:      clientOpts,
+				AllowList:          opts.AllowedTargets,
+				MaxConnections:     opts.MaxConnections,
+				ConnectTimeout:     opts.ConnectTimeout,
+				Logger:             listenerLogger,
+				Metrics:            m,
+				MaxProtocolVersion: opts.ListenerMaxProtocolVersion,
 			})
 			if err != nil && lctx.Err() == nil && ctx.Err() == nil {
 				listenerLogger.Debug("listener exited", "err", err)
@@ -854,26 +866,32 @@ func (b *MockBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupOp
 		switch opts.SenderMode {
 		case scenarios.ModePortForward:
 			err = sender.PortForward(sctx, sender.PortForwardConfig{
-				Endpoint:      host,
-				EntityPath:    entity,
-				TokenProvider: senderProvider,
-				ClientOptions: clientOpts,
-				Target:        opts.Target,
-				BindAddress:   "127.0.0.1:0",
-				Logger:        senderLogger,
-				Metrics:       metrics.New(),
-				Ready:         ready,
+				Endpoint:             host,
+				EntityPath:           entity,
+				TokenProvider:        senderProvider,
+				ClientOptions:        clientOpts,
+				Target:               opts.Target,
+				BindAddress:          "127.0.0.1:0",
+				Logger:               senderLogger,
+				Metrics:              metrics.New(),
+				Ready:                ready,
+				MaxProtocolVersion:   opts.SenderMaxProtocolVersion,
+				MuxSessions:          opts.MuxSessions,
+				MaxStreamsPerSession: opts.MaxStreamsPerSession,
 			})
 		case scenarios.ModeSOCKS5:
 			err = sender.SOCKS5Proxy(sctx, sender.SOCKS5Config{
-				Endpoint:      host,
-				EntityPath:    entity,
-				TokenProvider: senderProvider,
-				ClientOptions: clientOpts,
-				BindAddress:   "127.0.0.1:0",
-				Logger:        senderLogger,
-				Metrics:       metrics.New(),
-				Ready:         ready,
+				Endpoint:             host,
+				EntityPath:           entity,
+				TokenProvider:        senderProvider,
+				ClientOptions:        clientOpts,
+				BindAddress:          "127.0.0.1:0",
+				Logger:               senderLogger,
+				Metrics:              metrics.New(),
+				Ready:                ready,
+				MaxProtocolVersion:   opts.SenderMaxProtocolVersion,
+				MuxSessions:          opts.MuxSessions,
+				MaxStreamsPerSession: opts.MaxStreamsPerSession,
 			})
 		}
 		if err != nil && sctx.Err() == nil && ctx.Err() == nil {

@@ -111,7 +111,7 @@ func TestForwardConnection_DialBudgetBoundsRetry(t *testing.T) {
 	errCh := make(chan error, 1)
 	start := time.Now()
 	go func() {
-		errCh <- forwardConnection(ctx, local, cfg.Target, cfg)
+		errCh <- forwardConnection(ctx, local, cfg.Target, cfg, nil)
 	}()
 
 	select {
@@ -220,7 +220,7 @@ func TestForwardConnection_HappyPathSurvivesDialBudget(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- forwardConnection(ctx, local, cfg.Target, cfg)
+		errCh <- forwardConnection(ctx, local, cfg.Target, cfg, nil)
 	}()
 
 	// Drive the bridge: write a payload from the app side, read
@@ -309,7 +309,7 @@ func TestForwardConnection_NegativeBudgetUsesDefault(t *testing.T) {
 	errCh := make(chan error, 1)
 	start := time.Now()
 	go func() {
-		errCh <- forwardConnection(ctx, local, cfg.Target, cfg)
+		errCh <- forwardConnection(ctx, local, cfg.Target, cfg, nil)
 	}()
 
 	select {

@@ -118,6 +118,30 @@ For busier deployments, increase `MemoryMax`:
 MemoryMax=512M    # handles more concurrent connections
 ```
 
+### Sizing for mux fan-out
+
+Each accepted mux session reserves up to
+[`muxconfig.MaxReceiveBuffer`](../../internal/muxconfig/muxconfig.go) of
+inbound buffer space (16 MiB at the time of writing) as a back-pressure
+worst case, plus a small per-stream working set. The buffer only fills
+when the receiver stalls; typical steady-state usage is a small fraction
+of that ceiling. Even so, the listener's worst-case inbound buffering
+scales as `MaxReceiveBuffer × concurrent_mux_sessions`, where each
+sender process opens up to `--mux-sessions` of them (default `2`).
+
+Rough rule of thumb at the defaults:
+
+| Concurrent senders | Worst-case mux buffers | Suggested `MemoryMax` |
+| ------------------ | ---------------------- | --------------------- |
+| up to 4            | up to ~130 MiB         | `256M`                |
+| up to 16           | up to ~512 MiB         | `1G`                  |
+| 50+                | sized per fleet        | benchmark first       |
+
+Steady-state usage is usually much lower because smux only buffers when
+a stream's reader is slower than its sender. If your workload has many
+slow targets (e.g. legacy devices, throttled APIs) at high concurrency,
+prefer the higher end of these recommendations.
+
 To override the auto-tuning ratio:
 
 ```sh

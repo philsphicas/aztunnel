@@ -326,6 +326,49 @@ type SetupOptions struct {
 	// valid; scenarios that need this override should scope-gate
 	// themselves on mock).
 	OverrideHycoName string
+
+	// SenderMaxProtocolVersion pins the sender's --max-protocol-version
+	// for the topology. Zero (the default) leaves the sender at its
+	// own default (DefaultSenderMaxProtocolVersion: 1 in 0.4.0, 2 in
+	// 0.5.0+). 1 forces the legacy per-connection rendezvous path; 2
+	// permits stream multiplexing (with automatic fallback when the
+	// listener rejects v2). Ignored for SenderMode==ModeConnect
+	// (one-shot stdio: no mux to opt into).
+	//
+	// Backends translate: --max-protocol-version on Azure (subprocess
+	// CLI), PortForwardConfig.MaxProtocolVersion / SOCKS5Config.MaxProtocolVersion
+	// on the mock. Set by WithMuxAxis for the mux=v1/v2 cells; scenarios
+	// may also set it directly to pin one version regardless of the
+	// surrounding cell (the explicit pin wins).
+	SenderMaxProtocolVersion int
+
+	// MuxSessions caps the sender's mux pool size. 0 means leave at
+	// the sender default. Threaded to --mux-sessions on Azure and to
+	// PortForwardConfig.MuxSessions / SOCKS5Config.MuxSessions on the
+	// mock backend. Only effective when the sender ends up running v2
+	// (SenderMaxProtocolVersion == 0 with the runtime default >= 2,
+	// or SenderMaxProtocolVersion == 2).
+	MuxSessions int
+
+	// MaxStreamsPerSession caps in-flight streams per mux session
+	// before back-pressure kicks in. 0 means leave at the sender
+	// default. Threaded to --max-streams-per-session on Azure and to
+	// the corresponding mock Config field. Only effective when the
+	// sender ends up running v2 (see MuxSessions).
+	MaxStreamsPerSession int
+
+	// ListenerMaxProtocolVersion pins every listener in the topology
+	// to a --max-protocol-version. Zero (the default) leaves listeners
+	// at their own default (DefaultListenerMaxProtocolVersion: 2,
+	// i.e. accept both v1 and v2). 1 forces v1-only acceptance: any
+	// incoming v2 MuxHandshake is rejected with the same wire shape a
+	// pre-mux listener emitted, so a v2 sender's mux-unavailable
+	// fallback (internal/sender/muxdialer.go:isMuxUnsupportedRejection)
+	// fires. This is the production-grade mechanism behind the
+	// rolling-deployment scenario (a v2 sender against a v1-only
+	// listener fleet) — same code path an operator would use for an
+	// emergency v2 rollback.
+	ListenerMaxProtocolVersion int
 }
 
 // AuthOverride substitutes auth credentials when SetupExpectingFailure
@@ -478,6 +521,32 @@ type Sender struct {
 	// backend and the in-process mock (via its {sas, entra} auth axis)
 	// populate it.
 	TokenFetchOK func() []TokenFetchObservation
+
+	// MuxSessionsActive returns the sum of the
+	// aztunnel_mux_sessions_active gauge across all labels on this
+	// sender's metrics surface. Used by
+	// ScenarioMetrics_MuxSessionsActive to assert that the sender
+	// actually built a mux pool when v2 was opted into. Optional:
+	// backends that do not wire mux metrics leave this nil and the
+	// scenario skips.
+	MuxSessionsActive func() int64
+
+	// MuxStreamOpenSamples returns the count of observations in the
+	// aztunnel_mux_stream_open_seconds histogram on this sender's
+	// metrics surface. Used by ScenarioMetrics_MuxSessionsActive to
+	// assert per-stream admission is going through the v2 pool.
+	// Optional: backends that do not wire mux metrics leave this nil
+	// and the scenario skips.
+	MuxStreamOpenSamples func() uint64
+
+	// MuxPoolSaturatedTotal returns the sum of the
+	// aztunnel_mux_pool_saturated_total counter on this sender's
+	// metrics surface. Used by ScenarioMetrics_MuxSessionsActive to
+	// assert the test workload did not pathologically saturate the
+	// pool (which would invalidate the scenario's assumptions about
+	// what the other two metrics mean). Optional: backends that do
+	// not wire mux metrics leave this nil and the scenario skips.
+	MuxPoolSaturatedTotal func() int64
 
 	// Stop drops this sender. Idempotent.
 	Stop func()

@@ -14,6 +14,7 @@ import (
 type PortForwardCmd struct {
 	AuthFlags
 	BindFlags
+	MuxFlags
 	Target string `arg:"" required:"" help:"Target host:port."`
 }
 
@@ -47,14 +48,18 @@ func (p *PortForwardCmd) Run(globals *Globals) error {
 	defer stop()
 
 	cfg := sender.PortForwardConfig{
-		Endpoint:      endpoint,
-		EntityPath:    hyco,
-		TokenProvider: tp,
-		ClientOptions: opts,
-		Target:        p.Target,
-		BindAddress:   bind,
-		TCPKeepAlive:  p.TCPKeepAlive,
-		Logger:        logger,
+		Endpoint:                  endpoint,
+		EntityPath:                hyco,
+		TokenProvider:             tp,
+		ClientOptions:             opts,
+		Target:                    p.Target,
+		BindAddress:               bind,
+		TCPKeepAlive:              p.TCPKeepAlive,
+		Logger:                    logger,
+		MuxStreamHandshakeTimeout: p.MuxStreamHandshakeTimeout,
+		MaxProtocolVersion:        p.MaxProtocolVersion,
+		MuxSessions:               p.MuxSessions,
+		MaxStreamsPerSession:      p.MaxStreamsPerSession,
 	}
 	if cfg.Metrics, err = resolveMetrics(ctx, globals.MetricsAddr, globals.MetricsMaxTargets, logger); err != nil {
 		return err
