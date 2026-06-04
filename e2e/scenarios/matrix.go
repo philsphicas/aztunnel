@@ -63,9 +63,10 @@ type perfMatrixRow struct {
 // them once at the end. Guarded by a mutex because scenarios (and the
 // conns within them) can record concurrently.
 type perfMatrix struct {
-	mu        sync.Mutex
-	rows      []perfMatrixRow
-	axisNames []string // ordered axis names for this run (from Backend.Axes()), used to label path segments
+	mu          sync.Mutex
+	rows        []perfMatrixRow
+	axisNames   []string // ordered axis names for this run (from Backend.Axes()), used to label path segments
+	backendName string   // backend name registered by the entry point; PERF_MATRIX_BACKEND env var overrides this in perfMatrixBackend()
 }
 
 var perfMatrixSink perfMatrix
@@ -89,6 +90,22 @@ func (m *perfMatrix) snapshotAxisNames() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string(nil), m.axisNames...)
+}
+
+// setBackendName records the backend the run is exercising, so the
+// recorded rows and the run header carry the right label without
+// requiring the caller to set PERF_MATRIX_BACKEND. The env var takes
+// precedence over this value in perfMatrixBackend().
+func (m *perfMatrix) setBackendName(name string) {
+	m.mu.Lock()
+	m.backendName = name
+	m.mu.Unlock()
+}
+
+func (m *perfMatrix) snapshotBackendName() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.backendName
 }
 
 // drain returns the recorded rows in a stable sort order and clears the
@@ -444,11 +461,17 @@ type perfMatrixRunRecord struct {
 }
 
 // perfMatrixBackend names the backend that produced these rows (mock or
-// azure), taken from PERF_MATRIX_BACKEND. The harness itself is
-// backend-agnostic — the entrypoint's Makefile target sets this — so a
-// merged artifact can distinguish, and the reporter can group by, rows
-// from different backends.
-func perfMatrixBackend() string { return os.Getenv("PERF_MATRIX_BACKEND") }
+// azure). PERF_MATRIX_BACKEND overrides; otherwise the recorder uses the
+// backend name the run entry-point registered on the sink via
+// setBackendName, so a normal `make e2e-mock` produces correctly-labeled
+// history with no extra env setup. The env var stays as an explicit
+// override for CI shards or alternative drivers that want a custom label.
+func perfMatrixBackend() string {
+	if v := os.Getenv("PERF_MATRIX_BACKEND"); v != "" {
+		return v
+	}
+	return perfMatrixSink.snapshotBackendName()
+}
 
 func newRunRecord(runID string) perfMatrixRunRecord {
 	return perfMatrixRunRecord{

@@ -145,3 +145,37 @@ func TestFinishPerfMatrix_ExplicitWriteIsFatal(t *testing.T) {
 		t.Fatalf("explicit PERF_MATRIX_JSONL write failure must Errorf exactly once, got %d", rec.errorfN)
 	}
 }
+
+// TestPerfMatrixBackend_PrefersEnvOverSink verifies the env var wins
+// over a sink-registered backend name when both are set.
+func TestPerfMatrixBackend_PrefersEnvOverSink(t *testing.T) {
+	perfMatrixSink.setBackendName("mock")
+	t.Cleanup(func() { perfMatrixSink.setBackendName("") })
+	t.Setenv("PERF_MATRIX_BACKEND", "ci-override")
+	if got := perfMatrixBackend(); got != "ci-override" {
+		t.Errorf("perfMatrixBackend()=%q with env set, want ci-override", got)
+	}
+}
+
+// TestPerfMatrixBackend_FallsBackToSink verifies the sink-registered
+// backend name is used when the env var is empty — the "just works"
+// path for a normal `make e2e-mock` invocation.
+func TestPerfMatrixBackend_FallsBackToSink(t *testing.T) {
+	perfMatrixSink.setBackendName("mock")
+	t.Cleanup(func() { perfMatrixSink.setBackendName("") })
+	t.Setenv("PERF_MATRIX_BACKEND", "")
+	if got := perfMatrixBackend(); got != "mock" {
+		t.Errorf("perfMatrixBackend()=%q with sink-set name, want mock", got)
+	}
+}
+
+// TestPerfMatrixBackend_EmptyWhenNeitherSet documents the legacy
+// behavior — if a caller bypasses RunAllScenarios and doesn't set the
+// env, the label stays empty (it can't be inferred from nothing).
+func TestPerfMatrixBackend_EmptyWhenNeitherSet(t *testing.T) {
+	perfMatrixSink.setBackendName("")
+	t.Setenv("PERF_MATRIX_BACKEND", "")
+	if got := perfMatrixBackend(); got != "" {
+		t.Errorf("perfMatrixBackend()=%q with nothing set, want empty", got)
+	}
+}

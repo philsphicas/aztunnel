@@ -37,6 +37,7 @@ func RunAllScenarios(t *testing.T, b Backend) {
 		names[i] = a.Name()
 	}
 	perfMatrixSink.setAxisNames(names)
+	perfMatrixSink.setBackendName(b.Name())
 	t.Cleanup(func() {
 		finishPerfMatrix(t)
 	})
