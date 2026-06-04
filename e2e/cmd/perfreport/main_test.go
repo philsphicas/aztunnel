@@ -805,10 +805,37 @@ func TestRenderCompare_ByLegacyAxis(t *testing.T) {
 	}
 }
 
-func TestRenderCompare_NoOverlapNonRunErrors(t *testing.T) {
-	// mock and azure live in separate runs, so a backend compare has no
-	// residual that exists on both sides.
+func TestRenderCompare_CrossRunFallback(t *testing.T) {
+	// mock and azure live in separate runs but share scenario/mode/axes,
+	// so a backend compare cannot pair them within a run. The cross-run
+	// fallback should pair them anyway, with a note announcing the
+	// cross-run pairing, because that comparison ("what does the real
+	// network cost on top of the mock?") is exactly what someone asks
+	// when they compare backends across two runs.
 	recs, _, err := load([]string{writeTemp(t, rowR1SasNN, rowAzureRun)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	gs, err := renderCompare(&b, recs, "backend", "mock", "azure")
+	if err != nil {
+		t.Fatalf("cross-run compare should succeed, got: %v", err)
+	}
+	if gs.paired == 0 {
+		t.Errorf("expected at least one paired cell via cross-run fallback")
+	}
+	if !strings.Contains(b.String(), "note: pairing rows across runs") {
+		t.Errorf("expected cross-run fallback note, got:\n%s", b.String())
+	}
+}
+
+func TestRenderCompare_TrueNoOverlapErrors(t *testing.T) {
+	// rowR1SasNN: backend=mock, scenario=S, mode=PortForward.
+	// rowDifferentScenario: backend=azure, scenario=DIFFERENT (otherwise
+	// matching). Cross-run fallback can't bridge the different scenarios,
+	// so the comparison legitimately has no pairs and errors.
+	const rowDifferentScenario = `{"type":"row","schema":"perfmatrix/v1","run":"20260601T120000.000Z-cccc","backend":"azure","axes":{"auth":"sas","delay":"nn"},"scenario":"DIFFERENT","mode":"PortForward","cold_p50_ns":1450000000,"warm_p50_ns":210000000,"warm_p95_ns":215000000,"cold_n":5,"warm_n":25,"success_n":5,"attempt_n":5,"wall_ns":2500000000}`
+	recs, _, err := load([]string{writeTemp(t, rowR1SasNN, rowDifferentScenario)})
 	if err != nil {
 		t.Fatal(err)
 	}

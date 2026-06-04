@@ -648,6 +648,17 @@ func isAxisDim(dim string) bool {
 // comparison cell. Run is part of the residual for non-run dimensions, so
 // comparisons stay apples-to-apples within a single run.
 func residualKey(r record, dim string) string {
+	return residualKeyOpts(r, dim, false)
+}
+
+// residualKeyOpts is the configurable form of residualKey. When
+// crossRun is true the run id is dropped from the identity, so two rows
+// from different runs that agree on every other dimension pair up.
+// renderCompare uses this as a fallback when within-run pairing
+// produces zero matches, which is the typical situation when a user has
+// done two separate single-value runs (e.g. E2E_DELAY=zero in one and
+// E2E_DELAY=default in another) and wants to compare them.
+func residualKeyOpts(r record, dim string, crossRun bool) string {
 	backend, scenario, mode, run := r.Backend, r.Scenario, r.Mode, r.Run
 	switch dim {
 	case "backend":
@@ -657,6 +668,9 @@ func residualKey(r record, dim string) string {
 	case "mode":
 		mode = ""
 	case "run":
+		run = ""
+	}
+	if crossRun {
 		run = ""
 	}
 	return recFamily(r) + "\x00" + backend + "\x00" + canonicalAxesExcept(r, dim) + "\x00" + scenario + "\x00" + mode + "\x00" + run
@@ -1055,26 +1069,35 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 	cellOrder := []record{}
 	seen := map[string]bool{}
 	excluded := 0
-	for _, r := range recs {
-		v, ok := dimValue(r, dim)
-		if !ok {
-			excluded++
-			continue
-		}
-		if v != base && v != cand {
-			continue
-		}
-		k := residualKey(r, dim)
-		if v == base {
-			baseByCell[k] = r
-		} else {
-			candByCell[k] = r
-		}
-		if !seen[k] {
-			seen[k] = true
-			cellOrder = append(cellOrder, r)
+	crossRun := false
+	buildMaps := func(crossRun bool) {
+		baseByCell = map[string]record{}
+		candByCell = map[string]record{}
+		cellOrder = []record{}
+		seen = map[string]bool{}
+		excluded = 0
+		for _, r := range recs {
+			v, ok := dimValue(r, dim)
+			if !ok {
+				excluded++
+				continue
+			}
+			if v != base && v != cand {
+				continue
+			}
+			k := residualKeyOpts(r, dim, crossRun)
+			if v == base {
+				baseByCell[k] = r
+			} else {
+				candByCell[k] = r
+			}
+			if !seen[k] {
+				seen[k] = true
+				cellOrder = append(cellOrder, r)
+			}
 		}
 	}
+	buildMaps(false)
 
 	for k, br := range baseByCell {
 		if _, ok := candByCell[k]; ok {
@@ -1083,8 +1106,28 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 			gs.missingInCand = append(gs.missingInCand, cellLabel(br))
 		}
 	}
+	// Auto-fallback: if within-run pairing produced nothing (typical when
+	// a user has two separate runs each pinning one of the compared
+	// values), retry with run dropped from the residual key. This pairs
+	// rows across runs that agree on every other dimension. Announce the
+	// fallback so the user knows the comparison spans runs.
 	if gs.paired == 0 && dim != "run" {
-		return gs, fmt.Errorf("no cells matched on both sides of %s %q..%q; non-run comparisons require rows to share every other dimension including run id (e.g. mock and azure are separate runs) — narrow with filters or compare runs instead", dim, base, cand)
+		gs.missingInCand = nil
+		buildMaps(true)
+		for k, br := range baseByCell {
+			if _, ok := candByCell[k]; ok {
+				gs.paired++
+			} else {
+				gs.missingInCand = append(gs.missingInCand, cellLabel(br))
+			}
+		}
+		if gs.paired > 0 {
+			crossRun = true
+			_, _ = fmt.Fprintf(w, "note: pairing rows across runs — no within-run %s pairs found\n", dim)
+		}
+	}
+	if gs.paired == 0 && dim != "run" {
+		return gs, fmt.Errorf("no cells matched on both sides of %s %q..%q; non-run comparisons require rows to share every other dimension (run id, backend, scenario, mode, all axes) for at least one cell — narrow with filters or compare runs instead", dim, base, cand)
 	}
 	if excluded > 0 {
 		_, _ = fmt.Fprintf(w, "warning: %d rows lack dimension %q and were excluded from the comparison\n", excluded, dim)
@@ -1128,7 +1171,7 @@ func renderCompare(w io.Writer, recs []record, dim, baseSel, candSel string) (ga
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, c := range cellOrder {
-		k := residualKey(c, dim)
+		k := residualKeyOpts(c, dim, crossRun)
 		b, bok := baseByCell[k]
 		n, nok := candByCell[k]
 		var cells []string
@@ -1211,27 +1254,53 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	candByCell := map[string]record{}
 	cellOrder := []record{}
 	seen := map[string]bool{}
-	for _, r := range recs {
-		v, ok := dimValue(r, dim)
-		if !ok || (v != base && v != cand) {
-			continue
-		}
-		k := residualKey(r, dim)
-		if v == base {
-			baseByCell[k] = r
-		} else {
-			candByCell[k] = r
-		}
-		if !seen[k] {
-			seen[k] = true
-			cellOrder = append(cellOrder, r)
+	crossRun := false
+	buildMaps := func(crossRun bool) {
+		baseByCell = map[string]record{}
+		candByCell = map[string]record{}
+		cellOrder = []record{}
+		seen = map[string]bool{}
+		for _, r := range recs {
+			v, ok := dimValue(r, dim)
+			if !ok || (v != base && v != cand) {
+				continue
+			}
+			k := residualKeyOpts(r, dim, crossRun)
+			if v == base {
+				baseByCell[k] = r
+			} else {
+				candByCell[k] = r
+			}
+			if !seen[k] {
+				seen[k] = true
+				cellOrder = append(cellOrder, r)
+			}
 		}
 	}
+	buildMaps(false)
 	for k, br := range baseByCell {
 		if _, ok := candByCell[k]; ok {
 			gs.streamPaired++
 		} else {
 			gs.missingInCand = append(gs.missingInCand, cellLabel(br))
+		}
+	}
+	// Auto-fallback to cross-run pairing when within-run produced no
+	// matches, mirroring renderCompare. Same shape: stream comparison
+	// across two single-value runs is just as legitimate as rtt.
+	if gs.streamPaired == 0 && dim != "run" {
+		gs.missingInCand = nil
+		buildMaps(true)
+		for k, br := range baseByCell {
+			if _, ok := candByCell[k]; ok {
+				gs.streamPaired++
+			} else {
+				gs.missingInCand = append(gs.missingInCand, cellLabel(br))
+			}
+		}
+		if gs.streamPaired > 0 {
+			crossRun = true
+			_, _ = fmt.Fprintf(w, "note: pairing streaming rows across runs — no within-run %s pairs found\n", dim)
 		}
 	}
 
@@ -1274,7 +1343,7 @@ func renderStreamCompare(w io.Writer, recs []record, dim, baseSel, candSel strin
 	_, _ = fmt.Fprintln(tw, strings.Join(header, "\t"))
 
 	for _, c := range cellOrder {
-		k := residualKey(c, dim)
+		k := residualKeyOpts(c, dim, crossRun)
 		b, bok := baseByCell[k]
 		n, nok := candByCell[k]
 		var cells []string
