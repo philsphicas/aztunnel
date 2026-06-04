@@ -74,10 +74,12 @@ func topologyCases() []scenarioCase {
 	}
 }
 
-// scenarioNMEcho drives K parallel TCP echo flows distributed round-
-// robin across SenderAddrs, all targeting a single backend echo
-// server. Asserts every flow's payload round-trips intact. This is
-// the workhorse correctness check for the topology slice; everything
+// scenarioNMEcho drives K parallel framed probe flows distributed
+// round-robin across SenderAddrs, all targeting a single ServerProbe
+// WorkloadServer. Each probeOnce validates request+response framing,
+// nonce, response size, and payload pattern; the byte-transparency
+// property is exercised separately by BulkTransfer. This is the
+// workhorse functional check for the topology slice; everything
 // downstream assumes it holds.
 func scenarioNMEcho(t *testing.T, b Backend, n, m int) {
 	t.Helper()
@@ -111,8 +113,8 @@ func scenarioNMEcho(t *testing.T, b Backend, n, m int) {
 	}
 }
 
-// scenarioDistributionPerListener drives short echoes round-robin
-// across senders until every listener has handled at least one
+// scenarioDistributionPerListener drives short framed probes round-
+// robin across senders until every listener has handled at least one
 // bridge to completion, or a bounded budget is exhausted. Azure
 // Relay's listener selection is explicitly non-uniform at small
 // sample sizes (e2e/multi_test.go documents observed ratios up to
@@ -144,7 +146,7 @@ func scenarioDistributionPerListener(t *testing.T, b Backend, n, m int) {
 	issue := func(count int) {
 		for i := 0; i < count && sent < kMax; i++ {
 			if time.Now().After(overallDeadline) {
-				t.Fatalf("convergence deadline exceeded after %d echoes", sent)
+				t.Fatalf("convergence deadline exceeded after %d probes", sent)
 			}
 			addr := tun.SenderAddrs[sent%len(tun.SenderAddrs)]
 			if err := probeOnce(srv, addr, defaultProbeBody, defaultProbeBody, 10*time.Second); err != nil {
@@ -172,15 +174,15 @@ func scenarioDistributionPerListener(t *testing.T, b Backend, n, m int) {
 
 	for i, l := range tun.Listeners {
 		c := l.Completed()
-		t.Logf("listener[%d] completed=%d (after %d echoes)", i, c, sent)
+		t.Logf("listener[%d] completed=%d (after %d probes)", i, c, sent)
 		if c <= 0 {
-			t.Errorf("listener[%d] completed=%d after %d echoes, want > 0", i, c, sent)
+			t.Errorf("listener[%d] completed=%d after %d probes, want > 0", i, c, sent)
 		}
 	}
 }
 
 // scenarioDistributionPerSender mirrors scenarioDistributionPerListener
-// for senders. With echoes dialed round-robin across N senders, every
+// for senders. With probes dialed round-robin across N senders, every
 // sender is exercised by construction for the dial count; the metric
 // assertion proves each sender actually bridged the dial to a relay
 // rendezvous (vs. accepted the TCP and failed before forwarding).
@@ -212,7 +214,7 @@ func scenarioDistributionPerSender(t *testing.T, b Backend, n, m int) {
 	issue := func(count int) {
 		for i := 0; i < count && sent < kMax; i++ {
 			if time.Now().After(overallDeadline) {
-				t.Fatalf("convergence deadline exceeded after %d echoes", sent)
+				t.Fatalf("convergence deadline exceeded after %d probes", sent)
 			}
 			addr := tun.SenderAddrs[sent%len(tun.SenderAddrs)]
 			if err := probeOnce(srv, addr, defaultProbeBody, defaultProbeBody, 10*time.Second); err != nil {
@@ -240,21 +242,21 @@ func scenarioDistributionPerSender(t *testing.T, b Backend, n, m int) {
 
 	for i, s := range tun.Senders {
 		c := s.Completed()
-		t.Logf("sender[%d] completed=%d (after %d echoes)", i, c, sent)
+		t.Logf("sender[%d] completed=%d (after %d probes)", i, c, sent)
 		if c <= 0 {
-			t.Errorf("sender[%d] completed=%d after %d echoes, want > 0", i, c, sent)
+			t.Errorf("sender[%d] completed=%d after %d probes, want > 0", i, c, sent)
 		}
 	}
 }
 
 // scenarioHotDropListener verifies the surviving-listener path. It
-// opens enough long-running flows for at least one to land on
+// opens enough held-open probe flows for at least one to land on
 // listener[0], snapshots A0 = listener[0].Active(), stops
 // listener[0], and asserts:
 //
 //   - at least A0 flows fail/EOF within bounded time;
-//   - the surviving K-A0 flows keep echoing;
-//   - a fresh dial after drop succeeds and echoes.
+//   - the surviving K-A0 flows keep making forward progress;
+//   - a fresh probeOnce dial after drop succeeds.
 //
 // Azure Relay distributes connections nonuniformly across listeners
 // (observed ratios up to 1:7 with K=8), so we open in batches of
@@ -265,13 +267,13 @@ func scenarioDistributionPerSender(t *testing.T, b Backend, n, m int) {
 func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
-	echo := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
+	srv := StartWorkloadServer(t, ServerBehavior{Mode: ServerProbe, RespSize: defaultProbeBody})
 	tun := b.Setup(t, SetupOptions{
 		NumListeners:   m,
 		NumSenders:     n,
 		SenderMode:     ModePortForward,
-		Target:         echo.Addr(),
-		AllowedTargets: []string{echo.Addr()},
+		Target:         srv.Addr(),
+		AllowedTargets: []string{srv.Addr()},
 	})
 
 	const (
@@ -371,7 +373,7 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 			base := f.acked()
 			if !waitProgress(f, base, 5*time.Second) {
 				t.Errorf("survivor flow %d made no progress after drop (acked stuck at %d)", i, base)
-				f.Dump(t, echo, fmt.Sprintf("hotdrop-flow-%d", i))
+				f.Dump(t, srv, fmt.Sprintf("hotdrop-flow-%d", i))
 				continue
 			}
 			survivors++
@@ -383,21 +385,21 @@ func scenarioHotDropListener(t *testing.T, b Backend, n, m int) {
 	}
 
 	// A fresh dial after drop must succeed via the surviving listener.
-	if err := probeOnce(echo, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
+	if err := probeOnce(srv, tun.SenderAddr, defaultProbeBody, defaultProbeBody, 15*time.Second); err != nil {
 		t.Errorf("post-drop fresh dial: %v", err)
 	}
 }
 
 // scenarioHotAddListener verifies that adding a listener mid-flight
-// converges: existing flows keep echoing, and new flows reach the new
-// listener within a bounded window. Because Azure Relay's listener
-// selection is non-uniform at small sample sizes (e2e/multi_test.go
-// documents observed ratios up to 1:7 at K=8), a fixed-K probe count
-// would have a non-trivial spurious-failure rate when no flow lands
-// on the freshly-added listener. Instead we drive short echoes in
-// batches until newListener.Completed() > 0, capped at a hard probe
-// budget — that bounds the test runtime while making a true
-// "no traffic ever reaches the new listener" regression observable.
+// converges: existing flows keep making forward progress, and new flows
+// reach the new listener within a bounded window. Because Azure Relay's
+// listener selection is non-uniform at small sample sizes
+// (e2e/multi_test.go documents observed ratios up to 1:7 at K=8), a
+// fixed-K probe count would have a non-trivial spurious-failure rate
+// when no flow lands on the freshly-added listener. Instead we drive
+// short probes in batches until newListener.Completed() > 0, capped at
+// a hard probe budget — that bounds the test runtime while making a
+// true "no traffic ever reaches the new listener" regression observable.
 func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 	t.Helper()
 	AssertNoLeaks(t)
@@ -487,8 +489,8 @@ func scenarioHotAddListener(t *testing.T, b Backend, n, m int) {
 // retry. This scenario asserts both invariants.
 //
 // Each successful client holds its bridge open for holdDur after the
-// initial echo so the metric sampler (20 ms ticker) reliably catches
-// the steady-state concurrent count. Without the hold, short echoes
+// initial probe so the metric sampler (20 ms ticker) reliably catches
+// the steady-state concurrent count. Without the hold, short probes
 // complete in single-digit milliseconds and the sampler races them.
 func scenarioMaxConnBackPressure(t *testing.T, b Backend, n, m int) {
 	t.Helper()
@@ -626,7 +628,7 @@ func drainErrors(errs <-chan error) error {
 }
 
 // waitForListenerSum polls Tunnel.Listeners for sum-of-Completed to
-// reach want. Used after a burst of short echoes where the last few
+// reach want. Used after a burst of short probes where the last few
 // Done() callbacks may still be in flight when the sender goroutine
 // returns. Fails the test on deadline.
 func waitForListenerSum(t *testing.T, tun *Tunnel, want int64, timeout time.Duration) {

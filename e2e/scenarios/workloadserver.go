@@ -456,10 +456,12 @@ func (s *WorkloadServer) ProbeRecord(nonce uint64) (probeConnStat, bool) {
 // localize) so the record does not linger for the rest of the server's
 // lifetime.
 //
-// Note: probeOnce dials do not consume their record. In test-only
-// servers with single-test lifetimes the resulting accumulation is
-// bounded by the test duration; long-running scenarios that hammer
-// probeOnce should consider a periodic eviction strategy.
+// probeOnce and probeWithHold both call this on every exit path
+// (success and failure), so a long-running scenario that hammers
+// probeOnce against one server does NOT accumulate per-nonce records
+// — every record is consumed within microseconds of the exchange's
+// completion or error. A probeFlow's record is consumed by Dump /
+// localize, or stays live until the test holding the flow ends.
 func (s *WorkloadServer) ConsumeProbeRecord(nonce uint64) (probeConnStat, bool) {
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
