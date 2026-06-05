@@ -199,26 +199,24 @@ distinct uses, in increasing cost:
    the matrix into the job summary, with the history uploaded as an artifact.
    Always green — it informs, it never blocks. Runs read-only with no cloud
    credentials.
-3. **Nightly gross-regression gate** (`perf-nightly.yml`). A cron job sweeps the
-   mock grid, restores the previous nightly's history artifact as a baseline,
-   and runs `make perf-gate` (default `FAIL_OVER=30`, i.e. fail only on a
-   warm/cold p50 cell that regressed by **both** >30% **and** >20ms, plus
-   any streaming `max_stream_gap_p95`/`final_chunk_spread` cell that regressed past
-   the 50ms absolute floor). Mock-only:
-   the real Azure relay's rendezvous spikes (~3–6s) swamp any threshold. The
-   baseline is re-uploaded only on success, so a regressing night never
-   overwrites the known-good reference.
+3. **Nightly history accrual** (`perf-nightly.yml`). A cron job sweeps the
+   mock grid, restores the previous nightly's history artifact, appends
+   tonight's run, prunes to `KEEP_RUNS` (default `10`), and re-uploads.
+   Mock-only: the real Azure relay's rendezvous spikes (~3–6s) swamp any
+   steady-state signal at this scale. This workflow is **data collection,
+   not a gate** — it does not compare runs and does not fail on perf
+   changes. Regression detection is a separate, in-flight design concern.
 4. **Developer-local before/after.** `make perf-placement` twice around a change,
-   then `make perf-compare` (or `make perf-gate FAIL_OVER=<pct>` to get the same
-   pass/fail verdict the nightly uses).
+   then `make perf-compare` (or `make perf-gate FAIL_OVER=<pct>` for a
+   pass/fail verdict on the two newest runs).
 
-`make perf-gate` is the shared tripwire for tiers 3 and 4: it diffs the two
-newest runs and exits non-zero only on a gross regression, treats a tiny
-absolute delta as noise (`FAIL_MIN_ABS`, default `20ms`), and **skips** (exit 0)
-when only one run is present so a bootstrap night is not a failure. It requires
-the two newest runs to be the same scenario shape (both produced by
-`make perf-placement`); a partial cell-set difference is a warning, but zero
-overlap is a hard error so the gate can never silently pass on nothing.
+`make perf-gate` is the developer-local tripwire: it diffs the two newest runs
+and exits non-zero only on a gross regression, treats a tiny absolute delta as
+noise (`FAIL_MIN_ABS`, default `20ms`), and **skips** (exit 0) when only one
+run is present. It requires the two newest runs to be the same scenario shape
+(both produced by `make perf-placement`); a partial cell-set difference is a
+warning, but zero overlap is a hard error so the gate can never silently pass
+on nothing.
 
 ## What it is
 
