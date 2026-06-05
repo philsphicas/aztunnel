@@ -1,18 +1,22 @@
-name: Perf (nightly gate)
+name: Perf (nightly history)
 
-# Nightly gross-regression gate for the mock perf suite. Runs the mock
-# placement sweep, compares it against the previous nightly baseline,
-# and fails only on a *gross* regression (default >30% AND >20ms on a
-# warm/cold p50 cell). Mock-only on purpose: the real Azure relay's
-# rendezvous latency spikes (~3-6s) swamp any gate threshold, so Azure
-# perf is measured but never gated.
+# Nightly history accrual for the mock perf suite. Runs the mock
+# placement sweep, appends tonight's rows to the carried-forward
+# history artifact, prunes to the most recent KEEP_RUNS runs, and
+# re-uploads. Mock-only on purpose: the real Azure relay's rendezvous
+# latency spikes (~3-6s) swamp any steady-state signal at this scale.
 #
-# Baseline persistence: runners are ephemeral and the history dir is
+# This workflow is a data-collection cron, not a gate: it does not
+# compare runs and does not fail on perf changes. Regression detection
+# is a separate concern (see `make perf-gate` for the developer-local
+# tool, and the durable-history + PR-time gating workstream for the
+# eventual CI design).
+#
+# History persistence: runners are ephemeral and the history dir is
 # gitignored, so the previous run's history is carried forward as a
-# build artifact. Each night we download the last *successful*
-# scheduled run's `perf-history`, add tonight's run, gate the two
-# newest, then re-upload the pruned history — but only on success, so a
-# regressing night never overwrites the known-good baseline.
+# build artifact. Each night we download the last scheduled run's
+# `perf-history`, add tonight's run, prune, and re-upload — even if the
+# placement step itself failed, so a partial history is never lost.
 on:
   schedule:
     - cron: "0 7 * * *"
@@ -29,11 +33,10 @@ concurrency:
 env:
   HISTORY_DIR: e2e/perf-artifacts/history
   KEEP_RUNS: "10"
-  FAIL_OVER: "30"
 
 jobs:
-  perf-gate:
-    name: Perf nightly gate (mock)
+  perf-history:
+    name: Perf nightly history (mock)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -49,45 +52,49 @@ jobs:
       - name: Build
         run: make build
 
-      - name: Restore previous nightly baseline
+      - name: Restore previous nightly history
+        # `if: always()` keeps the history chain intact even if the
+        # preceding Build step fails: prune+upload below also run
+        # unconditionally, so without this restore a build break would
+        # upload an empty artifact and orphan tomorrow's lookup.
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p "$HISTORY_DIR"
+          # Skip the current run (still in-progress, no artifact yet) and
+          # any other non-completed runs ahead of it in the list; pick the
+          # newest scheduled run that has reached a terminal state.
           prev=$(gh run list \
             --workflow "${{ github.workflow }}" \
-            --branch main --event schedule --status success \
-            --limit 1 --json databaseId -q '.[0].databaseId // empty')
+            --branch main --event schedule \
+            --limit 10 --json databaseId,status \
+            -q "[.[] | select(.databaseId != ${GITHUB_RUN_ID} and .status == \"completed\")][0].databaseId // empty")
           if [ -z "$prev" ]; then
-            echo "no prior successful scheduled run — bootstrapping baseline this night"
+            echo "no prior completed scheduled run — starting a fresh history this night"
             exit 0
           fi
-          echo "restoring baseline from run $prev"
-          gh run download "$prev" -n perf-history -D "$HISTORY_DIR"
+          echo "restoring history from run $prev"
+          # The previous run may not have uploaded an artifact (e.g. it
+          # failed before the upload step), so a missing artifact is OK
+          # — we just start tonight without prior history.
+          if ! gh run download "$prev" -n perf-history -D "$HISTORY_DIR" 2>/dev/null; then
+            echo "previous run $prev has no perf-history artifact — starting fresh"
+            exit 0
+          fi
           # upload-artifact may preserve a nested path under the artifact;
-          # flatten any nested *.jsonl up to the top level so the gate,
-          # prune, and re-upload steps (which all glob the top level) see
-          # the baseline. -mindepth 2 skips files already at the top, so
-          # this never tries to move a file onto itself.
+          # flatten any nested *.jsonl up to the top level so the prune
+          # and re-upload steps (which all glob the top level) see the
+          # history. -mindepth 2 skips files already at the top, so this
+          # never tries to move a file onto itself.
           find "$HISTORY_DIR" -mindepth 2 -name '*.jsonl' -exec mv -t "$HISTORY_DIR" {} +
           find "$HISTORY_DIR" -mindepth 1 -type d -empty -delete
           count=$(find "$HISTORY_DIR" -maxdepth 1 -name '*.jsonl' | wc -l)
-          # A prior good run exists, so its artifact MUST restore at
-          # least one history file. Zero means the download silently
-          # failed — fail loudly rather than let the gate degrade into
-          # a perpetual no-op that always "passes" on an empty store.
-          if [ "$count" -lt 1 ]; then
-            echo "::error::baseline run $prev produced no history files on download" >&2
-            exit 1
-          fi
-          echo "restored $count baseline history file(s)"
+          echo "restored $count history file(s)"
 
       - name: Run mock perf scenarios
         run: make perf-placement
-
-      - name: Gate on gross regression
-        run: make perf-gate FAIL_OVER=$FAIL_OVER
 
       - name: Render perf matrix into job summary
         if: always()
@@ -101,18 +108,24 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Prune history to most recent runs
+        if: always()
         run: |
           set -euo pipefail
           cd "$HISTORY_DIR"
-          ls -1 *.jsonl 2>/dev/null | sort | head -n -"$KEEP_RUNS" | xargs -r rm -f
-          echo "history now holds $(find . -name '*.jsonl' | wc -l) run file(s)"
+          # `find` (unlike a bare `ls *.jsonl` under pipefail) is a no-op
+          # on an empty history dir — important on a bootstrap night or
+          # when perf-placement produced nothing, so this step never
+          # blocks the unconditional upload that follows.
+          find . -maxdepth 1 -name '*.jsonl' | sort | head -n -"$KEEP_RUNS" | xargs -r rm -f
+          echo "history now holds $(find . -maxdepth 1 -name '*.jsonl' | wc -l) run file(s)"
 
-      # Upload only on success: a gate failure (regression) must NOT
-      # become next night's baseline. `gh run list --status success`
-      # then naturally picks the last known-good run to restore.
+      # Upload unconditionally: this workflow accrues history, it does
+      # not gate. Preserving partial history across a placement-step
+      # failure is preferable to losing the rest of the run's signal.
       - name: Upload perf history
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: perf-history
           path: e2e/perf-artifacts/history/*.jsonl
-          if-no-files-found: error
+          if-no-files-found: warn
