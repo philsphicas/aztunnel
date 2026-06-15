@@ -14,7 +14,7 @@ go 1.26.4
 require (
 	github.com/KimMachineGun/automemlimit v0.7.5
 	github.com/alecthomas/kong v1.15.0
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	github.com/philsphicas/aztunnel v0.0.0
 	golang.org/x/sync v0.21.0
 )

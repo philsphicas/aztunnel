@@ -21,7 +21,7 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/relay/armrelay v1.2.0
-	github.com/coder/websocket v1.8.14
+	github.com/coder/websocket v1.8.15
 	github.com/philsphicas/aztunnel v0.0.0
 	github.com/philsphicas/aztunnel/mockrelay v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_model v0.6.2
