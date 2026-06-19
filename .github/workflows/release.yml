@@ -26,7 +26,7 @@ jobs:
           - goos: windows
             goarch: amd64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -74,7 +74,7 @@ jobs:
           - goos: windows
             goarch: amd64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -124,7 +124,7 @@ jobs:
             builder: golang:1-bookworm
             runtime: debian:bookworm-slim
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set version
         id: version
@@ -190,7 +190,7 @@ jobs:
             builder: golang:1-alpine
             runtime: alpine
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set version
         id: version
