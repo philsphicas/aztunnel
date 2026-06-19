@@ -30,7 +30,7 @@ jobs:
       contents: read
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
@@ -79,7 +79,7 @@ jobs:
     # headroom over the ~13 min per-axis wall observed in practice.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v6
         with:
