@@ -80,6 +80,34 @@ func TestCertRoundTripWithRealKeygen(t *testing.T) {
 	}
 }
 
+func TestInspectCertIncludesSSHKeygenDiagnostics(t *testing.T) {
+	keygen, err := exec.LookPath("ssh-keygen")
+	if err != nil {
+		t.Skip("ssh-keygen not found in PATH")
+	}
+
+	path := filepath.Join(t.TempDir(), "invalid-cert.pub")
+	if err := os.WriteFile(path, []byte("not an SSH certificate\n"), 0o600); err != nil {
+		t.Fatalf("write invalid certificate: %v", err)
+	}
+	expected, commandErr := exec.Command(keygen, "-L", "-f", path).CombinedOutput()
+	if commandErr == nil {
+		t.Fatal("expected ssh-keygen to reject invalid certificate")
+	}
+	diagnostic := strings.TrimSpace(string(expected))
+	if diagnostic == "" {
+		t.Skip("ssh-keygen did not emit diagnostics")
+	}
+
+	_, err = inspectCert(keygen, path)
+	if err == nil {
+		t.Fatal("expected inspectCert to fail")
+	}
+	if !strings.Contains(err.Error(), diagnostic) {
+		t.Fatalf("inspectCert error did not include ssh-keygen diagnostics:\n%v", err)
+	}
+}
+
 func TestReuseExistingRejectsMismatchedPrivateKey(t *testing.T) {
 	keygen, err := exec.LookPath("ssh-keygen")
 	if err != nil {

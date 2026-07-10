@@ -1,12 +1,22 @@
 package aadssh
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestDeriveKeyMaterialEncoding(t *testing.T) {
@@ -71,6 +81,69 @@ func TestKeyIDDeterministic(t *testing.T) {
 	}
 	if a.modulus != b.modulus {
 		t.Errorf("modulus not deterministic")
+	}
+}
+
+func TestReadPrivateKeyFormats(t *testing.T) {
+	priv := testKey(t)
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal PKCS#8 key: %v", err)
+	}
+	openSSH, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatalf("marshal OpenSSH key: %v", err)
+	}
+
+	formats := map[string][]byte{
+		"PKCS#1 PEM": pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(priv),
+		}),
+		"PKCS#8 PEM": pem.EncodeToMemory(&pem.Block{
+			Type:  "PRIVATE KEY",
+			Bytes: pkcs8,
+		}),
+		"OpenSSH": pem.EncodeToMemory(openSSH),
+	}
+	for name, data := range formats {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "id_rsa")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatalf("write private key: %v", err)
+			}
+			got, err := readPrivateKey(path)
+			if err != nil {
+				t.Fatalf("readPrivateKey: %v", err)
+			}
+			if got.N.Cmp(priv.N) != 0 || got.E != priv.E || got.D.Cmp(priv.D) != 0 {
+				t.Fatal("parsed private key does not match input")
+			}
+		})
+	}
+}
+
+func TestReadPrivateKeyRejectsNonRSA(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ECDSA key: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal ECDSA key: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "id_ecdsa")
+	data := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write private key: %v", err)
+	}
+
+	_, err = readPrivateKey(path)
+	if err == nil {
+		t.Fatal("expected non-RSA key to be rejected")
+	}
+	if !strings.Contains(err.Error(), "RSA is required") {
+		t.Fatalf("error = %q, want RSA requirement", err)
 	}
 }
 
@@ -169,6 +242,22 @@ func TestParseCertInfoForever(t *testing.T) {
 	}
 	if !info.stillValid(time.Now(), time.Hour) {
 		t.Error("forever cert should always be valid")
+	}
+}
+
+func TestParseCertInfoPrincipalContainingColon(t *testing.T) {
+	output := `        Principals:
+                alice:administrator
+        Critical Options: (none)
+        Extensions:
+                permit-pty
+`
+	info, err := parseCertInfo(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.principals) != 1 || info.principals[0] != "alice:administrator" {
+		t.Fatalf("principals = %v, want [alice:administrator]", info.principals)
 	}
 }
 

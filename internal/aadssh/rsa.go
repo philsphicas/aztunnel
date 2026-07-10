@@ -39,12 +39,11 @@ type keyMaterial struct {
 	reqCnf    string // JSON JWK sent as the req_cnf token request parameter
 }
 
-// loadOrGenerateKey loads an existing PEM (PKCS#1) private key from path, or
-// generates a new one and writes it (plus a "<path>.pub") only if the file does
-// not yet exist. Any other read/parse error (an unreadable file, a key in a
-// different format, or a corrupted PEM) is returned rather than silently
-// overwriting the existing file. Derived certificate-request material is
-// computed from whichever key is used.
+// loadOrGenerateKey loads an existing RSA private key in OpenSSH, PKCS#1, or
+// PKCS#8 format from path, or generates a new one and writes it (plus a
+// "<path>.pub") only if the file does not yet exist. Any other read/parse error
+// is returned rather than silently overwriting the existing file. Derived
+// certificate-request material is computed from whichever key is used.
 func loadOrGenerateKey(path string) (*keyMaterial, error) {
 	priv, err := readPrivateKey(path)
 	if err != nil {
@@ -128,17 +127,21 @@ func sshWireFields(blob []byte) ([][]byte, error) {
 	return fields, nil
 }
 
-// readPrivateKey reads a PEM PKCS#1 RSA private key from path.
+// readPrivateKey reads an RSA private key in a format supported by OpenSSH.
 func readPrivateKey(path string) (*rsa.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, fmt.Errorf("no PEM block in %s", path)
+	raw, err := ssh.ParseRawPrivateKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key %s: %w", path, err)
 	}
-	return x509.ParsePKCS1PrivateKey(block.Bytes)
+	priv, ok := raw.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("private key %s has type %T; RSA is required", path, raw)
+	}
+	return priv, nil
 }
 
 // writePrivateKey writes priv as a PEM PKCS#1 file with 0600 permissions,

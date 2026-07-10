@@ -41,8 +41,11 @@ type certInfo struct {
 // inspectCert runs `ssh-keygen -L -f <path>` and parses the principals and
 // validity window. keygen is the ssh-keygen executable to invoke.
 func inspectCert(keygen, path string) (*certInfo, error) {
-	out, err := exec.Command(keygen, "-L", "-f", path).Output()
+	out, err := exec.Command(keygen, "-L", "-f", path).CombinedOutput()
 	if err != nil {
+		if diagnostic := strings.TrimSpace(string(out)); diagnostic != "" {
+			return nil, fmt.Errorf("ssh-keygen -L %s: %w: %s", path, err, diagnostic)
+		}
 		return nil, fmt.Errorf("ssh-keygen -L %s: %w", path, err)
 	}
 	return parseCertInfo(string(out))
@@ -57,34 +60,37 @@ func inspectCert(keygen, path string) (*certInfo, error) {
 //	        alice@contoso.com
 //	Critical Options: (none)
 //
-// Principals are the indented lines following "Principals:", up to the next
-// line that contains a ":" (the following section header), matching the Azure
-// CLI's get_ssh_cert_principals behavior.
+// Principals are the more deeply indented lines following "Principals:", up to
+// the next sibling section. This preserves free-form principals containing ":".
 func parseCertInfo(output string) (*certInfo, error) {
 	info := &certInfo{}
 	lines := strings.Split(output, "\n")
 	inPrincipals := false
+	principalsIndent := 0
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inPrincipals {
+			indent := len(line) - len(strings.TrimLeft(line, " \t"))
+			if indent > principalsIndent {
+				info.principals = append(info.principals, trimmed)
+				continue
+			}
+			inPrincipals = false
+		}
 		switch {
 		case strings.HasPrefix(trimmed, "Valid:"):
 			info.parseValid(trimmed)
 		case strings.HasPrefix(trimmed, "Principals:"):
 			inPrincipals = true
+			principalsIndent = len(line) - len(strings.TrimLeft(line, " \t"))
 			// Handle "Principals: (none)" or inline values on the same line.
 			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "Principals:"))
 			if rest != "" && rest != "(none)" {
 				info.principals = append(info.principals, rest)
 			}
-		case inPrincipals:
-			if trimmed == "" {
-				continue
-			}
-			if strings.Contains(trimmed, ":") {
-				inPrincipals = false
-				continue
-			}
-			info.principals = append(info.principals, trimmed)
 		}
 	}
 	return info, nil
