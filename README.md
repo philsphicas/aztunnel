@@ -210,6 +210,39 @@ If SSH listens on a non-standard port (e.g., 2222):
 aztunnel arc connect --resource-id /subscriptions/.../machines/myVM --port 2222
 ```
 
+### Automatic Entra ID SSH (AADSSHLoginForLinux)
+
+For machines using the `AADSSHLoginForLinux` extension, `aztunnel arc aad-cert`
+mints the short-lived Entra ID SSH certificate automatically so plain `ssh`
+works without the `az ssh` wrapper. Drive it from an SSH config `Match final
+exec` directive. OpenSSH 9.6+ is required for its command-token injection
+hardening when expanded connection values are used by `Match exec`:
+
+```
+Host /subscriptions/*
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/arc/%C/known_hosts
+    IdentityFile ~/.ssh/arc/%C/id
+    CertificateFile ~/.ssh/arc/%C/id-cert.pub
+    Match final exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
+    ProxyCommand aztunnel arc connect --resource-id %n --port %p
+```
+
+`%C` is OpenSSH's per-connection hash. Because ssh expands `%C` in both the
+`IdentityFile`/`CertificateFile`/`UserKnownHostsFile` paths and the `--dir`
+argument, aad-cert writes the key and certificate into exactly the directory
+ssh reads from — no path reconstruction on aztunnel's side. `Match final exec`
+(rather than plain `Match exec`) ensures `%C` is computed after the host name is
+canonicalized, so both sides agree.
+
+Then connect with your Entra ID UPN (aad-cert prints the exact username):
+
+```sh
+ssh alice@contoso.com@/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/myVM
+```
+
+See [docs/guides/sender-arc.md](docs/guides/sender-arc.md) for details.
+
 ## CLI reference
 
 ```
@@ -222,6 +255,7 @@ Commands:
   relay-sender connect                  One-shot stdin/stdout connection (ProxyCommand)
   arc connect                           One-shot connection through an Arc relay (ProxyCommand)
   arc port-forward                      Forward a local port through an Arc relay
+  arc aad-cert                          Mint an Entra ID SSH certificate (AADSSHLoginForLinux)
 
 Global flags:
   --version                 Print the version and exit
@@ -303,6 +337,24 @@ Flags:
   -b, --bind string          Local bind address:port (default "127.0.0.1:0")
   --gateway                  Bind to 0.0.0.0 instead of 127.0.0.1
   --tcp-keepalive duration   TCP keepalive interval (default 30s)
+```
+
+### arc aad-cert
+
+```
+aztunnel arc aad-cert [flags]
+
+Flags:
+  --dir string            Directory holding this connection's key/cert (point at ~/.ssh/arc/%C)
+  --user string           SSH login name (ssh %r); selects the cached Entra account
+  --identity string       Private key path, created if missing (alternative to --dir)
+  --cert string           Certificate output path (default "<identity>-cert.pub")
+  --token-cache string    MSAL token cache path for silent renewal
+  --client-id string      OAuth public client ID (default Azure CLI)
+  --tenant string         Entra ID tenant, or organizations/common (default "organizations")
+  --scope string          Token scope yielding the certificate (default AADSSHLoginForLinux)
+  --min-valid duration    Reuse an existing certificate valid at least this long (default 5m)
+  --ssh-keygen string     Path to the ssh-keygen executable (default "ssh-keygen")
 ```
 
 ## Metrics
