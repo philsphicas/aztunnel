@@ -14,6 +14,7 @@ require (
 	github.com/prometheus/client_model v0.6.2
 	github.com/willabides/kongplete v0.4.0
 	golang.org/x/crypto v0.53.0
+	golang.org/x/sys v0.46.0
 )
 
 require (
@@ -34,7 +35,6 @@ require (
 	github.com/riywo/loginshell v0.0.0-20200815045211-7d26008be1ab // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )

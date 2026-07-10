@@ -3,10 +3,27 @@ package aadssh
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestWriteFileAtomicCreatesAndReplaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state")
+	for _, want := range []string{"first", "second"} {
+		if err := writeFileAtomic(path, []byte(want), 0o600); err != nil {
+			t.Fatalf("writeFileAtomic(%q): %v", want, err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read state: %v", err)
+		}
+		if string(got) != want {
+			t.Fatalf("state = %q, want %q", got, want)
+		}
+	}
+}
 
 func TestAcquireFileLockSerializesAndReleases(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.lock")

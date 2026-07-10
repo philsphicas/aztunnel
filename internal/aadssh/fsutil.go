@@ -13,9 +13,8 @@ import (
 const lockRetryDelay = 100 * time.Millisecond
 
 // writeFileAtomic writes data to path by first writing a sibling temp file and
-// then renaming it into place, so a concurrent reader (or a crash mid-write)
-// never observes a truncated or partially written file. os.Rename replaces the
-// destination atomically on both Unix and Windows.
+// then replacing the destination, so readers do not observe an in-place partial
+// write.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -39,7 +38,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.Chmod(tmpName, perm); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	return replaceFile(tmpName, path)
 }
 
 // acquireDirLock takes an advisory inter-process lock for dir. The OS releases

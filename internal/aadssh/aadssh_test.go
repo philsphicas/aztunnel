@@ -147,12 +147,12 @@ func TestReadPrivateKeyRejectsNonRSA(t *testing.T) {
 	}
 }
 
-// testKey returns a fixed 2048-bit RSA key parsed from known parameters so
-// tests are deterministic and fast.
+// testKey returns a fixed RSA key parsed from known parameters so tests are
+// deterministic and fast. It is only used to exercise key encoding.
 func testKey(t *testing.T) *rsa.PrivateKey {
 	t.Helper()
-	// Generate once is acceptable, but to keep it deterministic we derive from
-	// fixed 64-hex primes producing a ~2048-bit modulus.
+	// Repeating the fixed hex strings produces ~512-bit primes and a ~1024-bit
+	// modulus without making the test depend on random key generation.
 	pStr := "e00e8bc8b2e1a0b0d6c9f2a1b3c4d5e6f7081920a1b2c3d4e5f60718293a4b5c7"
 	qStr := "f10f9cd9c3f2b1c1e7daf3b2c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f89"
 	p, _ := new(big.Int).SetString(pStr+pStr, 16)
