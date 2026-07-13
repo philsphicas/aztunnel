@@ -34,6 +34,7 @@ Usage:
   aztunnel relay-sender connect <host:port> [flags]
   aztunnel arc connect [flags]
   aztunnel arc port-forward [flags]
+  aztunnel arc aad-cert [flags]
 
 Global Options:
       --log-level string            Log level: debug, info, warn, error (default "info")
@@ -107,6 +108,23 @@ Arc Port Forward:
       --gateway                     Bind to 0.0.0.0 instead of 127.0.0.1
       --tcp-keepalive duration      TCP keepalive interval (default 30s)
 
+Arc AAD SSH Certificate:
+  Mint a short-lived Microsoft Entra ID SSH certificate for machines using
+  the AADSSHLoginForLinux extension. Designed for an SSH config "Match final
+  exec" directive so plain "ssh" acquires a certificate automatically. The
+  login username (the certificate's first principal) is printed to stderr.
+
+      --resource-id string          ARM resource ID of the Arc-connected machine
+      --dir string                  Directory holding this connection's key/cert (point at ~/.ssh/arc/%C)
+      --user string                 SSH login name (ssh %r); selects the cached Entra account
+      --identity string             Private key path, created if missing (alternative to --dir)
+      --cert string                 Certificate output path (default "<identity>-cert.pub")
+      --token-cache string          MSAL token cache path for silent renewal
+      --client-id string            OAuth public client ID (default Azure CLI)
+      --tenant string               Entra ID tenant, or organizations/common (default "organizations")
+      --scope string                Token scope yielding the certificate (default "ce6ff14a-7fdc-4685-bbe0-f6afdfcfa8e0/.default")
+      --min-valid duration          Reuse an existing certificate valid at least this long (default 5m)
+
 Authentication:
   Relay commands authenticate to the Azure Relay namespace:
 
@@ -119,6 +137,11 @@ Authentication:
   Arc commands authenticate via DefaultAzureCredential to the Azure
   Resource Manager API. No relay credentials are needed — Azure provides
   short-lived SAS tokens automatically.
+
+  arc aad-cert additionally signs in to Microsoft Entra ID interactively
+  (browser) the first time to obtain the SSH certificate, then caches a
+  refresh token for silent renewals. This is separate from the ARM
+  DefaultAzureCredential used by the tunnel transport.
 
 Environment Variables:
   AZTUNNEL_RELAY_NAME        Relay namespace (fallback for --relay)
@@ -145,6 +168,17 @@ Examples:
   # Use as SSH ProxyCommand (arc mode)
   ssh -o ProxyCommand="aztunnel arc connect \
     --resource-id /subscriptions/.../machines/myVM" user@host
+
+  # Automatic Entra ID (AADSSHLoginForLinux) SSH via ~/.ssh/config
+  # (requires OpenSSH 9.6+ for safe Match exec token expansion):
+  #   Host /subscriptions/*
+  #       StrictHostKeyChecking accept-new
+  #       UserKnownHostsFile ~/.ssh/arc/%C/known_hosts
+  #       IdentityFile ~/.ssh/arc/%C/id
+  #       CertificateFile ~/.ssh/arc/%C/id-cert.pub
+  #       Match final host "/subscriptions/*" exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
+  #       ProxyCommand aztunnel arc connect --resource-id %n --port %p
+  # Then: ssh <entra-upn>@/subscriptions/.../machines/myVM
 
   # Forward a local port through Arc
   aztunnel arc port-forward \

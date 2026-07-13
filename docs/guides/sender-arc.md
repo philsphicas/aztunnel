@@ -96,7 +96,120 @@ export AZTUNNEL_ARC_RESOURCE_ID="/subscriptions/SUB/resourceGroups/RG/providers/
 ssh -o ProxyCommand="aztunnel arc connect" user@myVM
 ```
 
-## arc port-forward
+## Automatic Microsoft Entra ID SSH (AADSSHLoginForLinux)
+
+If your Arc machines use the
+[AADSSHLoginForLinux](https://learn.microsoft.com/en-us/azure/active-directory/devices/howto-vm-sign-in-azure-ad-linux)
+extension, you normally sign in with a short-lived SSH certificate issued by
+Entra ID (what `az ssh arc` does under the hood). `aztunnel arc aad-cert`
+mints that certificate for you, so plain `ssh` "just works" — no `az ssh`
+wrapper.
+
+The trick is an SSH config `Match final exec` directive: it runs _during_ config
+parsing (in the final pass, after the host name is canonicalized), before the
+connection is made, so aztunnel can create the key pair and write a fresh
+certificate before SSH authenticates.
+
+```
+Host /subscriptions/*
+    StrictHostKeyChecking accept-new
+    UserKnownHostsFile ~/.ssh/arc/%C/known_hosts
+    IdentityFile ~/.ssh/arc/%C/id
+    CertificateFile ~/.ssh/arc/%C/id-cert.pub
+    Match final host "/subscriptions/*" exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
+    ProxyCommand aztunnel arc connect --resource-id %n --port %p
+```
+
+> **Requires OpenSSH 9.6 or newer** — it hardens shell-command expansion against
+> unsafe characters in connection tokens used by `Match exec`.
+
+Then connect using your Entra ID user principal name (UPN) as the username:
+
+```sh
+ssh alice@contoso.com@/subscriptions/SUB/resourceGroups/RG/providers/Microsoft.HybridCompute/machines/myVM
+```
+
+`aztunnel arc aad-cert` prints the exact username to use (the certificate's
+first principal) on stderr:
+
+```
+aztunnel: AAD SSH username: alice@contoso.com
+```
+
+### What aad-cert does
+
+1. Generates an ephemeral RSA key pair in `--dir` (if not already there).
+2. Signs in to Entra ID (interactive browser the first time) and requests a
+   `token_type=ssh-cert` proof-of-possession token — the returned token _is_
+   the OpenSSH certificate body. A refresh token is cached
+   (`--token-cache`, default under your user config dir) for silent renewals.
+3. Writes the certificate to `--cert` (default `<identity>-cert.pub`).
+4. Derives the login username from the certificate's first principal and
+   prints it.
+
+On subsequent connections, if the existing certificate is still valid (at
+least `--min-valid`, default 5m), aad-cert skips both the network call and the
+sign-in entirely.
+
+### Why this config
+
+- **Per-host paths via `%C`** — `%C` is OpenSSH's connection hash (a SHA-1 over
+  the local host name, the target host, port, and login user). It contains no
+  slashes and is already lowercased, so it makes a clean, case-stable,
+  Windows-safe directory name — unlike the raw resource ID (`%n`), which is a
+  long, case-preserving path. ssh expands `%C` in _both_ the
+  `IdentityFile`/`CertificateFile`/`UserKnownHostsFile` paths and in the `--dir`
+  argument, so aad-cert writes the key and certificate into exactly the directory
+  ssh reads from — aztunnel never reconstructs the hash itself. Each machine gets
+  its own key, certificate, and `known_hosts`, and a `resource-id` marker file is
+  dropped in each directory so the opaque layout stays navigable.
+- **`Match final exec`, not `Match exec`** — a plain `Match exec` is evaluated in
+  _both_ SSH config passes, and in the first pass the host name isn't yet
+  canonicalized (lowercased), so its `%C` differs from the one ssh uses for
+  `IdentityFile`. `final` runs only in the second pass, after canonicalization,
+  guaranteeing its `%C` matches the paths ssh actually reads.
+- **Scope the `Match` to `/subscriptions/*` hosts** — a `Match` line ends the
+  preceding `Host` block, so without an explicit `host` criterion the `exec`
+  (and the `ProxyCommand` it guards) would run for _every_ ssh destination,
+  spawning aad-cert — and its Entra sign-in — for unrelated hosts. Placing
+  `host "/subscriptions/*"` before `exec` short-circuits the match so it only
+  runs for Arc resource-ID targets.
+- **No `Hostname` directive** — the `ProxyCommand` uses `%n` (the resource ID)
+  to open the relay, and ssh performs no DNS resolution when a `ProxyCommand` is
+  set, so no `Hostname` is needed. Omitting it also keeps `%h` equal to the
+  (lowercased) resource ID, which is what makes `%C` unique per machine — a
+  shared `Hostname localhost` would collapse every machine to the same `%C`.
+- **Per-host `UserKnownHostsFile` + `accept-new`** — giving each machine its own
+  `%C`-named `known_hosts` file provides real trust-on-first-use across many
+  machines instead of one shared file in which every host looks like the same
+  endpoint.
+
+> **Custom SSH port**: because ssh computes `%C` itself, a non-default `Port`
+> directive is reflected in `%C` automatically — the `--dir ~/.ssh/arc/%C` path
+> just follows along, with nothing extra to configure on the aztunnel side.
+
+### Flags
+
+| Flag            | Default                 | Description                                               |
+| --------------- | ----------------------- | --------------------------------------------------------- |
+| `--dir`         | (none)                  | This connection's key/cert dir (point at `~/.ssh/arc/%C`) |
+| `--user`        | (none)                  | Login name (`%r`); selects the cached Entra account       |
+| `--identity`    | (none)                  | Explicit private key path (alternative to `--dir`)        |
+| `--cert`        | `<identity>-cert.pub`   | Certificate output path                                   |
+| `--token-cache` | user config dir         | MSAL token cache for silent renewal                       |
+| `--client-id`   | Azure CLI public client | OAuth public client ID                                    |
+| `--tenant`      | `organizations`         | Entra ID tenant (use a tenant ID for guest access)        |
+| `--min-valid`   | `5m`                    | Reuse an existing cert valid at least this long           |
+
+Provide either `--dir` (recommended; writes `<dir>/id` and `<dir>/id-cert.pub`)
+or an explicit `--identity` path.
+
+### First-time sign-in
+
+The first connection opens a browser to sign in to Entra ID. Because
+`Match final exec` runs before the SSH connection, the prompt appears up front.
+After that, the cached refresh token allows silent certificate renewal until it
+expires.
 
 Bind a local port for tools that don't support ProxyCommand:
 

@@ -67,4 +67,5 @@ type ArcCmd struct {
 
 	Connect     ArcConnectCmd     `cmd:"" help:"One-shot stdin/stdout connection through an Arc relay."`
 	PortForward ArcPortForwardCmd `cmd:"" name:"port-forward" help:"Forward a local port through an Arc relay."`
+	AadCert     ArcAadCertCmd     `cmd:"" name:"aad-cert" help:"Mint a Microsoft Entra ID SSH certificate for AADSSHLoginForLinux."`
 }
