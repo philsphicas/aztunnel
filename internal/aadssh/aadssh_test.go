@@ -192,91 +192,33 @@ func nextPrime(n *big.Int) *big.Int {
 	return c
 }
 
-func TestParseCertInfoPrincipalsAndValidity(t *testing.T) {
-	output := `/tmp/id-cert.pub:
-        Type: ssh-rsa-cert-v01@openssh.com user certificate
-        Public key: RSA-CERT SHA256:abcdef
-        Signing CA: RSA SHA256:ghijkl
-        Key ID: "key1"
-        Serial: 0
-        Valid: from 2024-06-01T12:00:00 to 2024-06-01T13:00:00
-        Principals:
-                alice@contoso.com
-                alice
-        Critical Options: (none)
-        Extensions:
-                permit-pty
-`
-	info, err := parseCertInfo(output)
-	if err != nil {
-		t.Fatal(err)
+func TestCertStillValid(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	valid := &ssh.Certificate{
+		ValidAfter:  uint64(now.Add(-time.Minute).Unix()),
+		ValidBefore: uint64(now.Add(10 * time.Minute).Unix()),
 	}
-	if len(info.principals) != 2 || info.principals[0] != "alice@contoso.com" || info.principals[1] != "alice" {
-		t.Errorf("principals = %v, want [alice@contoso.com alice]", info.principals)
-	}
-	user, err := info.username()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if user != "alice@contoso.com" {
-		t.Errorf("username = %q, want alice@contoso.com", user)
-	}
-
-	want := time.Date(2024, 6, 1, 13, 0, 0, 0, time.Local)
-	if !info.validTo.Equal(want) {
-		t.Errorf("validTo = %v, want %v", info.validTo, want)
-	}
-	wantFrom := time.Date(2024, 6, 1, 12, 0, 0, 0, time.Local)
-	if !info.validFrom.Equal(wantFrom) {
-		t.Errorf("validFrom = %v, want %v", info.validFrom, wantFrom)
-	}
-}
-
-func TestParseCertInfoForever(t *testing.T) {
-	info, err := parseCertInfo("        Valid: forever\n        Principals:\n                root\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !info.forever {
-		t.Error("expected forever = true")
-	}
-	if !info.stillValid(time.Now(), time.Hour) {
-		t.Error("forever cert should always be valid")
-	}
-}
-
-func TestParseCertInfoPrincipalContainingColon(t *testing.T) {
-	output := `        Principals:
-                alice:administrator
-        Critical Options: (none)
-        Extensions:
-                permit-pty
-`
-	info, err := parseCertInfo(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(info.principals) != 1 || info.principals[0] != "alice:administrator" {
-		t.Fatalf("principals = %v, want [alice:administrator]", info.principals)
-	}
-}
-
-func TestStillValid(t *testing.T) {
-	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.Local)
-	info := &certInfo{validFrom: now.Add(-time.Minute), validTo: now.Add(10 * time.Minute)}
-	if !info.stillValid(now, 5*time.Minute) {
+	if !certStillValid(valid, now, 5*time.Minute) {
 		t.Error("cert valid for 10m should pass a 5m skew")
 	}
-	if info.stillValid(now, 15*time.Minute) {
+	if certStillValid(valid, now, 15*time.Minute) {
 		t.Error("cert valid for 10m should fail a 15m skew")
 	}
-	future := &certInfo{validFrom: now.Add(time.Minute), validTo: now.Add(time.Hour)}
-	if future.stillValid(now, time.Minute) {
+
+	notYet := &ssh.Certificate{
+		ValidAfter:  uint64(now.Add(time.Minute).Unix()),
+		ValidBefore: uint64(now.Add(time.Hour).Unix()),
+	}
+	if certStillValid(notYet, now, time.Minute) {
 		t.Error("not-yet-valid cert should not be reused")
 	}
-	empty := &certInfo{}
-	if empty.stillValid(now, time.Minute) {
-		t.Error("cert with no validTo should not be valid")
+
+	forever := &ssh.Certificate{
+		ValidAfter:  uint64(now.Add(-time.Minute).Unix()),
+		ValidBefore: ssh.CertTimeInfinity,
+	}
+	if !certStillValid(forever, now, time.Hour) {
+		t.Error("infinite cert should always be valid once started")
 	}
 }
 

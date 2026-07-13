@@ -29,7 +29,6 @@ type ArcAadCertCmd struct {
 	Tenant     string        `help:"Entra ID tenant (or 'organizations'/'common')." default:"organizations"`
 	Scope      string        `help:"Token scope that yields the SSH certificate." default:"ce6ff14a-7fdc-4685-bbe0-f6afdfcfa8e0/.default"`
 	MinValid   time.Duration `name:"min-valid" help:"Reuse an existing certificate if it stays valid at least this long." default:"5m"`
-	SSHKeygen  string        `name:"ssh-keygen" help:"Path to the ssh-keygen executable." default:"ssh-keygen"`
 }
 
 // Run executes the arc aad-cert command.
@@ -59,7 +58,6 @@ func (c *ArcAadCertCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 		ClientID:       c.ClientID,
 		Tenant:         c.Tenant,
 		Scope:          c.Scope,
-		SSHKeygen:      c.SSHKeygen,
 		MinValidity:    c.MinValid,
 		Stderr:         os.Stderr,
 	})
@@ -142,5 +140,5 @@ func writeResourceMarker(dir, resourceID string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "resource-id"), []byte(resourceID+"\n"), 0o644)
+	return os.WriteFile(filepath.Join(dir, "resource-id"), []byte(resourceID+"\n"), 0o600)
 }

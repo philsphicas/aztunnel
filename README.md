@@ -354,7 +354,6 @@ Flags:
   --tenant string         Entra ID tenant, or organizations/common (default "organizations")
   --scope string          Token scope yielding the certificate (default AADSSHLoginForLinux)
   --min-valid duration    Reuse an existing certificate valid at least this long (default 5m)
-  --ssh-keygen string     Path to the ssh-keygen executable (default "ssh-keygen")
 ```
 
 ## Metrics

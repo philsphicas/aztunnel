@@ -3,6 +3,7 @@ package aadssh
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,9 +29,14 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	// Best-effort cleanup if we bail before the rename; a no-op once renamed.
 	defer func() { _ = os.Remove(tmpName) }()
 
-	if _, err := tmp.Write(data); err != nil {
+	n, err := tmp.Write(data)
+	if err != nil {
 		_ = tmp.Close()
 		return err
+	}
+	if n < len(data) {
+		_ = tmp.Close()
+		return io.ErrShortWrite
 	}
 	if err := tmp.Close(); err != nil {
 		return err

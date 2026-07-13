@@ -105,7 +105,7 @@ Entra ID (what `az ssh arc` does under the hood). `aztunnel arc aad-cert`
 mints that certificate for you, so plain `ssh` "just works" — no `az ssh`
 wrapper.
 
-The trick is an SSH config `Match final exec` directive: it runs *during* config
+The trick is an SSH config `Match final exec` directive: it runs _during_ config
 parsing (in the final pass, after the host name is canonicalized), before the
 connection is made, so aztunnel can create the key pair and write a fresh
 certificate before SSH authenticates.
@@ -140,7 +140,7 @@ aztunnel: AAD SSH username: alice@contoso.com
 
 1. Generates an ephemeral RSA key pair in `--dir` (if not already there).
 2. Signs in to Entra ID (interactive browser the first time) and requests a
-   `token_type=ssh-cert` proof-of-possession token — the returned token *is*
+   `token_type=ssh-cert` proof-of-possession token — the returned token _is_
    the OpenSSH certificate body. A refresh token is cached
    (`--token-cache`, default under your user config dir) for silent renewals.
 3. Writes the certificate to `--cert` (default `<identity>-cert.pub`).
@@ -157,14 +157,14 @@ sign-in entirely.
   the local host name, the target host, port, and login user). It contains no
   slashes and is already lowercased, so it makes a clean, case-stable,
   Windows-safe directory name — unlike the raw resource ID (`%n`), which is a
-  long, case-preserving path. ssh expands `%C` in *both* the
+  long, case-preserving path. ssh expands `%C` in _both_ the
   `IdentityFile`/`CertificateFile`/`UserKnownHostsFile` paths and in the `--dir`
   argument, so aad-cert writes the key and certificate into exactly the directory
   ssh reads from — aztunnel never reconstructs the hash itself. Each machine gets
   its own key, certificate, and `known_hosts`, and a `resource-id` marker file is
   dropped in each directory so the opaque layout stays navigable.
 - **`Match final exec`, not `Match exec`** — a plain `Match exec` is evaluated in
-  *both* SSH config passes, and in the first pass the host name isn't yet
+  _both_ SSH config passes, and in the first pass the host name isn't yet
   canonicalized (lowercased), so its `%C` differs from the one ssh uses for
   `IdentityFile`. `final` runs only in the second pass, after canonicalization,
   guaranteeing its `%C` matches the paths ssh actually reads.
@@ -184,16 +184,16 @@ sign-in entirely.
 
 ### Flags
 
-| Flag            | Default                   | Description                                        |
-| --------------- | ------------------------- | -------------------------------------------------- |
-| `--dir`         | (none)                    | This connection's key/cert dir (point at `~/.ssh/arc/%C`) |
-| `--user`        | (none)                    | Login name (`%r`); selects the cached Entra account |
-| `--identity`    | (none)                    | Explicit private key path (alternative to `--dir`) |
-| `--cert`        | `<identity>-cert.pub`     | Certificate output path                            |
-| `--token-cache` | user config dir           | MSAL token cache for silent renewal                |
-| `--client-id`   | Azure CLI public client   | OAuth public client ID                             |
-| `--tenant`      | `organizations`           | Entra ID tenant (use a tenant ID for guest access) |
-| `--min-valid`   | `5m`                      | Reuse an existing cert valid at least this long    |
+| Flag            | Default                 | Description                                               |
+| --------------- | ----------------------- | --------------------------------------------------------- |
+| `--dir`         | (none)                  | This connection's key/cert dir (point at `~/.ssh/arc/%C`) |
+| `--user`        | (none)                  | Login name (`%r`); selects the cached Entra account       |
+| `--identity`    | (none)                  | Explicit private key path (alternative to `--dir`)        |
+| `--cert`        | `<identity>-cert.pub`   | Certificate output path                                   |
+| `--token-cache` | user config dir         | MSAL token cache for silent renewal                       |
+| `--client-id`   | Azure CLI public client | OAuth public client ID                                    |
+| `--tenant`      | `organizations`         | Entra ID tenant (use a tenant ID for guest access)        |
+| `--min-valid`   | `5m`                    | Reuse an existing cert valid at least this long           |
 
 Provide either `--dir` (recommended; writes `<dir>/id` and `<dir>/id-cert.pub`)
 or an explicit `--identity` path.
@@ -204,8 +204,6 @@ The first connection opens a browser to sign in to Entra ID. Because
 `Match final exec` runs before the SSH connection, the prompt appears up front.
 After that, the cached refresh token allows silent certificate renewal until it
 expires.
-
-
 
 Bind a local port for tools that don't support ProxyCommand:
 

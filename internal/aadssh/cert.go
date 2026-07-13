@@ -57,8 +57,6 @@ type Options struct {
 	// Scope overrides the token scope (default: the AADSSHLoginForLinux app).
 	Scope string
 
-	// SSHKeygen is the ssh-keygen executable used to inspect certificates.
-	SSHKeygen string
 	// MinValidity is the remaining validity a cached cert must have to be
 	// reused (default: DefaultMinValidity).
 	MinValidity time.Duration
@@ -79,9 +77,6 @@ func (o *Options) withDefaults() {
 	}
 	if o.Scope == "" {
 		o.Scope = DefaultScope
-	}
-	if o.SSHKeygen == "" {
-		o.SSHKeygen = "ssh-keygen"
 	}
 	if o.MinValidity == 0 {
 		o.MinValidity = DefaultMinValidity
@@ -148,8 +143,8 @@ func EnsureCert(ctx context.Context, opts Options) (string, error) {
 // key was removed or is unreadable, or if the certificate's principal does not
 // match the requested username.
 func reuseExisting(opts *Options) (string, bool) {
-	info, err := inspectCert(opts.SSHKeygen, opts.CertPath)
-	if err != nil || !info.stillValid(time.Now(), opts.MinValidity) {
+	cert, err := readCertificate(opts.CertPath)
+	if err != nil || !certStillValid(cert, time.Now(), opts.MinValidity) {
 		return "", false
 	}
 	// A valid certificate is useless without its matching private key.
@@ -161,8 +156,7 @@ func reuseExisting(opts *Options) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	cert, err := readCertificate(opts.CertPath)
-	if err != nil || !certificateMatchesPublicKey(cert, expectedKey) {
+	if !certificateMatchesPublicKey(cert, expectedKey) {
 		return "", false
 	}
 	user, err := certificateUsername(cert)
