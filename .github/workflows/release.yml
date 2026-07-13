@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.4"
+          go-version-file: go.work
 
       - name: Set version
         id: version
@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.4"
+          go-version-file: go.work
 
       - name: Set version
         id: version
@@ -115,16 +115,22 @@ jobs:
       matrix:
         include:
           - variant: ""
-            builder: golang:1-bookworm
+            builder_variant: bookworm
             runtime: scratch
           - variant: -alpine
-            builder: golang:1-alpine
+            builder_variant: alpine
             runtime: alpine
           - variant: -bookworm
-            builder: golang:1-bookworm
+            builder_variant: bookworm
             runtime: debian:bookworm-slim
     steps:
       - uses: actions/checkout@v7
+
+      - name: Read Go version
+        id: go
+        run: |
+          version="$(awk '$1 == "go" { print $2; exit }' go.work)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Set version
         id: version
@@ -170,7 +176,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
-            BUILDER_IMAGE=${{ matrix.builder }}
+            BUILDER_IMAGE=golang:${{ steps.go.outputs.version }}-${{ matrix.builder_variant }}
             RUNTIME_IMAGE=${{ matrix.runtime }}
 
   docker-relay:
@@ -184,13 +190,19 @@ jobs:
           # path uses os.MkdirTemp("", ...) which fails when /tmp is
           # absent (as it is in scratch).
           - variant: ""
-            builder: golang:1-bookworm
+            builder_variant: bookworm
             runtime: debian:bookworm-slim
           - variant: -alpine
-            builder: golang:1-alpine
+            builder_variant: alpine
             runtime: alpine
     steps:
       - uses: actions/checkout@v7
+
+      - name: Read Go version
+        id: go
+        run: |
+          version="$(awk '$1 == "go" { print $2; exit }' go.work)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Set version
         id: version
@@ -237,7 +249,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
-            BUILDER_IMAGE=${{ matrix.builder }}
+            BUILDER_IMAGE=golang:${{ steps.go.outputs.version }}-${{ matrix.builder_variant }}
             RUNTIME_IMAGE=${{ matrix.runtime }}
 
   dev-release:

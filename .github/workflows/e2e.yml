@@ -34,7 +34,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.4"
+          go-version-file: go.work
 
       - name: Build
         run: make build
@@ -83,7 +83,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.4"
+          go-version-file: go.work
 
       - name: Azure Login (OIDC)
         uses: azure/login@v3

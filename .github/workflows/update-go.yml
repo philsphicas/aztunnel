@@ -1,0 +1,87 @@
+name: Update Go
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-go
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up latest stable Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+
+      - name: Read installed Go version
+        id: go
+        shell: bash
+        run: |
+          version="$(go env GOVERSION)"
+          version="${version#go}"
+          if [[ ! "$version" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::setup-go returned an unexpected stable version: $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify matching Docker builders are published
+        run: |
+          docker buildx imagetools inspect "golang:${{ steps.go.outputs.version }}-bookworm" >/dev/null
+          docker buildx imagetools inspect "golang:${{ steps.go.outputs.version }}-alpine" >/dev/null
+
+      - name: Update golangci-lint version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(gh api repos/golangci/golangci-lint/releases/latest --jq .tag_name)"
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::GitHub returned an unexpected golangci-lint version: $version"
+            exit 1
+          fi
+          echo "$version" > .golangci-version
+
+      - name: Update Go version
+        run: bash scripts/update-go-version.sh "${{ steps.go.outputs.version }}"
+
+      - name: Create or update pull request
+        id: pull-request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          # This contents/pull-requests write credential must not be
+          # GITHUB_TOKEN: its pushes trigger required checks both when the PR
+          # opens and when it updates.
+          token: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          branch: automation/update-go
+          delete-branch: true
+          commit-message: "chore(go): update Go to ${{ steps.go.outputs.version }}"
+          title: "chore(go): update Go to ${{ steps.go.outputs.version }}"
+          body: |
+            Updates the repository to Go ${{ steps.go.outputs.version }}:
+
+            - synchronizes every `go.mod` file and `go.work`
+            - tidies every module independently
+            - pins Docker builder images to the same Go release
+            - refreshes the pinned golangci-lint release
+
+            This PR is maintained automatically and will merge only after the repository's required checks pass.
+          labels: dependencies
+
+      - name: Enable auto-merge
+        if: steps.pull-request.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+        run: gh pr merge --auto --squash "${{ steps.pull-request.outputs.pull-request-number }}"

@@ -29,6 +29,9 @@ updates:
     schedule:
       interval: daily
     open-pull-requests-limit: 5
+    ignore:
+      # The scheduled Go updater changes module and builder versions atomically.
+      - dependency-name: golang
     labels:
       - dependencies
     groups:
