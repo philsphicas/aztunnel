@@ -16,6 +16,12 @@ if ! "${git_command[@]}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
+version_scan_paths=(
+  .
+  ':(exclude)scripts/check-go-version.sh'
+  ':(exclude)scripts/update-go-version.sh'
+)
+
 failed=0
 
 error() {
@@ -69,7 +75,8 @@ while IFS= read -r image; do
   fi
 done < <(
   "${git_command[@]}" grep -hoE \
-    'golang:[0-9]+(\.[0-9]+){0,2}(-[[:alnum:]_.-]+)?' -- || true
+    'golang:[0-9]+(\.[0-9]+){0,2}(-[[:alnum:]_.-]+)?' \
+    -- "${version_scan_paths[@]}" || true
 )
 
 if ((static_builder_count == 0)); then
@@ -84,14 +91,17 @@ if [[ -n "$workflow_builder_pins" ]]; then
   echo "$workflow_builder_pins" >&2
 fi
 
-digest_pins="$("${git_command[@]}" grep -nE 'golang:[^[:space:]]+@sha256:' -- || true)"
+digest_pins="$(
+  "${git_command[@]}" grep -nE 'golang:[^[:space:]]+@sha256:' \
+    -- "${version_scan_paths[@]}" || true
+)"
 if [[ -n "$digest_pins" ]]; then
   error "Go Docker digest pins are not supported by the updater:"
   echo "$digest_pins" >&2
 fi
 
 while IFS= read -r reference; do
-  if [[ "$reference" == 'golang:${{' ]]; then
+  if [[ "$reference" == 'golang:${{'* ]]; then
     continue
   fi
   if [[ "$reference" =~ ^golang:\$\([A-Z_][A-Z0-9_]*\)(-[[:alnum:]_.-]+)?$ ]]; then
@@ -105,7 +115,8 @@ while IFS= read -r reference; do
   fi
   error "unsupported Go Docker reference '$reference'; use the synchronized version or a checked variable"
 done < <(
-  "${git_command[@]}" grep -hoE 'golang:[[:alnum:]$(){}_.:+/@-]+' -- || true
+  "${git_command[@]}" grep -hoE 'golang:[[:alnum:]$(){}_.:+/@-]+' \
+    -- "${version_scan_paths[@]}" || true
 )
 
 normal_setup_count=0

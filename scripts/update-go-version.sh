@@ -27,6 +27,12 @@ if ! "${git_command[@]}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
+version_scan_paths=(
+  .
+  ':(exclude)scripts/check-go-version.sh'
+  ':(exclude)scripts/update-go-version.sh'
+)
+
 mapfile -d '' workspace_files < <("${git_command[@]}" ls-files -z -- 'go.work' ':(glob)**/go.work')
 if ((${#workspace_files[@]} == 0)); then
   echo "error: no tracked go.work files found" >&2
@@ -56,18 +62,25 @@ done
 
 mapfile -d '' builder_files < <(
   "${git_command[@]}" grep -lzE \
-    'golang:[0-9]+(\.[0-9]+){0,2}(-[[:alnum:]_.-]+)?' -- || true
+    'golang:[0-9]+(\.[0-9]+){0,2}(-[[:alnum:]_.-]+)?' \
+    -- "${version_scan_paths[@]}" || true
 )
 if ((${#builder_files[@]} == 0)); then
   echo "error: no static Go Docker builder references found" >&2
   exit 1
 fi
 
+if sed --version >/dev/null 2>&1; then
+  sed_in_place=(-E -i)
+else
+  sed_in_place=(-E -i '')
+fi
+
 for builder_file in "${builder_files[@]}"; do
   if [[ "$builder_file" == .github/workflows/* ]]; then
     continue
   fi
-  sed -E -i \
+  sed "${sed_in_place[@]}" \
     "s|golang:[0-9]+(\.[0-9]+){0,2}(-[[:alnum:]_.-]+)?|golang:${version}\2|g" \
     "$builder_file"
 done
