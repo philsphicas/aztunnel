@@ -114,6 +114,7 @@ Arc AAD SSH Certificate:
   exec" directive so plain "ssh" acquires a certificate automatically. The
   login username (the certificate's first principal) is printed to stderr.
 
+      --resource-id string          ARM resource ID of the Arc-connected machine
       --dir string                  Directory holding this connection's key/cert (point at ~/.ssh/arc/%C)
       --user string                 SSH login name (ssh %r); selects the cached Entra account
       --identity string             Private key path, created if missing (alternative to --dir)
@@ -121,7 +122,7 @@ Arc AAD SSH Certificate:
       --token-cache string          MSAL token cache path for silent renewal
       --client-id string            OAuth public client ID (default Azure CLI)
       --tenant string               Entra ID tenant, or organizations/common (default "organizations")
-      --scope string                Token scope yielding the certificate (default AADSSHLoginForLinux)
+      --scope string                Token scope yielding the certificate (default "ce6ff14a-7fdc-4685-bbe0-f6afdfcfa8e0/.default")
       --min-valid duration          Reuse an existing certificate valid at least this long (default 5m)
 
 Authentication:
