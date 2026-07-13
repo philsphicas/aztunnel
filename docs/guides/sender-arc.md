@@ -116,7 +116,7 @@ Host /subscriptions/*
     UserKnownHostsFile ~/.ssh/arc/%C/known_hosts
     IdentityFile ~/.ssh/arc/%C/id
     CertificateFile ~/.ssh/arc/%C/id-cert.pub
-    Match final exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
+    Match final host "/subscriptions/*" exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
     ProxyCommand aztunnel arc connect --resource-id %n --port %p
 ```
 
@@ -168,6 +168,12 @@ sign-in entirely.
   canonicalized (lowercased), so its `%C` differs from the one ssh uses for
   `IdentityFile`. `final` runs only in the second pass, after canonicalization,
   guaranteeing its `%C` matches the paths ssh actually reads.
+- **Scope the `Match` to `/subscriptions/*` hosts** — a `Match` line ends the
+  preceding `Host` block, so without an explicit `host` criterion the `exec`
+  (and the `ProxyCommand` it guards) would run for _every_ ssh destination,
+  spawning aad-cert — and its Entra sign-in — for unrelated hosts. Placing
+  `host "/subscriptions/*"` before `exec` short-circuits the match so it only
+  runs for Arc resource-ID targets.
 - **No `Hostname` directive** — the `ProxyCommand` uses `%n` (the resource ID)
   to open the relay, and ssh performs no DNS resolution when a `ProxyCommand` is
   set, so no `Hostname` is needed. Omitting it also keeps `%h` equal to the

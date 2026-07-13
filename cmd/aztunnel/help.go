@@ -175,7 +175,7 @@ Examples:
   #       UserKnownHostsFile ~/.ssh/arc/%C/known_hosts
   #       IdentityFile ~/.ssh/arc/%C/id
   #       CertificateFile ~/.ssh/arc/%C/id-cert.pub
-  #       Match final exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
+  #       Match final host "/subscriptions/*" exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
   #       ProxyCommand aztunnel arc connect --resource-id %n --port %p
   # Then: ssh <entra-upn>@/subscriptions/.../machines/myVM
 

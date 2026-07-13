@@ -223,11 +223,38 @@ func TestCertStillValid(t *testing.T) {
 }
 
 func TestEnsureCertRejectsNegativeMinValidity(t *testing.T) {
+	neg := -time.Minute
 	_, err := EnsureCert(t.Context(), Options{
 		Identity:    "unused",
-		MinValidity: -time.Minute,
+		MinValidity: &neg,
 	})
 	if err == nil {
 		t.Fatal("expected negative MinValidity to fail")
+	}
+}
+
+func TestWithDefaultsMinValidity(t *testing.T) {
+	// A nil MinValidity falls back to the package default.
+	unset := Options{}
+	unset.withDefaults()
+	if unset.MinValidity == nil || *unset.MinValidity != DefaultMinValidity {
+		t.Fatalf("unset MinValidity = %v, want %v", unset.MinValidity, DefaultMinValidity)
+	}
+
+	// An explicit zero is preserved so --min-valid=0 reuses any currently-valid
+	// certificate instead of being silently coerced to the default.
+	zero := time.Duration(0)
+	explicitZero := Options{MinValidity: &zero}
+	explicitZero.withDefaults()
+	if explicitZero.MinValidity == nil || *explicitZero.MinValidity != 0 {
+		t.Fatalf("explicit zero MinValidity = %v, want 0", explicitZero.MinValidity)
+	}
+
+	// Any other explicit value is left untouched.
+	custom := 2 * time.Minute
+	explicit := Options{MinValidity: &custom}
+	explicit.withDefaults()
+	if explicit.MinValidity == nil || *explicit.MinValidity != custom {
+		t.Fatalf("explicit MinValidity = %v, want %v", explicit.MinValidity, custom)
 	}
 }

@@ -58,8 +58,10 @@ type Options struct {
 	Scope string
 
 	// MinValidity is the remaining validity a cached cert must have to be
-	// reused (default: DefaultMinValidity).
-	MinValidity time.Duration
+	// reused. A nil value applies DefaultMinValidity; a non-nil value is used
+	// as-is, so a pointer to zero reuses any certificate that is currently
+	// valid (no safety buffer).
+	MinValidity *time.Duration
 
 	// Stderr receives human-facing prompts (e.g. the device-code message).
 	Stderr io.Writer
@@ -78,8 +80,9 @@ func (o *Options) withDefaults() {
 	if o.Scope == "" {
 		o.Scope = DefaultScope
 	}
-	if o.MinValidity == 0 {
-		o.MinValidity = DefaultMinValidity
+	if o.MinValidity == nil {
+		d := DefaultMinValidity
+		o.MinValidity = &d
 	}
 	if o.Stderr == nil {
 		o.Stderr = io.Discard
@@ -94,7 +97,7 @@ func EnsureCert(ctx context.Context, opts Options) (string, error) {
 	if opts.Identity == "" {
 		return "", fmt.Errorf("identity key path is required")
 	}
-	if opts.MinValidity < 0 {
+	if *opts.MinValidity < 0 {
 		return "", fmt.Errorf("minimum certificate validity must not be negative")
 	}
 
@@ -144,7 +147,7 @@ func EnsureCert(ctx context.Context, opts Options) (string, error) {
 // match the requested username.
 func reuseExisting(opts *Options) (string, bool) {
 	cert, err := readCertificate(opts.CertPath)
-	if err != nil || !certStillValid(cert, time.Now(), opts.MinValidity) {
+	if err != nil || !certStillValid(cert, time.Now(), *opts.MinValidity) {
 		return "", false
 	}
 	// A valid certificate is useless without its matching private key.

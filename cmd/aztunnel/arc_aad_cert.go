@@ -58,7 +58,7 @@ func (c *ArcAadCertCmd) Run(globals *Globals, arcCmd *ArcCmd) error {
 		ClientID:       c.ClientID,
 		Tenant:         c.Tenant,
 		Scope:          c.Scope,
-		MinValidity:    c.MinValid,
+		MinValidity:    &c.MinValid,
 		Stderr:         os.Stderr,
 	})
 	if err != nil {

@@ -112,10 +112,11 @@ func TestReuseExistingRejectsMismatchedPrivateKey(t *testing.T) {
 	}
 	run("-s", ca, "-I", "testid", "-n", "alice@contoso.com", "-V", "+1h", id+".pub")
 
+	minValid := time.Minute
 	opts := Options{
 		Identity:    id,
 		CertPath:    id + "-cert.pub",
-		MinValidity: time.Minute,
+		MinValidity: &minValid,
 	}
 	if _, ok := reuseExisting(&opts); !ok {
 		t.Fatal("matching private key and certificate should be reusable")

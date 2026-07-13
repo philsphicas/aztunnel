@@ -224,7 +224,7 @@ Host /subscriptions/*
     UserKnownHostsFile ~/.ssh/arc/%C/known_hosts
     IdentityFile ~/.ssh/arc/%C/id
     CertificateFile ~/.ssh/arc/%C/id-cert.pub
-    Match final exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
+    Match final host "/subscriptions/*" exec "aztunnel arc aad-cert --resource-id %n --user %r --dir ~/.ssh/arc/%C"
     ProxyCommand aztunnel arc connect --resource-id %n --port %p
 ```
 
@@ -233,7 +233,10 @@ Host /subscriptions/*
 argument, aad-cert writes the key and certificate into exactly the directory
 ssh reads from — no path reconstruction on aztunnel's side. `Match final exec`
 (rather than plain `Match exec`) ensures `%C` is computed after the host name is
-canonicalized, so both sides agree.
+canonicalized, so both sides agree. The `host "/subscriptions/*"` criterion
+scopes the match to Arc resource-ID targets: because `Match` ends the preceding
+`Host` block, without it the `exec` would run aad-cert for every ssh
+destination.
 
 Then connect with your Entra ID UPN (aad-cert prints the exact username):
 
