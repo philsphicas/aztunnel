@@ -71,8 +71,9 @@ runs:
             --owner=0 \
             --group=0 \
             --numeric-owner \
-            -czf "dist/${asset}" \
-            -C "$RUNNER_TEMP" "$bundle"
+            -cf - \
+            -C "$RUNNER_TEMP" "$bundle" |
+            gzip -n > "dist/${asset}"
         fi
 
         echo "asset=$asset" >> "$GITHUB_OUTPUT"
