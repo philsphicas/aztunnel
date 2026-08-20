@@ -158,7 +158,10 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
         run: |
           set -euo pipefail
-          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Container build returned an invalid manifest digest: ${DIGEST:-<empty>}."
+            exit 1
+          fi
           printf '%s@%s\n' "$IMAGE" "$DIGEST" > "${{ matrix.id }}.txt"
 
       - name: Upload candidate digest
@@ -259,12 +262,24 @@ jobs:
         working-directory: release-assets
         run: |
           set -euo pipefail
-          [[ "$CHANNEL" == "dev" || "$CHANNEL" == "stable" ]]
-          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CHANNEL" != "dev" && "$CHANNEL" != "stable" ]]; then
+            echo "::error::Channel must be dev or stable, got ${CHANNEL:-<empty>}."
+            exit 1
+          fi
+          if [[ ! "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Commit SHA must be exactly 40 lowercase hexadecimal characters."
+            exit 1
+          fi
           if [[ "$CHANNEL" == "dev" ]]; then
-            [[ "$VERSION" == "dev-${COMMIT_SHA:0:12}" ]]
+            if [[ "$VERSION" != "dev-${COMMIT_SHA:0:12}" ]]; then
+              echo "::error::Development version must be dev-<12-character commit SHA>."
+              exit 1
+            fi
           else
-            [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Stable version must match vMAJOR.MINOR.PATCH exactly."
+              exit 1
+            fi
           fi
 
           files=(
@@ -619,4 +634,6 @@ jobs:
           set -euo pipefail
           if gh release view "$STAGE_TAG" >/dev/null 2>&1; then
             gh release delete "$STAGE_TAG" --yes --cleanup-tag
+          elif git ls-remote --exit-code --refs origin "refs/tags/${STAGE_TAG}" >/dev/null 2>&1; then
+            git push origin ":refs/tags/${STAGE_TAG}"
           fi
