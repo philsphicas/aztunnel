@@ -1,281 +1,78 @@
-name: Release
+name: Stable Release
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
-  build:
+  validate:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
+    outputs:
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.4"
+          go-version-file: go.mod
 
-      - name: Set version
-        id: version
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build
+      - name: Validate stable tag
+        id: release
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
         run: |
-          EXT=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
-          go build -ldflags "-X main.version=${{ steps.version.outputs.version }}" \
-            -o aztunnel-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./cmd/aztunnel
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: aztunnel-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: aztunnel-*
-
-  build-relay:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: windows
-            goarch: amd64
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.4"
-
-      - name: Set version
-        id: version
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Stable release tags must match vMAJOR.MINOR.PATCH exactly."
+            exit 1
           fi
 
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          # Pin workspace explicitly so the build is reproducible
-          # regardless of any ambient GOWORK in the runner.
-          GOWORK: ${{ github.workspace }}/go.work
-        run: |
-          EXT=""
-          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
-          go build -ldflags "-X main.version=${{ steps.version.outputs.version }}" \
-            -o aztunnel-relay-${{ matrix.goos }}-${{ matrix.goarch }}${EXT} ./mockrelay/cmd/aztunnel-relay
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: aztunnel-relay-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: aztunnel-relay-*
-
-  docker:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - variant: ""
-            builder: golang:1-bookworm
-            runtime: scratch
-          - variant: -alpine
-            builder: golang:1-alpine
-            runtime: alpine
-          - variant: -bookworm
-            builder: golang:1-bookworm
-            runtime: debian:bookworm-slim
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set version
-        id: version
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          commit_sha="$(git rev-parse HEAD)"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$commit_sha" origin/main; then
+            echo "::error::Tagged commit ${commit_sha} is not reachable from origin/main."
+            exit 1
+          fi
+          if release_is_draft="$(gh release view "$VERSION" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$release_is_draft" != "true" ]]; then
+              echo "::error::Release ${VERSION} already exists; stable releases are immutable and never overwritten."
+              exit 1
+            fi
+            echo "::notice::A draft release exists for ${VERSION}; publication will resume without overwriting its assets."
           fi
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: suffix=${{ matrix.variant }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-            BUILDER_IMAGE=${{ matrix.builder }}
-            RUNTIME_IMAGE=${{ matrix.runtime }}
-
-  docker-relay:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          # Default (no suffix) mirrors mockrelay/Dockerfile's default:
-          # debian:bookworm-slim runtime. We deliberately skip a
-          # `scratch` variant — aztunnel-relay's --tls auto-self-signed
-          # path uses os.MkdirTemp("", ...) which fails when /tmp is
-          # absent (as it is in scratch).
-          - variant: ""
-            builder: golang:1-bookworm
-            runtime: debian:bookworm-slim
-          - variant: -alpine
-            builder: golang:1-alpine
-            runtime: alpine
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set version
-        id: version
+      - name: Build tagged commit
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=dev-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          fi
+          make build
+          make check-installable
+          make -C mockrelay build
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository }}-relay
-          flavor: suffix=${{ matrix.variant }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/main' }}
+      - name: Test tagged commit
+        run: |
+          go test -count=1 ./...
+          (cd mockrelay && go test -count=1 ./...)
+          (cd e2e && go test -count=1 ./...)
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: mockrelay/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-            BUILDER_IMAGE=${{ matrix.builder }}
-            RUNTIME_IMAGE=${{ matrix.runtime }}
-
-  dev-release:
-    if: github.ref == 'refs/heads/main'
-    needs: [build, build-relay]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Update dev release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: dev
-          name: Development Build
-          prerelease: true
-          make_latest: false
-          body: |
-            Rolling development build from the `main` branch.
-            Updated on every push. **Not a stable release.**
-          files: artifacts/*
-
-  github-release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, build-relay]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-          merge-multiple: true
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          generate_release_notes: true
-          files: artifacts/*
+  release:
+    needs: validate
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      channel: stable
+      version: ${{ needs.validate.outputs.version }}
+      commit_sha: ${{ needs.validate.outputs.commit_sha }}

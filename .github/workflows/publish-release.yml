@@ -1,0 +1,622 @@
+name: Publish Release
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        description: Publication channel (dev or stable)
+        required: true
+        type: string
+      version:
+        description: Version embedded in binaries and asset names
+        required: true
+        type: string
+      commit_sha:
+        description: Full commit SHA to build and publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
+jobs:
+  build-bundles:
+    concurrency:
+      group: >-
+        ${{ inputs.channel == 'dev'
+          && format('dev-bundle-{0}-{1}', matrix.goos, matrix.goarch)
+          || format('stable-bundle-{0}-{1}-{2}', inputs.version, matrix.goos, matrix.goarch) }}
+      cancel-in-progress: ${{ inputs.channel == 'dev' }}
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Package binaries
+        id: package
+        uses: ./.github/actions/package-release
+        with:
+          version: ${{ inputs.version }}
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+
+      - name: Upload packaged binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.asset }}
+          path: dist/${{ steps.package.outputs.asset }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+  build-images:
+    concurrency:
+      group: >-
+        ${{ inputs.channel == 'dev'
+          && format('dev-image-{0}', matrix.id)
+          || format('stable-image-{0}-{1}', inputs.version, matrix.id) }}
+      cancel-in-progress: ${{ inputs.channel == 'dev' }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - id: client-scratch
+            image_suffix: ""
+            variant: ""
+            file: Dockerfile
+            builder: golang:1-bookworm
+            runtime: scratch
+          - id: client-alpine
+            image_suffix: ""
+            variant: -alpine
+            file: Dockerfile
+            builder: golang:1-alpine
+            runtime: alpine
+          - id: client-bookworm
+            image_suffix: ""
+            variant: -bookworm
+            file: Dockerfile
+            builder: golang:1-bookworm
+            runtime: debian:bookworm-slim
+          - id: relay-bookworm
+            image_suffix: -relay
+            variant: ""
+            file: mockrelay/Dockerfile
+            builder: golang:1-bookworm
+            runtime: debian:bookworm-slim
+          - id: relay-alpine
+            image_suffix: -relay
+            variant: -alpine
+            file: mockrelay/Dockerfile
+            builder: golang:1-alpine
+            runtime: alpine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build immutable candidate
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.commit_sha }}${{ matrix.variant }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.commit_sha }}
+            org.opencontainers.image.version=${{ inputs.version }}
+          build-args: |
+            VERSION=${{ inputs.version }}
+            BUILDER_IMAGE=${{ matrix.builder }}
+            RUNTIME_IMAGE=${{ matrix.runtime }}
+
+      - name: Record candidate digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s@%s\n' "$IMAGE" "$DIGEST" > "${{ matrix.id }}.txt"
+
+      - name: Upload candidate digest
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-${{ matrix.id }}
+          path: ${{ matrix.id }}.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [build-bundles, build-images]
+    concurrency:
+      group: ${{ inputs.channel == 'dev' && 'dev-publish' || 'stable-publish' }}
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: write
+      packages: write
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout must precede artifact downloads because checkout cleans untracked files.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Download Linux amd64 bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: aztunnel-${{ inputs.version }}-linux-amd64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download Linux arm64 bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: aztunnel-${{ inputs.version }}-linux-arm64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download macOS amd64 bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: aztunnel-${{ inputs.version }}-darwin-amd64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download macOS arm64 bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: aztunnel-${{ inputs.version }}-darwin-arm64.tar.gz
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download Windows amd64 bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: aztunnel-${{ inputs.version }}-windows-amd64.zip
+          path: release-assets
+          skip-decompress: true
+
+      - name: Download client scratch digest
+        uses: actions/download-artifact@v8
+        with:
+          name: image-client-scratch
+          path: image-refs
+
+      - name: Download client Alpine digest
+        uses: actions/download-artifact@v8
+        with:
+          name: image-client-alpine
+          path: image-refs
+
+      - name: Download client Bookworm digest
+        uses: actions/download-artifact@v8
+        with:
+          name: image-client-bookworm
+          path: image-refs
+
+      - name: Download relay Bookworm digest
+        uses: actions/download-artifact@v8
+        with:
+          name: image-relay-bookworm
+          path: image-refs
+
+      - name: Download relay Alpine digest
+        uses: actions/download-artifact@v8
+        with:
+          name: image-relay-alpine
+          path: image-refs
+
+      - name: Validate inputs and create checksums
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          VERSION: ${{ inputs.version }}
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          [[ "$CHANNEL" == "dev" || "$CHANNEL" == "stable" ]]
+          [[ "$COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          if [[ "$CHANNEL" == "dev" ]]; then
+            [[ "$VERSION" == "dev-${COMMIT_SHA:0:12}" ]]
+          else
+            [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          fi
+
+          files=(
+            "aztunnel-${VERSION}-linux-amd64.tar.gz"
+            "aztunnel-${VERSION}-linux-arm64.tar.gz"
+            "aztunnel-${VERSION}-darwin-amd64.tar.gz"
+            "aztunnel-${VERSION}-darwin-arm64.tar.gz"
+            "aztunnel-${VERSION}-windows-amd64.zip"
+          )
+          sha256sum "${files[@]}" > "aztunnel-${VERSION}-checksums.txt"
+          sha256sum --check "aztunnel-${VERSION}-checksums.txt"
+
+      - name: Require fresh development commit
+        if: inputs.channel == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          latest_successful_sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq ".workflow_runs[0].head_sha"
+          )"
+          if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
+            echo "::error::Refusing stale development commit ${COMMIT_SHA}; newest successful main commit is ${latest_successful_sha}."
+            exit 1
+          fi
+
+      - name: Validate stable publication
+        if: inputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git fetch --force origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+          remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
+          if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
+            echo "::error::Tag ${VERSION} no longer points to ${COMMIT_SHA}."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$COMMIT_SHA" origin/main; then
+            echo "::error::Tagged commit ${COMMIT_SHA} is no longer reachable from origin/main."
+            exit 1
+          fi
+
+          latest_stable_tag="$(
+            git ls-remote --tags --refs origin 'v*' |
+              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
+              sort -V |
+              tail -n1
+          )"
+          if [[ "$VERSION" != "$latest_stable_tag" ]]; then
+            echo "::error::Refusing ${VERSION}; newest strict stable tag is ${latest_stable_tag}."
+            exit 1
+          fi
+
+          if release_is_draft="$(gh release view "$VERSION" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [[ "$release_is_draft" != "true" ]]; then
+              echo "::error::Release ${VERSION} already exists; stable releases are immutable and never overwritten."
+              exit 1
+            fi
+            echo "true" > .stable-draft-exists
+          else
+            echo "false" > .stable-draft-exists
+          fi
+
+      - name: Stage development draft release
+        if: inputs.channel == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          latest_successful_sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq ".workflow_runs[0].head_sha"
+          )"
+          [[ "$COMMIT_SHA" == "$latest_successful_sha" ]]
+
+          files=(
+            "release-assets/aztunnel-${VERSION}-linux-amd64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-linux-arm64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-darwin-amd64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-darwin-arm64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-windows-amd64.zip"
+            "release-assets/aztunnel-${VERSION}-checksums.txt"
+          )
+
+          gh release create "$STAGE_TAG" "${files[@]}" \
+            --target "$COMMIT_SHA" \
+            --title "Staged development build ${VERSION}" \
+            --notes "Private staging release for ${COMMIT_SHA}." \
+            --draft
+
+          for file in "${files[@]}"; do
+            asset="${file##*/}"
+            local_digest="sha256:$(sha256sum "$file" | awk '{print $1}')"
+            remote_digest="$(
+              gh release view "$STAGE_TAG" --json assets \
+                --jq ".assets[] | select(.name == \"${asset}\") | .digest"
+            )"
+            [[ "$local_digest" == "$remote_digest" ]]
+          done
+
+      - name: Stage stable draft release
+        if: inputs.channel == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          files=(
+            "release-assets/aztunnel-${VERSION}-linux-amd64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-linux-arm64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-darwin-amd64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-darwin-arm64.tar.gz"
+            "release-assets/aztunnel-${VERSION}-windows-amd64.zip"
+            "release-assets/aztunnel-${VERSION}-checksums.txt"
+          )
+          if [[ "$(cat .stable-draft-exists)" == "false" ]]; then
+            gh release create "$VERSION" "${files[@]}" \
+              --verify-tag \
+              --draft \
+              --generate-notes \
+              --notes "Built from commit \`${COMMIT_SHA}\`."
+          else
+            mapfile -t existing_assets < <(
+              gh release view "$VERSION" --json assets --jq ".assets[].name"
+            )
+            expected_assets=()
+            for file in "${files[@]}"; do
+              expected_assets+=("${file##*/}")
+            done
+
+            for asset in "${existing_assets[@]}"; do
+              if ! printf '%s\n' "${expected_assets[@]}" | grep -Fxq "$asset"; then
+                echo "::error::Existing draft contains unexpected asset ${asset}; refusing to modify it."
+                exit 1
+              fi
+            done
+            for file in "${files[@]}"; do
+              asset="${file##*/}"
+              if ! printf '%s\n' "${existing_assets[@]}" | grep -Fxq "$asset"; then
+                gh release upload "$VERSION" "$file"
+              fi
+            done
+          fi
+
+          for file in "${files[@]}"; do
+            asset="${file##*/}"
+            local_digest="sha256:$(sha256sum "$file" | awk '{print $1}')"
+            remote_digest="$(
+              gh release view "$VERSION" --json assets \
+                --jq ".assets[] | select(.name == \"${asset}\") | .digest"
+            )"
+            if [[ "$local_digest" != "$remote_digest" ]]; then
+              echo "::error::Draft asset ${asset} does not match the current build; refusing to overwrite it."
+              exit 1
+            fi
+          done
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Promote validated container images
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHANNEL" == "dev" ]]; then
+            latest_successful_sha="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+                --jq ".workflow_runs[0].head_sha"
+            )"
+            [[ "$COMMIT_SHA" == "$latest_successful_sha" ]]
+          else
+            git fetch --force origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+            [[ "$(git rev-parse "${VERSION}^{commit}")" == "$COMMIT_SHA" ]]
+            latest_stable_tag="$(
+              git ls-remote --tags --refs origin 'v*' |
+                awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
+                sort -V |
+                tail -n1
+            )"
+            [[ "$VERSION" == "$latest_stable_tag" ]]
+          fi
+
+          promote() {
+            local source_file="$1"
+            local image="$2"
+            local suffix="$3"
+            local source
+            local tags=()
+            source="$(cat "$source_file")"
+
+            if [[ "$CHANNEL" == "dev" ]]; then
+              tags=("dev${suffix}")
+            else
+              local semver="${VERSION#v}"
+              local minor="${semver%.*}"
+              tags=("${semver}${suffix}" "${minor}${suffix}" "latest${suffix}")
+            fi
+
+            for tag in "${tags[@]}"; do
+              docker buildx imagetools create --tag "${image}:${tag}" "$source"
+              docker buildx imagetools inspect "${image}:${tag}" >/dev/null
+            done
+          }
+
+          promote image-refs/client-scratch.txt "ghcr.io/${GITHUB_REPOSITORY}" ""
+          promote image-refs/client-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}" "-alpine"
+          promote image-refs/client-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}" "-bookworm"
+          promote image-refs/relay-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" ""
+          promote image-refs/relay-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" "-alpine"
+
+      - name: Publish rolling development release
+        if: inputs.channel == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          latest_successful_sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq ".workflow_runs[0].head_sha"
+          )"
+          [[ "$COMMIT_SHA" == "$latest_successful_sha" ]]
+
+          cat > dev-notes.md <<EOF
+          # Development build
+
+          **Version: \`${VERSION}\`**
+          **Commit: \`${COMMIT_SHA}\`**
+
+          This rolling prerelease is built from the latest successfully validated commit on \`main\`.
+          Development builds are short-lived snapshots and receive best-effort support.
+          The bundled \`aztunnel-relay\` is a non-production mock/development relay.
+
+          Publication stages versioned assets before moving the \`dev\` tag and metadata. GitHub
+          Releases and GHCR do not support an atomic transaction, so a failed promotion is surfaced
+          by the workflow and the next fresh run repairs the rolling channel.
+          EOF
+
+          retired_tag="dev-retired-${{ github.run_id }}-${{ github.run_attempt }}"
+          retired_release=false
+          old_dev_sha="$(
+            git ls-remote --refs origin refs/tags/dev |
+              awk 'NR == 1 {print $1}'
+          )"
+          if gh release view dev >/dev/null 2>&1; then
+            gh release edit dev --tag "$retired_tag" --latest=false
+            retired_release=true
+          fi
+
+          rollback() {
+            if [[ -n "$old_dev_sha" ]]; then
+              git tag --force dev "$old_dev_sha"
+              git push --force origin refs/tags/dev
+            else
+              git push origin :refs/tags/dev
+            fi
+            if [[ "$retired_release" == "true" ]] && ! gh release view dev >/dev/null 2>&1; then
+              gh release edit "$retired_tag" \
+                --tag dev \
+                --title "Development Build" \
+                --prerelease \
+                --latest=false
+              if ! git push origin ":refs/tags/${retired_tag}"; then
+                echo "::warning::Development release rollback succeeded, but temporary tag ${retired_tag} needs manual cleanup."
+              fi
+            fi
+          }
+          trap rollback ERR
+
+          git tag --force dev "$COMMIT_SHA"
+          git push --force origin refs/tags/dev
+          gh release edit "$STAGE_TAG" \
+            --tag dev \
+            --verify-tag \
+            --target "$COMMIT_SHA" \
+            --title "Development Build" \
+            --notes-file dev-notes.md \
+            --draft=false \
+            --prerelease \
+            --latest=false
+
+          trap - ERR
+          if [[ "$retired_release" == "true" ]]; then
+            gh release delete "$retired_tag" --yes --cleanup-tag
+          fi
+
+      - name: Publish stable release
+        if: inputs.channel == 'stable'
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+          remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
+          if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
+            echo "::error::Tag ${VERSION} moved before the draft release could be published."
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$COMMIT_SHA" origin/main
+          latest_stable_tag="$(
+            git ls-remote --tags --refs origin 'v*' |
+              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
+              sort -V |
+              tail -n1
+          )"
+          if [[ "$VERSION" != "$latest_stable_tag" ]]; then
+            echo "::error::A newer stable tag (${latest_stable_tag}) appeared before publication."
+            exit 1
+          fi
+
+          gh release edit "$VERSION" \
+            --draft=false \
+            --prerelease=false \
+            --latest
+
+      - name: Clean up development staging release
+        if: always() && inputs.channel == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if gh release view "$STAGE_TAG" >/dev/null 2>&1; then
+            gh release delete "$STAGE_TAG" --yes --cleanup-tag
+          fi

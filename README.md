@@ -49,13 +49,22 @@ make install      # installs to $GOPATH/bin
 docker run --rm ghcr.io/philsphicas/aztunnel:dev --help
 ```
 
+Stable releases use semantic-version tags such as `:0.3.0`, the rolling
+minor tag `:0.3`, and `:latest`. The `:dev` channel tracks the latest
+successfully validated commit on `main`; it is a best-effort development
+snapshot rather than a supported stable release.
+
 Image variants:
 
-| Tag               | Base                   | Description                   |
-| ----------------- | ---------------------- | ----------------------------- |
-| `:dev`, `:latest` | `scratch`              | Static binary, smallest image |
-| `:dev-alpine`     | `alpine`               | Includes shell and apk        |
-| `:dev-bookworm`   | `debian:bookworm-slim` | Includes bash and apt         |
+| Stable / development tag                                | Base                   | Description                   |
+| ------------------------------------------------------- | ---------------------- | ----------------------------- |
+| `:latest`, `:0.3.0` / `:dev`                            | `scratch`              | Static binary, smallest image |
+| `:latest-alpine`, `:0.3.0-alpine` / `:dev-alpine`       | `alpine`               | Includes shell and apk        |
+| `:latest-bookworm`, `:0.3.0-bookworm` / `:dev-bookworm` | `debian:bookworm-slim` | Includes bash and apt         |
+
+The separate `ghcr.io/philsphicas/aztunnel-relay` image keeps its existing
+Bookworm default and Alpine variant. `aztunnel-relay` is a mock/development
+relay and is not supported for production use.
 
 Build locally:
 
@@ -63,6 +72,23 @@ Build locally:
 make docker            # scratch (default)
 make docker-alpine     # alpine variant
 make docker-bookworm   # bookworm variant
+```
+
+### Release bundles
+
+[Stable releases](https://github.com/philsphicas/aztunnel/releases/latest)
+and the rolling [`dev` prerelease](https://github.com/philsphicas/aztunnel/releases/tag/dev)
+provide Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 bundles.
+Unix bundles are `.tar.gz` archives that preserve executable permissions;
+Windows bundles are `.zip` archives. Each bundle contains `aztunnel`,
+the non-production `aztunnel-relay`, `README.md`, `LICENSE`, and a relay
+support notice.
+
+Each release also includes `aztunnel-<version>-checksums.txt`. Verify a
+download from the directory containing the bundle and manifest with:
+
+```sh
+sha256sum --check aztunnel-<version>-checksums.txt
 ```
 
 ## Prerequisites

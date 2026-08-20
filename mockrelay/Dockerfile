@@ -25,7 +25,7 @@ RUN go mod download
 COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=${CGO_ENABLED} go build -trimpath \
-    -ldflags "-X main.version=${VERSION}" \
+    -ldflags "-s -w -X main.version=${VERSION}" \
     -o /aztunnel-relay ./mockrelay/cmd/aztunnel-relay
 
 FROM ${RUNTIME_IMAGE}
