@@ -84,24 +84,24 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12
+          version: v2.13.1
 
       - name: golangci-lint (mockrelay)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12
+          version: v2.13.1
           working-directory: mockrelay
 
       - name: golangci-lint (e2e)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12
+          version: v2.13.1
           working-directory: e2e
 
       - name: golangci-lint (e2e/infra)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12
+          version: v2.13.1
           working-directory: e2e/infra
 
   vulncheck:

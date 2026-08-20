@@ -56,11 +56,11 @@ snapshot rather than a supported stable release.
 
 Image variants:
 
-| Stable / development tag                                | Base                   | Description                   |
-| ------------------------------------------------------- | ---------------------- | ----------------------------- |
-| `:latest`, `:0.3.0` / `:dev`                            | `scratch`              | Static binary, smallest image |
-| `:latest-alpine`, `:0.3.0-alpine` / `:dev-alpine`       | `alpine`               | Includes shell and apk        |
-| `:latest-bookworm`, `:0.3.0-bookworm` / `:dev-bookworm` | `debian:bookworm-slim` | Includes bash and apt         |
+| Stable / development tag                                                 | Base                   | Description                   |
+| ------------------------------------------------------------------------ | ---------------------- | ----------------------------- |
+| `:latest`, `:0.3`, `:0.3.0` / `:dev`                                     | `scratch`              | Static binary, smallest image |
+| `:latest-alpine`, `:0.3-alpine`, `:0.3.0-alpine` / `:dev-alpine`         | `alpine`               | Includes shell and apk        |
+| `:latest-bookworm`, `:0.3-bookworm`, `:0.3.0-bookworm` / `:dev-bookworm` | `debian:bookworm-slim` | Includes bash and apt         |
 
 The separate `ghcr.io/philsphicas/aztunnel-relay` image keeps its existing
 Bookworm default and Alpine variant. `aztunnel-relay` is a mock/development
