@@ -364,7 +364,10 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
               --jq ".workflow_runs[0].head_sha"
           )"
-          [[ "$COMMIT_SHA" == "$latest_successful_sha" ]]
+          if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
+            echo "::error::Development commit ${COMMIT_SHA} became stale before draft staging; newest successful main commit is ${latest_successful_sha}."
+            exit 1
+          fi
 
           files=(
             "release-assets/aztunnel-${VERSION}-linux-amd64.tar.gz"
@@ -473,17 +476,27 @@ jobs:
                 "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
                 --jq ".workflow_runs[0].head_sha"
             )"
-            [[ "$COMMIT_SHA" == "$latest_successful_sha" ]]
+            if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
+              echo "::error::Development commit ${COMMIT_SHA} became stale before image promotion; newest successful main commit is ${latest_successful_sha}."
+              exit 1
+            fi
           else
             git fetch --force origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
-            [[ "$(git rev-parse "${VERSION}^{commit}")" == "$COMMIT_SHA" ]]
+            remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
+            if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
+              echo "::error::Tag ${VERSION} moved from ${COMMIT_SHA} to ${remote_tag_commit} before image promotion."
+              exit 1
+            fi
             latest_stable_tag="$(
               git ls-remote --tags --refs origin 'v*' |
                 awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
                 sort -V |
                 tail -n1
             )"
-            [[ "$VERSION" == "$latest_stable_tag" ]]
+            if [[ "$VERSION" != "$latest_stable_tag" ]]; then
+              echo "::error::A newer stable tag (${latest_stable_tag}) superseded ${VERSION} before image promotion."
+              exit 1
+            fi
           fi
 
           promote() {
@@ -528,7 +541,10 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
               --jq ".workflow_runs[0].head_sha"
           )"
-          [[ "$COMMIT_SHA" == "$latest_successful_sha" ]]
+          if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
+            echo "::error::Development commit ${COMMIT_SHA} became stale before release promotion; newest successful main commit is ${latest_successful_sha}."
+            exit 1
+          fi
 
           cat > dev-notes.md <<EOF
           # Development build

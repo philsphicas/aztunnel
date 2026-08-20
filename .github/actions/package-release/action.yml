@@ -58,7 +58,7 @@ runs:
 
         if [[ "$TARGET_OS" == "windows" ]]; then
           asset="${bundle}.zip"
-          find "$stage" -exec touch -t 198001010000 {} +
+          TZ=UTC find "$stage" -exec touch -t 198001010000 {} +
           (
             cd "$RUNNER_TEMP"
             zip -X -q -r "${GITHUB_WORKSPACE}/dist/${asset}" "$bundle"
