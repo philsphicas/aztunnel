@@ -568,6 +568,12 @@ jobs:
               awk 'NR == 1 {print $1}'
           )"
           if gh release view dev >/dev/null 2>&1; then
+            if [[ -z "$old_dev_sha" ]]; then
+              echo "::error::The dev release exists, but refs/tags/dev does not; refusing an unsafe release swap."
+              exit 1
+            fi
+            git tag --force "$retired_tag" "$old_dev_sha"
+            git push origin "refs/tags/${retired_tag}"
             gh release edit dev --tag "$retired_tag" --latest=false
             retired_release=true
           fi
