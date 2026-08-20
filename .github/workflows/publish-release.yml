@@ -89,31 +89,31 @@ jobs:
             image_suffix: ""
             variant: ""
             file: Dockerfile
-            builder: golang:1-bookworm
+            builder: golang:1.27-bookworm
             runtime: scratch
           - id: client-alpine
             image_suffix: ""
             variant: -alpine
             file: Dockerfile
-            builder: golang:1-alpine
+            builder: golang:1.27-alpine
             runtime: alpine
           - id: client-bookworm
             image_suffix: ""
             variant: -bookworm
             file: Dockerfile
-            builder: golang:1-bookworm
+            builder: golang:1.27-bookworm
             runtime: debian:bookworm-slim
           - id: relay-bookworm
             image_suffix: -relay
             variant: ""
             file: mockrelay/Dockerfile
-            builder: golang:1-bookworm
+            builder: golang:1.27-bookworm
             runtime: debian:bookworm-slim
           - id: relay-alpine
             image_suffix: -relay
             variant: -alpine
             file: mockrelay/Dockerfile
-            builder: golang:1-alpine
+            builder: golang:1.27-alpine
             runtime: alpine
     runs-on: ubuntu-latest
     steps:

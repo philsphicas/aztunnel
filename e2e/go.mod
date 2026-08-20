@@ -11,7 +11,7 @@
 // e2e/infra/ to isolate Microsoft Graph and GitHub-API deps even further.
 module github.com/philsphicas/aztunnel/e2e
 
-go 1.26.4
+go 1.27.0
 
 replace github.com/philsphicas/aztunnel => ../
 
@@ -46,6 +46,6 @@ require (
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
