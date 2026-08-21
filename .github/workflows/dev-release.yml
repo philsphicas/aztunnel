@@ -65,4 +65,4 @@ jobs:
       version: ${{ needs.prepare.outputs.version }}
       commit_sha: ${{ needs.prepare.outputs.commit_sha }}
     secrets:
-      RELEASE_REF_TOKEN: ${{ secrets.RELEASE_REF_TOKEN }}
+      GH_AUTOMATION_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}

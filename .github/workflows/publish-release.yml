@@ -16,8 +16,8 @@ on:
         required: true
         type: string
     secrets:
-      RELEASE_REF_TOKEN:
-        description: Dev-only fine-grained PAT for workflow-bearing git refs
+      GH_AUTOMATION_TOKEN:
+        description: Fine-grained PAT shared by updater automation and dev git refs
         required: false
 
 permissions:
@@ -371,12 +371,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
           PROBE_TAG: dev-ref-probe-${{ github.run_id }}-${{ github.run_attempt }}
-          REF_TOKEN: ${{ secrets.RELEASE_REF_TOKEN }}
+          REF_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
           RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if [[ -z "$REF_TOKEN" ]]; then
-            echo "::error::RELEASE_REF_TOKEN is required for development publication. Configure a fine-grained aztunnel repository PAT with Contents and Workflows read/write permissions."
+            echo "::error::GH_AUTOMATION_TOKEN is required for development publication. Configure the rotated fine-grained aztunnel automation PAT with Contents and Workflows read/write permissions."
             exit 1
           fi
           export -n REF_TOKEN
@@ -645,14 +645,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
-          REF_TOKEN: ${{ secrets.RELEASE_REF_TOKEN }}
+          REF_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
           RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
           STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [[ -z "$REF_TOKEN" ]]; then
-            echo "::error::RELEASE_REF_TOKEN is required for development publication."
+            echo "::error::GH_AUTOMATION_TOKEN is required for development publication."
             exit 1
           fi
           export -n REF_TOKEN
@@ -944,7 +944,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PROBE_TAG: dev-ref-probe-${{ github.run_id }}-${{ github.run_attempt }}
-          REF_TOKEN: ${{ secrets.RELEASE_REF_TOKEN }}
+          REF_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
           RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
           STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
@@ -956,7 +956,7 @@ jobs:
             local tag="$1"
             if git ls-remote --exit-code --refs origin "refs/tags/${tag}" >/dev/null 2>&1; then
               if [[ -z "$REF_TOKEN" ]]; then
-                echo "::error::RELEASE_REF_TOKEN is required to delete refs/tags/${tag}."
+                echo "::error::GH_AUTOMATION_TOKEN is required to delete refs/tags/${tag}."
                 return 1
               fi
               GH_TOKEN="$REF_TOKEN" gh api --method DELETE \
