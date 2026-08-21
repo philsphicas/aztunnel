@@ -15,6 +15,10 @@ on:
         description: Full commit SHA to build and publish
         required: true
         type: string
+    secrets:
+      RELEASE_REF_TOKEN:
+        description: Dev-only fine-grained PAT for workflow-bearing git refs
+        required: false
 
 permissions:
   contents: read
@@ -198,6 +202,7 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download Linux amd64 bundle
         uses: actions/download-artifact@v8
@@ -365,8 +370,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
+          PROBE_TAG: dev-ref-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          REF_TOKEN: ${{ secrets.RELEASE_REF_TOKEN }}
+          RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          if [[ -z "$REF_TOKEN" ]]; then
+            echo "::error::RELEASE_REF_TOKEN is required for development publication. Configure a fine-grained aztunnel repository PAT with Contents and Workflows read/write permissions."
+            exit 1
+          fi
+          export -n REF_TOKEN
+
           remote_tag_commit() {
             local tag="$1"
             git ls-remote --tags origin \
@@ -376,6 +390,30 @@ jobs:
                 $2 !~ /\^\{\}$/ { direct = $1 }
                 END { print peeled != "" ? peeled : direct }
               '
+          }
+          ref_exists() {
+            git ls-remote --exit-code --refs origin "$1" >/dev/null 2>&1
+          }
+          create_ref() {
+            local ref="$1"
+            local sha="$2"
+            GH_TOKEN="$REF_TOKEN" gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="$ref" \
+              -f sha="$sha" >/dev/null
+          }
+          update_ref() {
+            local ref="$1"
+            local sha="$2"
+            GH_TOKEN="$REF_TOKEN" gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" \
+              -f sha="$sha" \
+              -F force=true >/dev/null
+          }
+          delete_ref() {
+            local ref="$1"
+            GH_TOKEN="$REF_TOKEN" gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" >/dev/null
           }
 
           latest_successful_sha="$(
@@ -389,11 +427,6 @@ jobs:
           fi
 
           old_dev_sha="$(remote_tag_commit dev)"
-          retired_sha="$(remote_tag_commit dev-retired)"
-          if [[ -z "$retired_sha" ]]; then
-            echo "::error::Permanent tag refs/tags/dev-retired is missing. Create it once with maintainer credentials at the current dev commit, then rerun a fresh Development Release."
-            exit 1
-          fi
           if [[ -z "$old_dev_sha" ]]; then
             echo "::error::The rolling channel requires an existing refs/tags/dev tag; refusing an unsafe release swap."
             exit 1
@@ -409,22 +442,40 @@ jobs:
             echo "::error::The dev GitHub Release targets ${old_release_target}, but refs/tags/dev points to ${old_dev_sha}; refusing an unsafe release swap."
             exit 1
           fi
-          if gh release view dev-retired >/dev/null 2>&1; then
-            echo "::error::A dev-retired GitHub Release already exists. Restore or remove that interrupted retirement before rerunning publication; never delete the permanent git tag."
+          if gh release view "$RETIRED_TAG" >/dev/null 2>&1 ||
+            ref_exists "refs/tags/${RETIRED_TAG}" ||
+            ref_exists "refs/tags/${PROBE_TAG}"; then
+            echo "::error::Development publication refs for this run already exist; clean up the interrupted run before retrying."
             exit 1
           fi
 
-          # PATCH can only update the pre-created ref; unlike a push, it cannot
-          # accidentally create a workflow-bearing tag with GITHUB_TOKEN.
-          gh api --method PATCH \
-            "repos/${GITHUB_REPOSITORY}/git/refs/tags/dev-retired" \
-            -f sha="$old_dev_sha" \
-            -F force=true >/dev/null
-          updated_retired_sha="$(remote_tag_commit dev-retired)"
+          probe_created=false
+          cleanup_probe() {
+            status=$?
+            trap - EXIT
+            if [[ "$probe_created" == "true" ]] &&
+              ! delete_ref "refs/tags/${PROBE_TAG}"; then
+              echo "::warning::Permission probe cleanup failed for refs/tags/${PROBE_TAG}; delete it manually."
+            fi
+            exit "$status"
+          }
+          trap cleanup_probe EXIT
+
+          # Exercise create, workflow-bearing update, and delete permissions
+          # before staging a release or changing any final channel image tag.
+          create_ref "refs/tags/${PROBE_TAG}" "$COMMIT_SHA"
+          probe_created=true
+          update_ref "refs/tags/${PROBE_TAG}" "$old_dev_sha"
+          delete_ref "refs/tags/${PROBE_TAG}"
+          probe_created=false
+
+          create_ref "refs/tags/${RETIRED_TAG}" "$old_dev_sha"
+          updated_retired_sha="$(remote_tag_commit "$RETIRED_TAG")"
           if [[ "$updated_retired_sha" != "$old_dev_sha" ]]; then
-            echo "::error::refs/tags/dev-retired did not update to the current dev commit ${old_dev_sha}."
+            echo "::error::refs/tags/${RETIRED_TAG} did not resolve to the current dev commit ${old_dev_sha}."
             exit 1
           fi
+          trap - EXIT
 
           printf '%s\n' "$old_dev_sha" > .dev-old-sha
           printf '%s\n' "$old_release_id" > .dev-old-release-id
@@ -594,10 +645,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
+          REF_TOKEN: ${{ secrets.RELEASE_REF_TOKEN }}
+          RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
           STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          if [[ -z "$REF_TOKEN" ]]; then
+            echo "::error::RELEASE_REF_TOKEN is required for development publication."
+            exit 1
+          fi
+          export -n REF_TOKEN
           latest_successful_sha="$(
             gh api \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
@@ -631,6 +689,10 @@ jobs:
           done
           old_dev_sha="$(cat .dev-old-sha)"
           old_release_id="$(cat .dev-old-release-id)"
+          if ! git ls-remote --exit-code --refs origin "refs/tags/${RETIRED_TAG}" >/dev/null 2>&1; then
+            echo "::error::Required retirement ref refs/tags/${RETIRED_TAG} is missing. Rerun the complete Development Release workflow."
+            exit 1
+          fi
           stage_release_id="$(
             gh release view "$STAGE_TAG" --json databaseId --jq .databaseId
           )"
@@ -682,6 +744,19 @@ jobs:
 
           images_mutated=false
           publication_complete=false
+          delete_ref() {
+            local ref="$1"
+            GH_TOKEN="$REF_TOKEN" gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" >/dev/null
+          }
+          update_ref() {
+            local ref="$1"
+            local sha="$2"
+            GH_TOKEN="$REF_TOKEN" gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" \
+              -f sha="$sha" \
+              -F force=true >/dev/null
+          }
           rollback() {
             original_status="$1"
             set +e
@@ -721,10 +796,7 @@ jobs:
               fi
             fi
 
-            if ! gh api --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/git/refs/tags/dev" \
-              -f sha="$old_dev_sha" \
-              -F force=true >/dev/null; then
+            if ! update_ref "refs/tags/dev" "$old_dev_sha"; then
               echo "::error::Failed to restore refs/tags/dev to ${old_dev_sha}; manual tag repair is required."
               rollback_incomplete=true
             else
@@ -740,10 +812,10 @@ jobs:
 
             if [[ "$release_already_intact" != "true" ]]; then
               retired_release_id="$(
-                gh release view dev-retired --json databaseId --jq .databaseId 2>/dev/null
+                gh release view "$RETIRED_TAG" --json databaseId --jq .databaseId 2>/dev/null
               )"
               if [[ "$retired_release_id" == "$old_release_id" ]]; then
-                if ! gh release edit dev-retired \
+                if ! gh release edit "$RETIRED_TAG" \
                   --tag dev \
                   --title "Development Build" \
                   --prerelease \
@@ -752,7 +824,7 @@ jobs:
                   rollback_incomplete=true
                 fi
               else
-                echo "::error::The captured GitHub Release ${old_release_id} is not available at dev or dev-retired; manual release repair is required."
+                echo "::error::The captured GitHub Release ${old_release_id} is not available at dev or ${RETIRED_TAG}; manual release repair is required."
                 rollback_incomplete=true
               fi
             fi
@@ -762,6 +834,14 @@ jobs:
             )"
             if [[ "$restored_release_id" != "$old_release_id" ]]; then
               echo "::error::The dev GitHub Release was not restored to captured release ${old_release_id}; manual release repair is required."
+              rollback_incomplete=true
+            fi
+            if gh release view "$RETIRED_TAG" >/dev/null 2>&1; then
+              echo "::error::Retaining refs/tags/${RETIRED_TAG} because the retired GitHub Release still needs it for manual recovery."
+              rollback_incomplete=true
+            elif git ls-remote --exit-code --refs origin "refs/tags/${RETIRED_TAG}" >/dev/null 2>&1 &&
+              ! delete_ref "refs/tags/${RETIRED_TAG}"; then
+              echo "::error::Failed to delete rollback ref refs/tags/${RETIRED_TAG}; manual ref cleanup is required."
               rollback_incomplete=true
             fi
             if [[ "$rollback_incomplete" == "true" ]]; then
@@ -779,11 +859,8 @@ jobs:
           }
           trap on_exit EXIT
 
-          gh release edit dev --tag dev-retired --latest=false
-          gh api --method PATCH \
-            "repos/${GITHUB_REPOSITORY}/git/refs/tags/dev" \
-            -f sha="$COMMIT_SHA" \
-            -F force=true >/dev/null
+          gh release edit dev --tag "$RETIRED_TAG" --latest=false
+          update_ref "refs/tags/dev" "$COMMIT_SHA"
           gh release edit "$STAGE_TAG" \
             --tag dev \
             --verify-tag \
@@ -814,8 +891,12 @@ jobs:
           # failure leaves the new channel published plus a removable old release,
           # so rolling back after this point would be less safe than reporting it.
           publication_complete=true
-          if ! gh release delete dev-retired --yes; then
-            echo "::error::The new development channel is published, but the retired GitHub Release could not be deleted. Delete only the dev-retired release manually; keep refs/tags/dev-retired."
+          if ! gh release delete "$RETIRED_TAG" --yes; then
+            echo "::error::The new development channel is published, but retired GitHub Release ${RETIRED_TAG} could not be deleted."
+            exit 1
+          fi
+          if ! delete_ref "refs/tags/${RETIRED_TAG}"; then
+            echo "::error::The new development channel is published, but refs/tags/${RETIRED_TAG} could not be deleted."
             exit 1
           fi
 
@@ -855,12 +936,32 @@ jobs:
         if: always() && inputs.channel == 'dev'
         env:
           GH_TOKEN: ${{ github.token }}
+          PROBE_TAG: dev-ref-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          REF_TOKEN: ${{ secrets.RELEASE_REF_TOKEN }}
+          RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
           STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          if [[ -n "$REF_TOKEN" ]]; then
+            export -n REF_TOKEN
+          fi
+          delete_ref_if_present() {
+            local tag="$1"
+            if git ls-remote --exit-code --refs origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              if [[ -z "$REF_TOKEN" ]]; then
+                echo "::error::RELEASE_REF_TOKEN is required to delete refs/tags/${tag}."
+                return 1
+              fi
+              GH_TOKEN="$REF_TOKEN" gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" >/dev/null
+            fi
+          }
+
           if gh release view "$STAGE_TAG" >/dev/null 2>&1; then
             gh release delete "$STAGE_TAG" --yes
           fi
-          if git ls-remote --exit-code --refs origin "refs/tags/${STAGE_TAG}" >/dev/null 2>&1; then
-            git push origin ":refs/tags/${STAGE_TAG}"
+          delete_ref_if_present "$STAGE_TAG"
+          delete_ref_if_present "$PROBE_TAG"
+          if ! gh release view "$RETIRED_TAG" >/dev/null 2>&1; then
+            delete_ref_if_present "$RETIRED_TAG"
           fi
