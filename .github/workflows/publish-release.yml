@@ -367,6 +367,17 @@ jobs:
           COMMIT_SHA: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
+          remote_tag_commit() {
+            local tag="$1"
+            git ls-remote --tags origin \
+              "refs/tags/${tag}" "refs/tags/${tag}^{}" |
+              awk '
+                $2 ~ /\^\{\}$/ { peeled = $1 }
+                $2 !~ /\^\{\}$/ { direct = $1 }
+                END { print peeled != "" ? peeled : direct }
+              '
+          }
+
           latest_successful_sha="$(
             gh api \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
@@ -377,14 +388,8 @@ jobs:
             exit 1
           fi
 
-          old_dev_sha="$(
-            git ls-remote --refs origin refs/tags/dev |
-              awk 'NR == 1 {print $1}'
-          )"
-          retired_sha="$(
-            git ls-remote --refs origin refs/tags/dev-retired |
-              awk 'NR == 1 {print $1}'
-          )"
+          old_dev_sha="$(remote_tag_commit dev)"
+          retired_sha="$(remote_tag_commit dev-retired)"
           if [[ -z "$retired_sha" ]]; then
             echo "::error::Permanent tag refs/tags/dev-retired is missing. Create it once with maintainer credentials at the current dev commit, then rerun a fresh Development Release."
             exit 1
@@ -415,10 +420,7 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/git/refs/tags/dev-retired" \
             -f sha="$old_dev_sha" \
             -F force=true >/dev/null
-          updated_retired_sha="$(
-            git ls-remote --refs origin refs/tags/dev-retired |
-              awk 'NR == 1 {print $1}'
-          )"
+          updated_retired_sha="$(remote_tag_commit dev-retired)"
           if [[ "$updated_retired_sha" != "$old_dev_sha" ]]; then
             echo "::error::refs/tags/dev-retired did not update to the current dev commit ${old_dev_sha}."
             exit 1
@@ -543,7 +545,6 @@ jobs:
         if: inputs.channel == 'stable'
         env:
           COMMIT_SHA: ${{ inputs.commit_sha }}
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -622,6 +623,12 @@ jobs:
           by the workflow and the next fresh run repairs the rolling channel.
           EOF
 
+          for state_file in .dev-old-sha .dev-old-release-id; do
+            if [[ ! -s "$state_file" ]]; then
+              echo "::error::Required release-swap state ${state_file} is missing. Rerun the complete Development Release workflow instead of retrying this step in isolation."
+              exit 1
+            fi
+          done
           old_dev_sha="$(cat .dev-old-sha)"
           old_release_id="$(cat .dev-old-release-id)"
           stage_release_id="$(
