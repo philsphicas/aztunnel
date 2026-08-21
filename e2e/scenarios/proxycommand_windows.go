@@ -3,6 +3,8 @@ package scenarios
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
@@ -39,18 +41,26 @@ func runSSHCommand(ctx context.Context, args, env []string, successMarker []byte
 
 	select {
 	case err := <-done:
-		if output.Found() {
-			return output.Bytes(), nil
-		}
-		return output.Bytes(), err
+		return sshCommandResult(output, err)
 	case <-output.found:
 		_ = cmd.Process.Kill()
 		<-done
 		return output.Bytes(), nil
 	case <-ctx.Done():
 		err := <-done
-		return output.Bytes(), err
+		return sshCommandResult(output, errors.Join(ctx.Err(), err))
 	}
+}
+
+func sshCommandResult(output *markerBuffer, err error) ([]byte, error) {
+	data := output.Bytes()
+	if output.Found() {
+		return data, nil
+	}
+	if err != nil {
+		return data, fmt.Errorf("ssh exited before success marker %q: %w", output.marker, err)
+	}
+	return data, fmt.Errorf("ssh exited before success marker %q", output.marker)
 }
 
 type markerBuffer struct {
