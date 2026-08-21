@@ -42,7 +42,7 @@ func repoRoot() (string, error) {
 	for {
 		modPath := filepath.Join(dir, "go.mod")
 		if data, err := os.ReadFile(modPath); err == nil {
-			if bytes.Contains(data, []byte("module github.com/philsphicas/aztunnel\n")) {
+			if isAztunnelModule(data) {
 				return dir, nil
 			}
 		}
@@ -51,6 +51,39 @@ func repoRoot() (string, error) {
 			return "", errors.New("repo root not found")
 		}
 		dir = parent
+	}
+}
+
+func isAztunnelModule(data []byte) bool {
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == "module github.com/philsphicas/aztunnel" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestIsAztunnelModule(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		data string
+		want bool
+	}{
+		"LF":             {"module github.com/philsphicas/aztunnel\n\ngo 1.27\n", true},
+		"CRLF":           {"module github.com/philsphicas/aztunnel\r\n\r\ngo 1.27\r\n", true},
+		"surrounding ws": {"  module github.com/philsphicas/aztunnel  \r\n", true},
+		"other module":   {"module example.com/aztunnel\n", false},
+		"comment only":   {"// module github.com/philsphicas/aztunnel\n", false},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := isAztunnelModule([]byte(tt.data)); got != tt.want {
+				t.Fatalf("isAztunnelModule() = %t, want %t", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -327,7 +360,7 @@ func buildAztunnelBinary() error {
 			buildErr = fmt.Errorf("locate repo root: %w", err)
 			return
 		}
-		builtBinary = filepath.Join(root, "bin", "aztunnel")
+		builtBinary = filepath.Join(root, "bin", aztunnelBinaryName(runtime.GOOS))
 		cmd := exec.Command("go", "build", "-o", builtBinary, "./cmd/aztunnel")
 		cmd.Dir = root
 		out, err := cmd.CombinedOutput()
@@ -336,6 +369,34 @@ func buildAztunnelBinary() error {
 		}
 	})
 	return buildErr
+}
+
+func aztunnelBinaryName(goos string) string {
+	if goos == "windows" {
+		return "aztunnel.exe"
+	}
+	return "aztunnel"
+}
+
+func TestAztunnelBinaryName(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		goos string
+		want string
+	}{
+		"windows": {"windows", "aztunnel.exe"},
+		"linux":   {"linux", "aztunnel"},
+		"darwin":  {"darwin", "aztunnel"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := aztunnelBinaryName(tt.goos); got != tt.want {
+				t.Fatalf("aztunnelBinaryName(%q) = %q, want %q", tt.goos, got, tt.want)
+			}
+		})
+	}
 }
 
 // aztunnelBinary returns the path to the pre-built aztunnel binary.

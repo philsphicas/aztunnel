@@ -11,8 +11,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -486,7 +484,7 @@ func ScenarioSSH_ProxyCommand(t *testing.T, b Backend) {
 	if !ok {
 		t.Skipf("SSH ProxyCommand: %s backend's Tunnel does not expose SSHProxyCommand", b.Name())
 	}
-	proxyCmdStr := joinShellSafe(proxyArgs)
+	proxyCmdStr := joinProxyCommand(proxyArgs)
 
 	host, port, err := net.SplitHostPort(sshd.Addr())
 	if err != nil {
@@ -497,6 +495,7 @@ func ScenarioSSH_ProxyCommand(t *testing.T, b Backend) {
 		"-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ProxyCommand=" + proxyCmdStr,
 		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=yes",
 		"-p", port,
 		"-i", sshd.HostKeyPath(),
 		fmt.Sprintf("e2etest@%s", host),
@@ -504,9 +503,7 @@ func ScenarioSSH_ProxyCommand(t *testing.T, b Backend) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ssh", args...) //nolint:gosec // test-controlled args
-	cmd.Env = append(os.Environ(), proxyExtraEnv...)
-	out, err := cmd.CombinedOutput()
+	out, err := runSSHCommand(ctx, args, append(os.Environ(), proxyExtraEnv...), []byte("tunnel-works"))
 	if err != nil {
 		t.Fatalf("ssh failed: %v\noutput: %s", err, out)
 	}
@@ -572,29 +569,4 @@ func ScenarioSOCKS5_DistinctTargets(t *testing.T, b Backend) {
 	for err := range errs {
 		t.Error(err)
 	}
-}
-
-// joinShellSafe joins argv with spaces, single-quoting any element
-// that contains shell-significant characters so ssh's ProxyCommand
-// (parsed by /bin/sh -c) preserves the elements as-is. The ssh
-// ProxyCommand option is the only callsite; production code uses
-// os/exec which does not need this.
-func joinShellSafe(argv []string) string {
-	var sb strings.Builder
-	for i, a := range argv {
-		if i > 0 {
-			sb.WriteByte(' ')
-		}
-		// %h / %p are sshd format substitutions and stay
-		// unquoted; anything else with a metacharacter gets
-		// single-quoted.
-		if strings.ContainsAny(a, " \t\"\\$`") || strings.Contains(a, "'") {
-			sb.WriteByte('\'')
-			sb.WriteString(strings.ReplaceAll(a, "'", `'\''`))
-			sb.WriteByte('\'')
-		} else {
-			sb.WriteString(a)
-		}
-	}
-	return sb.String()
 }

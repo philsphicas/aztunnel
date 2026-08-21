@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -17,7 +16,7 @@ import (
 
 // sshServer is a minimal in-process SSH server used by
 // ScenarioSSH_ProxyCommand. It accepts pubkey auth with a generated
-// key pair and runs every exec request through /bin/sh -c locally.
+// key pair and runs every exec request through the platform shell.
 type sshServer struct {
 	addr    string
 	keyPath string
@@ -140,7 +139,7 @@ func handleSSHSession(ch ssh.Channel, reqs <-chan *ssh.Request) {
 		command := string(req.Payload[4 : 4+cmdLen])
 		_ = req.Reply(true, nil)
 
-		cmd := exec.Command("sh", "-c", command) //nolint:gosec // test fixture: ssh server runs only in scenarios
+		cmd := newShellCommand(command)
 		cmd.Stdout = ch
 		cmd.Stderr = ch.Stderr()
 		cmd.Stdin = ch
