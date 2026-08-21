@@ -15,6 +15,10 @@ on:
         description: Full commit SHA to build and publish
         required: true
         type: string
+    secrets:
+      GH_AUTOMATION_TOKEN:
+        description: Fine-grained PAT shared by updater automation and dev git refs
+        required: false
 
 permissions:
   contents: read
@@ -198,6 +202,7 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download Linux amd64 bundle
         uses: actions/download-artifact@v8
@@ -360,6 +365,141 @@ jobs:
             echo "false" > .stable-draft-exists
           fi
 
+      - name: Prepare development release swap
+        if: inputs.channel == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          PROBE_TAG: dev-ref-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          REF_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
+          STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$REF_TOKEN" ]]; then
+            echo "::error::GH_AUTOMATION_TOKEN is required for development publication. Configure the rotated fine-grained aztunnel automation PAT with Contents and Workflows read/write permissions."
+            exit 1
+          fi
+          export -n REF_TOKEN
+
+          remote_tag_commit() {
+            local tag="$1"
+            git ls-remote --tags origin \
+              "refs/tags/${tag}" "refs/tags/${tag}^{}" |
+              awk '
+                $2 ~ /\^\{\}$/ { peeled = $1 }
+                $2 !~ /\^\{\}$/ { direct = $1 }
+                END { print peeled != "" ? peeled : direct }
+              '
+          }
+          ref_exists() {
+            git ls-remote --exit-code --refs origin "$1" >/dev/null 2>&1
+          }
+          create_ref() {
+            local ref="$1"
+            local sha="$2"
+            GH_TOKEN="$REF_TOKEN" gh api --method POST \
+              "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="$ref" \
+              -f sha="$sha" >/dev/null
+          }
+          update_ref() {
+            local ref="$1"
+            local sha="$2"
+            GH_TOKEN="$REF_TOKEN" gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" \
+              -f sha="$sha" \
+              -F force=true >/dev/null
+          }
+          delete_ref() {
+            local ref="$1"
+            GH_TOKEN="$REF_TOKEN" gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" >/dev/null
+          }
+
+          latest_successful_sha="$(
+            gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
+              --jq ".workflow_runs[0].head_sha"
+          )"
+          if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
+            echo "::error::Development commit ${COMMIT_SHA} became stale before release preparation; newest successful main commit is ${latest_successful_sha}."
+            exit 1
+          fi
+
+          old_dev_sha="$(remote_tag_commit dev)"
+          if [[ -z "$old_dev_sha" ]]; then
+            echo "::error::The rolling channel requires an existing refs/tags/dev tag; refusing an unsafe release swap."
+            exit 1
+          fi
+          if ! old_release_id="$(gh release view dev --json databaseId --jq .databaseId 2>/dev/null)"; then
+            echo "::error::refs/tags/dev exists, but the dev GitHub Release does not; refusing an unsafe release swap."
+            exit 1
+          fi
+          old_release_target="$(
+            gh release view dev --json targetCommitish --jq .targetCommitish
+          )"
+          if [[ "$old_release_target" != "$old_dev_sha" ]]; then
+            echo "::error::The dev GitHub Release targets ${old_release_target}, but refs/tags/dev points to ${old_dev_sha}; refusing an unsafe release swap."
+            exit 1
+          fi
+          if gh release view "$STAGE_TAG" >/dev/null 2>&1 ||
+            gh release view "$RETIRED_TAG" >/dev/null 2>&1 ||
+            ref_exists "refs/tags/${STAGE_TAG}" ||
+            ref_exists "refs/tags/${RETIRED_TAG}" ||
+            ref_exists "refs/tags/${PROBE_TAG}"; then
+            echo "::error::Development publication release or refs for this run already exist; clean up the interrupted run before retrying."
+            exit 1
+          fi
+
+          probe_created=false
+          stage_created=false
+          retired_created=false
+          cleanup_preflight_refs() {
+            status=$?
+            trap - EXIT
+            for created_ref in \
+              "${probe_created}|${PROBE_TAG}" \
+              "${stage_created}|${STAGE_TAG}" \
+              "${retired_created}|${RETIRED_TAG}"; do
+              IFS='|' read -r created tag <<< "$created_ref"
+              if [[ "$created" == "true" ]] &&
+                ! delete_ref "refs/tags/${tag}"; then
+                echo "::warning::Preflight cleanup failed for refs/tags/${tag}; delete it manually."
+              fi
+            done
+            exit "$status"
+          }
+          trap cleanup_preflight_refs EXIT
+
+          # Exercise create, workflow-bearing update, and delete permissions
+          # before staging a release or changing any final channel image tag.
+          create_ref "refs/tags/${PROBE_TAG}" "$old_dev_sha"
+          probe_created=true
+          update_ref "refs/tags/${PROBE_TAG}" "$COMMIT_SHA"
+          delete_ref "refs/tags/${PROBE_TAG}"
+          probe_created=false
+
+          create_ref "refs/tags/${STAGE_TAG}" "$COMMIT_SHA"
+          stage_created=true
+          stage_sha="$(remote_tag_commit "$STAGE_TAG")"
+          if [[ "$stage_sha" != "$COMMIT_SHA" ]]; then
+            echo "::error::refs/tags/${STAGE_TAG} did not resolve to development commit ${COMMIT_SHA}."
+            exit 1
+          fi
+
+          create_ref "refs/tags/${RETIRED_TAG}" "$old_dev_sha"
+          retired_created=true
+          updated_retired_sha="$(remote_tag_commit "$RETIRED_TAG")"
+          if [[ "$updated_retired_sha" != "$old_dev_sha" ]]; then
+            echo "::error::refs/tags/${RETIRED_TAG} did not resolve to the current dev commit ${old_dev_sha}."
+            exit 1
+          fi
+          trap - EXIT
+
+          printf '%s\n' "$old_dev_sha" > .dev-old-sha
+          printf '%s\n' "$old_release_id" > .dev-old-release-id
+
       - name: Stage development draft release
         if: inputs.channel == 'dev'
         env:
@@ -389,7 +529,7 @@ jobs:
           )
 
           gh release create "$STAGE_TAG" "${files[@]}" \
-            --target "$COMMIT_SHA" \
+            --verify-tag \
             --title "Staged development build ${VERSION}" \
             --notes "Private staging release for ${COMMIT_SHA}." \
             --draft
@@ -472,41 +612,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Promote validated container images
+      - name: Promote validated stable container images
+        if: inputs.channel == 'stable'
         env:
-          CHANNEL: ${{ inputs.channel }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [[ "$CHANNEL" == "dev" ]]; then
-            latest_successful_sha="$(
-              gh api \
-                "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
-                --jq ".workflow_runs[0].head_sha"
-            )"
-            if [[ "$COMMIT_SHA" != "$latest_successful_sha" ]]; then
-              echo "::error::Development commit ${COMMIT_SHA} became stale before image promotion; newest successful main commit is ${latest_successful_sha}."
-              exit 1
-            fi
-          else
-            git fetch --force origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
-            remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
-            if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
-              echo "::error::Tag ${VERSION} moved from ${COMMIT_SHA} to ${remote_tag_commit} before image promotion."
-              exit 1
-            fi
-            latest_stable_tag="$(
-              git ls-remote --tags --refs origin 'v*' |
-                awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
-                sort -V |
-                tail -n1
-            )"
-            if [[ "$VERSION" != "$latest_stable_tag" ]]; then
-              echo "::error::A newer stable tag (${latest_stable_tag}) superseded ${VERSION} before image promotion."
-              exit 1
-            fi
+          git fetch --force origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+          remote_tag_commit="$(git rev-parse "${VERSION}^{commit}")"
+          if [[ "$remote_tag_commit" != "$COMMIT_SHA" ]]; then
+            echo "::error::Tag ${VERSION} moved from ${COMMIT_SHA} to ${remote_tag_commit} before image promotion."
+            exit 1
+          fi
+          latest_stable_tag="$(
+            git ls-remote --tags --refs origin 'v*' |
+              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
+              sort -V |
+              tail -n1
+          )"
+          if [[ "$VERSION" != "$latest_stable_tag" ]]; then
+            echo "::error::A newer stable tag (${latest_stable_tag}) superseded ${VERSION} before image promotion."
+            exit 1
           fi
 
           promote() {
@@ -517,13 +644,9 @@ jobs:
             local tags=()
             source="$(cat "$source_file")"
 
-            if [[ "$CHANNEL" == "dev" ]]; then
-              tags=("dev${suffix}")
-            else
-              local semver="${VERSION#v}"
-              local minor="${semver%.*}"
-              tags=("${semver}${suffix}" "${minor}${suffix}" "latest${suffix}")
-            fi
+            local semver="${VERSION#v}"
+            local minor="${semver%.*}"
+            tags=("${semver}${suffix}" "${minor}${suffix}" "latest${suffix}")
 
             for tag in "${tags[@]}"; do
               docker buildx imagetools create --tag "${image}:${tag}" "$source"
@@ -537,15 +660,22 @@ jobs:
           promote image-refs/relay-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" ""
           promote image-refs/relay-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" "-alpine"
 
-      - name: Publish rolling development release
+      - name: Publish rolling development channel
         if: inputs.channel == 'dev'
         env:
           GH_TOKEN: ${{ github.token }}
           COMMIT_SHA: ${{ inputs.commit_sha }}
+          REF_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
           STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          if [[ -z "$REF_TOKEN" ]]; then
+            echo "::error::GH_AUTOMATION_TOKEN is required for development publication."
+            exit 1
+          fi
+          export -n REF_TOKEN
           latest_successful_sha="$(
             gh api \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=1" \
@@ -571,45 +701,193 @@ jobs:
           by the workflow and the next fresh run repairs the rolling channel.
           EOF
 
-          retired_tag="dev-retired-${{ github.run_id }}-${{ github.run_attempt }}"
-          retired_release=false
-          old_dev_sha="$(
-            git ls-remote --refs origin refs/tags/dev |
-              awk 'NR == 1 {print $1}'
-          )"
-          if gh release view dev >/dev/null 2>&1; then
-            if [[ -z "$old_dev_sha" ]]; then
-              echo "::error::The dev release exists, but refs/tags/dev does not; refusing an unsafe release swap."
+          for state_file in .dev-old-sha .dev-old-release-id; do
+            if [[ ! -s "$state_file" ]]; then
+              echo "::error::Required release-swap state ${state_file} is missing. Rerun the complete Development Release workflow instead of retrying this step in isolation."
               exit 1
             fi
-            git tag --force "$retired_tag" "$old_dev_sha"
-            git push origin "refs/tags/${retired_tag}"
-            gh release edit dev --tag "$retired_tag" --latest=false
-            retired_release=true
+          done
+          old_dev_sha="$(cat .dev-old-sha)"
+          old_release_id="$(cat .dev-old-release-id)"
+          if ! git ls-remote --exit-code --refs origin "refs/tags/${RETIRED_TAG}" >/dev/null 2>&1; then
+            echo "::error::Required retirement ref refs/tags/${RETIRED_TAG} is missing. Rerun the complete Development Release workflow."
+            exit 1
+          fi
+          stage_release_id="$(
+            gh release view "$STAGE_TAG" --json databaseId --jq .databaseId
+          )"
+          if [[ -z "$stage_release_id" ]]; then
+            echo "::error::Staged development release ${STAGE_TAG} has no database ID."
+            exit 1
           fi
 
-          rollback() {
-            if [[ -n "$old_dev_sha" ]]; then
-              git tag --force dev "$old_dev_sha"
-              git push --force origin refs/tags/dev
-            else
-              git push origin :refs/tags/dev
+          images=(
+            "ghcr.io/${GITHUB_REPOSITORY}|dev|image-refs/client-scratch.txt"
+            "ghcr.io/${GITHUB_REPOSITORY}|dev-alpine|image-refs/client-alpine.txt"
+            "ghcr.io/${GITHUB_REPOSITORY}|dev-bookworm|image-refs/client-bookworm.txt"
+            "ghcr.io/${GITHUB_REPOSITORY}-relay|dev|image-refs/relay-bookworm.txt"
+            "ghcr.io/${GITHUB_REPOSITORY}-relay|dev-alpine|image-refs/relay-alpine.txt"
+          )
+          inspect_digest() {
+            local reference="$1"
+            local context="$2"
+            local inspect_output
+            local digest
+            if ! inspect_output="$(docker buildx imagetools inspect "$reference" 2>&1)"; then
+              echo "::error::Failed to inspect ${context} ${reference}: ${inspect_output}" >&2
+              return 1
             fi
-            if [[ "$retired_release" == "true" ]] && ! gh release view dev >/dev/null 2>&1; then
-              gh release edit "$retired_tag" \
-                --tag dev \
-                --title "Development Build" \
-                --prerelease \
-                --latest=false
-              if ! git push origin ":refs/tags/${retired_tag}"; then
-                echo "::warning::Development release rollback succeeded, but temporary tag ${retired_tag} needs manual cleanup."
+            digest="$(
+              awk '$1 == "Digest:" {print $2; exit}' <<< "$inspect_output"
+            )"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Inspecting ${context} ${reference} returned invalid digest ${digest:-<empty>}." >&2
+              return 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
+          snapshots=()
+          for entry in "${images[@]}"; do
+            IFS='|' read -r image tag source_file <<< "$entry"
+            if ! digest="$(inspect_digest "${image}:${tag}" "existing rolling image")"; then
+              echo "::error::Cannot snapshot existing ${image}:${tag}; refusing to mutate the rolling channel."
+              exit 1
+            fi
+            snapshots+=("${image}|${tag}|${digest}")
+            source="$(cat "$source_file")"
+            if [[ ! "$source" =~ ^ghcr\.io/.+@sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Candidate reference in ${source_file} is invalid."
+              exit 1
+            fi
+          done
+
+          images_mutated=false
+          publication_complete=false
+          delete_ref() {
+            local ref="$1"
+            GH_TOKEN="$REF_TOKEN" gh api --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" >/dev/null
+          }
+          update_ref() {
+            local ref="$1"
+            local sha="$2"
+            GH_TOKEN="$REF_TOKEN" gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/git/${ref}" \
+              -f sha="$sha" \
+              -F force=true >/dev/null
+          }
+          remote_tag_commit() {
+            local tag="$1"
+            git ls-remote --tags origin \
+              "refs/tags/${tag}" "refs/tags/${tag}^{}" |
+              awk '
+                $2 ~ /\^\{\}$/ { peeled = $1 }
+                $2 !~ /\^\{\}$/ { direct = $1 }
+                END { print peeled != "" ? peeled : direct }
+              '
+          }
+          rollback() {
+            original_status="$1"
+            set +e
+            rollback_incomplete=false
+            echo "::warning::Development publication failed; restoring the captured rolling channel state."
+
+            if [[ "$images_mutated" == "true" ]]; then
+              for snapshot in "${snapshots[@]}"; do
+                IFS='|' read -r image tag digest <<< "$snapshot"
+                if ! docker buildx imagetools create --tag "${image}:${tag}" "${image}@${digest}"; then
+                  echo "::error::Failed to restore ${image}:${tag} to ${digest}; manual GHCR repair is required."
+                  rollback_incomplete=true
+                  continue
+                fi
+                if ! restored_digest="$(inspect_digest "${image}:${tag}" "restored image")"; then
+                  echo "::error::Failed to verify restored ${image}:${tag}; manual GHCR repair is required."
+                  rollback_incomplete=true
+                  continue
+                fi
+                if [[ "$restored_digest" != "$digest" ]]; then
+                  echo "::error::Restored ${image}:${tag} digest ${restored_digest:-<empty>} does not match captured digest ${digest}; manual GHCR repair is required."
+                  rollback_incomplete=true
+                fi
+              done
+            fi
+
+            current_dev_release_id="$(
+              gh release view dev --json databaseId --jq .databaseId 2>/dev/null
+            )"
+            release_already_intact=false
+            if [[ "$current_dev_release_id" == "$old_release_id" ]]; then
+              release_already_intact=true
+            elif [[ "$current_dev_release_id" == "$stage_release_id" ]]; then
+              if ! gh release delete dev --yes; then
+                echo "::error::Failed to remove the new dev release during rollback; manual GitHub Release repair is required."
+                rollback_incomplete=true
               fi
             fi
-          }
-          trap rollback ERR
 
-          git tag --force dev "$COMMIT_SHA"
-          git push --force origin refs/tags/dev
+            if ! update_ref "refs/tags/dev" "$old_dev_sha"; then
+              echo "::error::Failed to restore refs/tags/dev to ${old_dev_sha}; manual tag repair is required."
+              rollback_incomplete=true
+            else
+              restored_dev_sha="$(remote_tag_commit dev)"
+              if [[ "$restored_dev_sha" != "$old_dev_sha" ]]; then
+                echo "::error::Restored refs/tags/dev points to ${restored_dev_sha:-<missing>} instead of ${old_dev_sha}; manual tag repair is required."
+                rollback_incomplete=true
+              fi
+            fi
+
+            if [[ "$release_already_intact" != "true" ]]; then
+              retired_release_id="$(
+                gh release view "$RETIRED_TAG" --json databaseId --jq .databaseId 2>/dev/null
+              )"
+              if [[ "$retired_release_id" == "$old_release_id" ]]; then
+                if ! gh release edit "$RETIRED_TAG" \
+                  --tag dev \
+                  --title "Development Build" \
+                  --prerelease \
+                  --latest=false; then
+                  echo "::error::Failed to restore the retired GitHub Release to dev; manual release repair is required."
+                  rollback_incomplete=true
+                fi
+              else
+                echo "::error::The captured GitHub Release ${old_release_id} is not available at dev or ${RETIRED_TAG}; manual release repair is required."
+                rollback_incomplete=true
+              fi
+            fi
+
+            restored_release_id="$(
+              gh release view dev --json databaseId --jq .databaseId 2>/dev/null
+            )"
+            if [[ "$restored_release_id" != "$old_release_id" ]]; then
+              echo "::error::The dev GitHub Release was not restored to captured release ${old_release_id}; manual release repair is required."
+              rollback_incomplete=true
+            fi
+            if gh release view "$RETIRED_TAG" >/dev/null 2>&1; then
+              echo "::error::Retaining refs/tags/${RETIRED_TAG} because the retired GitHub Release still needs it for manual recovery."
+              rollback_incomplete=true
+            elif git ls-remote --exit-code --refs origin "refs/tags/${RETIRED_TAG}" >/dev/null 2>&1 &&
+              ! delete_ref "refs/tags/${RETIRED_TAG}"; then
+              echo "::error::Failed to delete rollback ref refs/tags/${RETIRED_TAG}; manual ref cleanup is required."
+              rollback_incomplete=true
+            fi
+            if [[ "$rollback_incomplete" == "true" ]]; then
+              echo "::error::Development rollback was incomplete; repair every error above before publishing again."
+            fi
+            exit "$original_status"
+          }
+          on_exit() {
+            status=$?
+            trap - EXIT
+            if [[ "$status" -ne 0 && "$publication_complete" != "true" ]]; then
+              rollback "$status"
+            fi
+            exit "$status"
+          }
+          trap on_exit EXIT
+
+          gh release edit dev --tag "$RETIRED_TAG" --latest=false
+          update_ref "refs/tags/dev" "$COMMIT_SHA"
           gh release edit "$STAGE_TAG" \
             --tag dev \
             --verify-tag \
@@ -620,9 +898,33 @@ jobs:
             --prerelease \
             --latest=false
 
-          trap - ERR
-          if [[ "$retired_release" == "true" ]]; then
-            gh release delete "$retired_tag" --yes --cleanup-tag
+          for entry in "${images[@]}"; do
+            IFS='|' read -r image tag source_file <<< "$entry"
+            source="$(cat "$source_file")"
+            images_mutated=true
+            docker buildx imagetools create --tag "${image}:${tag}" "$source"
+            if ! promoted_digest="$(inspect_digest "${image}:${tag}" "promoted image")"; then
+              echo "::error::Cannot verify promoted ${image}:${tag}; rolling back the development channel."
+              exit 1
+            fi
+            expected_digest="${source##*@}"
+            if [[ "$promoted_digest" != "$expected_digest" ]]; then
+              echo "::error::Promoted ${image}:${tag} digest ${promoted_digest:-<empty>} does not match candidate ${expected_digest}."
+              exit 1
+            fi
+          done
+
+          # The channel is coherent now. Retired-release deletion is cleanup:
+          # failure leaves the new channel published plus a removable old release,
+          # so rolling back after this point would be less safe than reporting it.
+          publication_complete=true
+          if ! gh release delete "$RETIRED_TAG" --yes; then
+            echo "::error::The new development channel is published, but retired GitHub Release ${RETIRED_TAG} could not be deleted."
+            exit 1
+          fi
+          if ! delete_ref "refs/tags/${RETIRED_TAG}"; then
+            echo "::error::The new development channel is published, but refs/tags/${RETIRED_TAG} could not be deleted."
+            exit 1
           fi
 
       - name: Publish stable release
@@ -661,11 +963,32 @@ jobs:
         if: always() && inputs.channel == 'dev'
         env:
           GH_TOKEN: ${{ github.token }}
+          PROBE_TAG: dev-ref-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          REF_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
           STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          if [[ -n "$REF_TOKEN" ]]; then
+            export -n REF_TOKEN
+          fi
+          delete_ref_if_present() {
+            local tag="$1"
+            if git ls-remote --exit-code --refs origin "refs/tags/${tag}" >/dev/null 2>&1; then
+              if [[ -z "$REF_TOKEN" ]]; then
+                echo "::error::GH_AUTOMATION_TOKEN is required to delete refs/tags/${tag}."
+                return 1
+              fi
+              GH_TOKEN="$REF_TOKEN" gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}" >/dev/null
+            fi
+          }
+
           if gh release view "$STAGE_TAG" >/dev/null 2>&1; then
-            gh release delete "$STAGE_TAG" --yes --cleanup-tag
-          elif git ls-remote --exit-code --refs origin "refs/tags/${STAGE_TAG}" >/dev/null 2>&1; then
-            git push origin ":refs/tags/${STAGE_TAG}"
+            gh release delete "$STAGE_TAG" --yes
+          fi
+          delete_ref_if_present "$STAGE_TAG"
+          delete_ref_if_present "$PROBE_TAG"
+          if ! gh release view "$RETIRED_TAG" >/dev/null 2>&1; then
+            delete_ref_if_present "$RETIRED_TAG"
           fi
