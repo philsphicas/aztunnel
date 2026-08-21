@@ -666,10 +666,11 @@ jobs:
           done
 
           images_mutated=false
+          publication_complete=false
           rollback() {
-            status=$?
-            trap - ERR
+            original_status="$1"
             set +e
+            rollback_incomplete=false
             echo "::warning::Development publication failed; restoring the captured rolling channel state."
 
             if [[ "$images_mutated" == "true" ]]; then
@@ -677,6 +678,16 @@ jobs:
                 IFS='|' read -r image tag digest <<< "$snapshot"
                 if ! docker buildx imagetools create --tag "${image}:${tag}" "${image}@${digest}"; then
                   echo "::error::Failed to restore ${image}:${tag} to ${digest}; manual GHCR repair is required."
+                  rollback_incomplete=true
+                  continue
+                fi
+                restored_digest="$(
+                  docker buildx imagetools inspect "${image}:${tag}" |
+                    awk '$1 == "Digest:" {print $2; exit}'
+                )"
+                if [[ "$restored_digest" != "$digest" ]]; then
+                  echo "::error::Restored ${image}:${tag} digest ${restored_digest:-<empty>} does not match captured digest ${digest}; manual GHCR repair is required."
+                  rollback_incomplete=true
                 fi
               done
             fi
@@ -687,6 +698,7 @@ jobs:
             if [[ "$current_dev_release_id" == "$stage_release_id" ]]; then
               if ! gh release delete dev --yes; then
                 echo "::error::Failed to remove the new dev release during rollback; manual GitHub Release repair is required."
+                rollback_incomplete=true
               fi
             fi
 
@@ -695,6 +707,16 @@ jobs:
               -f sha="$old_dev_sha" \
               -F force=true >/dev/null; then
               echo "::error::Failed to restore refs/tags/dev to ${old_dev_sha}; manual tag repair is required."
+              rollback_incomplete=true
+            else
+              restored_dev_sha="$(
+                git ls-remote --refs origin refs/tags/dev |
+                  awk 'NR == 1 {print $1}'
+              )"
+              if [[ "$restored_dev_sha" != "$old_dev_sha" ]]; then
+                echo "::error::Restored refs/tags/dev points to ${restored_dev_sha:-<missing>} instead of ${old_dev_sha}; manual tag repair is required."
+                rollback_incomplete=true
+              fi
             fi
 
             retired_release_id="$(
@@ -707,11 +729,34 @@ jobs:
                 --prerelease \
                 --latest=false; then
                 echo "::error::Failed to restore the retired GitHub Release to dev; manual release repair is required."
+                rollback_incomplete=true
               fi
+            else
+              echo "::error::The captured GitHub Release ${old_release_id} is not available at dev-retired; manual release repair is required."
+              rollback_incomplete=true
+            fi
+
+            restored_release_id="$(
+              gh release view dev --json databaseId --jq .databaseId 2>/dev/null
+            )"
+            if [[ "$restored_release_id" != "$old_release_id" ]]; then
+              echo "::error::The dev GitHub Release was not restored to captured release ${old_release_id}; manual release repair is required."
+              rollback_incomplete=true
+            fi
+            if [[ "$rollback_incomplete" == "true" ]]; then
+              echo "::error::Development rollback was incomplete; repair every error above before publishing again."
+            fi
+            exit "$original_status"
+          }
+          on_exit() {
+            status=$?
+            trap - EXIT
+            if [[ "$status" -ne 0 && "$publication_complete" != "true" ]]; then
+              rollback "$status"
             fi
             exit "$status"
           }
-          trap rollback ERR
+          trap on_exit EXIT
 
           gh release edit dev --tag dev-retired --latest=false
           gh api --method PATCH \
@@ -744,7 +789,10 @@ jobs:
             fi
           done
 
-          trap - ERR
+          # The channel is coherent now. Retired-release deletion is cleanup:
+          # failure leaves the new channel published plus a removable old release,
+          # so rolling back after this point would be less safe than reporting it.
+          publication_complete=true
           if ! gh release delete dev-retired --yes; then
             echo "::error::The new development channel is published, but the retired GitHub Release could not be deleted. Delete only the dev-retired release manually; keep refs/tags/dev-retired."
             exit 1
