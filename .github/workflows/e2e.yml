@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -21,6 +22,9 @@ concurrency:
 jobs:
   e2e-mock:
     name: E2E (mock)
+    # Only maintainers can apply labels. skip-e2e is a deliberate PR-only
+    # exemption and can never suppress push-to-main or manual E2E runs.
+    if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'skip-e2e')
     runs-on: ubuntu-latest
     # The mock backend does not need OIDC; explicitly drop
     # id-token: write so PR-supplied code (`make build` /
@@ -56,6 +60,9 @@ jobs:
 
   e2e-azure:
     name: E2E (azure / ${{ matrix.auth }})
+    # Keep this condition identical to e2e-mock so the required aggregator
+    # can distinguish a deliberate full skip from a partial/unexplained skip.
+    if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'skip-e2e')
     runs-on: ubuntu-latest
     environment: e2e-azure
     # Parallelism strategy: split the Azure suite along the existing
@@ -139,11 +146,21 @@ jobs:
     if: always()
     steps:
       - name: Check matrix results
+        env:
+          LABELED_SKIP: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'skip-e2e') }}
         run: |
           mock="${{ needs.e2e-mock.result }}"
           azure="${{ needs.e2e-azure.result }}"
           echo "e2e-mock: $mock"
           echo "e2e-azure: $azure"
+          if [ "$LABELED_SKIP" = "true" ]; then
+            if [ "$mock" = "skipped" ] && [ "$azure" = "skipped" ]; then
+              echo "maintainer-applied skip-e2e label: both underlying jobs skipped"
+              exit 0
+            fi
+            echo "::error::skip-e2e requires both jobs to be skipped (mock=$mock, azure=$azure)"
+            exit 1
+          fi
           if [ "$mock" != "success" ] || [ "$azure" != "success" ]; then
             echo "::error::e2e matrix not green (mock=$mock, azure=$azure)"
             exit 1
