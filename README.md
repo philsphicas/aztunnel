@@ -1,7 +1,6 @@
 # aztunnel
 
 [![CI](https://github.com/philsphicas/aztunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/philsphicas/aztunnel/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/philsphicas/aztunnel)](https://goreportcard.com/report/github.com/philsphicas/aztunnel)
 [![Go Reference](https://pkg.go.dev/badge/github.com/philsphicas/aztunnel.svg)](https://pkg.go.dev/github.com/philsphicas/aztunnel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
