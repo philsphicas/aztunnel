@@ -646,14 +646,29 @@ jobs:
             "ghcr.io/${GITHUB_REPOSITORY}-relay|dev|image-refs/relay-bookworm.txt"
             "ghcr.io/${GITHUB_REPOSITORY}-relay|dev-alpine|image-refs/relay-alpine.txt"
           )
+          inspect_digest() {
+            local reference="$1"
+            local context="$2"
+            local inspect_output
+            local digest
+            if ! inspect_output="$(docker buildx imagetools inspect "$reference" 2>&1)"; then
+              echo "::error::Failed to inspect ${context} ${reference}: ${inspect_output}" >&2
+              return 1
+            fi
+            digest="$(
+              awk '$1 == "Digest:" {print $2; exit}' <<< "$inspect_output"
+            )"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Inspecting ${context} ${reference} returned invalid digest ${digest:-<empty>}." >&2
+              return 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
           snapshots=()
           for entry in "${images[@]}"; do
             IFS='|' read -r image tag source_file <<< "$entry"
-            digest="$(
-              docker buildx imagetools inspect "${image}:${tag}" |
-                awk '$1 == "Digest:" {print $2; exit}'
-            )"
-            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            if ! digest="$(inspect_digest "${image}:${tag}" "existing rolling image")"; then
               echo "::error::Cannot snapshot existing ${image}:${tag}; refusing to mutate the rolling channel."
               exit 1
             fi
@@ -681,10 +696,11 @@ jobs:
                   rollback_incomplete=true
                   continue
                 fi
-                restored_digest="$(
-                  docker buildx imagetools inspect "${image}:${tag}" |
-                    awk '$1 == "Digest:" {print $2; exit}'
-                )"
+                if ! restored_digest="$(inspect_digest "${image}:${tag}" "restored image")"; then
+                  echo "::error::Failed to verify restored ${image}:${tag}; manual GHCR repair is required."
+                  rollback_incomplete=true
+                  continue
+                fi
                 if [[ "$restored_digest" != "$digest" ]]; then
                   echo "::error::Restored ${image}:${tag} digest ${restored_digest:-<empty>} does not match captured digest ${digest}; manual GHCR repair is required."
                   rollback_incomplete=true
@@ -783,10 +799,10 @@ jobs:
             source="$(cat "$source_file")"
             images_mutated=true
             docker buildx imagetools create --tag "${image}:${tag}" "$source"
-            promoted_digest="$(
-              docker buildx imagetools inspect "${image}:${tag}" |
-                awk '$1 == "Digest:" {print $2; exit}'
-            )"
+            if ! promoted_digest="$(inspect_digest "${image}:${tag}" "promoted image")"; then
+              echo "::error::Cannot verify promoted ${image}:${tag}; rolling back the development channel."
+              exit 1
+            fi
             expected_digest="${source##*@}"
             if [[ "$promoted_digest" != "$expected_digest" ]]; then
               echo "::error::Promoted ${image}:${tag} digest ${promoted_digest:-<empty>} does not match candidate ${expected_digest}."
