@@ -21,6 +21,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/philsphicas/aztunnel/e2e/azrelay"
 )
@@ -388,6 +389,12 @@ type logBuffer struct {
 	waiters []logWaiter
 }
 
+const (
+	waitForLogTailBytes = 64 * 1024
+	waitForLogTailLines = 200
+	logTailTruncated    = "...[truncated]...\n"
+)
+
 type logWaiter struct {
 	substr string
 	ch     chan string
@@ -431,6 +438,49 @@ func (lb *logBuffer) String() string {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	return strings.Join(lb.lines, "\n")
+}
+
+// tailSnapshot returns a bounded suffix of the captured output, including an
+// incomplete final line. It prefers whole lines when trimming by bytes and
+// always starts at a UTF-8 boundary when one oversized line must be sliced.
+func (lb *logBuffer) tailSnapshot(maxBytes, maxLines int) string {
+	if maxBytes <= 0 || maxLines <= 0 {
+		return ""
+	}
+
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	recordCount := len(lb.lines)
+	if lb.partial != "" {
+		recordCount++
+	}
+	start := max(recordCount-maxLines, 0)
+	records := make([]string, 0, recordCount-start)
+	for i := start; i < len(lb.lines); i++ {
+		records = append(records, lb.lines[i])
+	}
+	if lb.partial != "" {
+		records = append(records, lb.partial)
+	}
+
+	snapshot := strings.Join(records, "\n")
+	if len(snapshot) <= maxBytes {
+		return snapshot
+	}
+	if maxBytes <= len(logTailTruncated) {
+		return logTailTruncated[:maxBytes]
+	}
+
+	suffixBytes := maxBytes - len(logTailTruncated)
+	cut := len(snapshot) - suffixBytes
+	for cut < len(snapshot) && !utf8.RuneStart(snapshot[cut]) {
+		cut++
+	}
+	if newline := strings.IndexByte(snapshot[cut:], '\n'); newline >= 0 {
+		cut += newline + 1
+	}
+	return logTailTruncated + snapshot[cut:]
 }
 
 // waitFor blocks until a log line containing substr appears, or times out.
@@ -583,9 +633,54 @@ func waitForLog(t testing.TB, proc *aztunnelProcess, substr string, timeout time
 	t.Helper()
 	line, ok := proc.logs.waitFor(substr, timeout)
 	if !ok {
-		t.Fatalf("timed out waiting for log: %q\n--- process logs ---\n%s", substr, proc.logs.String())
+		t.Fatalf("timed out waiting for log: %q\n--- process log tail ---\n%s",
+			substr, proc.logs.tailSnapshot(waitForLogTailBytes, waitForLogTailLines))
 	}
 	return line
+}
+
+func TestLogBufferTailSnapshotIncludesPartialLine(t *testing.T) {
+	var logs logBuffer
+	if _, err := logs.Write([]byte("complete\npartial")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if got, want := logs.tailSnapshot(1024, 10), "complete\npartial"; got != want {
+		t.Fatalf("tailSnapshot() = %q, want %q", got, want)
+	}
+}
+
+func TestLogBufferTailSnapshotBoundsLines(t *testing.T) {
+	var logs logBuffer
+	if _, err := logs.Write([]byte("oldest\nolder\nnewest\npartial")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	if got, want := logs.tailSnapshot(1024, 2), "newest\npartial"; got != want {
+		t.Fatalf("tailSnapshot() = %q, want %q", got, want)
+	}
+}
+
+func TestLogBufferTailSnapshotBoundsBytesAndPreservesUTF8(t *testing.T) {
+	var logs logBuffer
+	if _, err := logs.Write([]byte(strings.Repeat("x", 64) + "\n最新の診断")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	const maxBytes = 40
+	got := logs.tailSnapshot(maxBytes, 2)
+	if len(got) > maxBytes {
+		t.Fatalf("tailSnapshot() length = %d, want <= %d", len(got), maxBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("tailSnapshot() returned invalid UTF-8: %q", got)
+	}
+	if !strings.HasPrefix(got, logTailTruncated) {
+		t.Fatalf("tailSnapshot() = %q, want truncation marker", got)
+	}
+	if !strings.HasSuffix(got, "最新の診断") {
+		t.Fatalf("tailSnapshot() = %q, want newest partial line", got)
+	}
 }
 
 // addrRe extracts addr=host:port from log lines.
