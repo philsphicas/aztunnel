@@ -441,46 +441,100 @@ func (lb *logBuffer) String() string {
 }
 
 // tailSnapshot returns a bounded suffix of the captured output, including an
-// incomplete final line. It prefers whole lines when trimming by bytes and
-// always starts at a UTF-8 boundary when one oversized line must be sliced.
+// incomplete final line. It selects only bounded string slices while holding
+// the lock, then copies at most maxBytes after unlocking.
 func (lb *logBuffer) tailSnapshot(maxBytes, maxLines int) string {
 	if maxBytes <= 0 || maxLines <= 0 {
 		return ""
 	}
 
 	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
 	recordCount := len(lb.lines)
 	if lb.partial != "" {
 		recordCount++
 	}
+	if recordCount == 0 {
+		lb.mu.Unlock()
+		return ""
+	}
 	start := max(recordCount-maxLines, 0)
-	records := make([]string, 0, recordCount-start)
-	for i := start; i < len(lb.lines); i++ {
-		records = append(records, lb.lines[i])
-	}
-	if lb.partial != "" {
-		records = append(records, lb.partial)
-	}
-
-	snapshot := strings.Join(records, "\n")
-	if len(snapshot) <= maxBytes {
-		return snapshot
-	}
-	if maxBytes <= len(logTailTruncated) {
-		return logTailTruncated[:maxBytes]
+	recordAt := func(i int) string {
+		if i < len(lb.lines) {
+			return lb.lines[i]
+		}
+		return lb.partial
 	}
 
-	suffixBytes := maxBytes - len(logTailTruncated)
-	cut := len(snapshot) - suffixBytes
-	for cut < len(snapshot) && !utf8.RuneStart(snapshot[cut]) {
-		cut++
+	truncated := start > 0
+	windowBytes := 0
+	for i := start; i < recordCount; i++ {
+		if i > start {
+			windowBytes++
+		}
+		recordLen := len(recordAt(i))
+		if windowBytes > maxBytes || recordLen > maxBytes-windowBytes {
+			truncated = true
+			break
+		}
+		windowBytes += recordLen
 	}
-	if newline := strings.IndexByte(snapshot[cut:], '\n'); newline >= 0 {
-		cut += newline + 1
+
+	marker := ""
+	contentBudget := maxBytes
+	if truncated {
+		if maxBytes <= len(logTailTruncated) {
+			lb.mu.Unlock()
+			return logTailTruncated[:maxBytes]
+		}
+		marker = logTailTruncated
+		contentBudget -= len(marker)
 	}
-	return logTailTruncated + snapshot[cut:]
+
+	// Retain references to at most maxLines bounded suffixes. The underlying
+	// strings are immutable, so they remain safe to copy after releasing mu.
+	reversed := make([]string, 0, min(recordCount-start, maxLines))
+	contentBytes := 0
+	for i := recordCount - 1; i >= start; i-- {
+		separatorBytes := 0
+		if len(reversed) > 0 {
+			separatorBytes = 1
+		}
+		if contentBytes+separatorBytes >= contentBudget {
+			break
+		}
+
+		record := recordAt(i)
+		sliced := false
+		available := contentBudget - contentBytes - separatorBytes
+		if len(record) > available {
+			cut := len(record) - available
+			for cut < len(record) && !utf8.RuneStart(record[cut]) {
+				cut++
+			}
+			record = record[cut:]
+			sliced = true
+		}
+		if sliced && record == "" {
+			break
+		}
+		reversed = append(reversed, record)
+		contentBytes += separatorBytes + len(record)
+		if sliced {
+			break
+		}
+	}
+	lb.mu.Unlock()
+
+	var snapshot strings.Builder
+	snapshot.Grow(len(marker) + contentBytes)
+	snapshot.WriteString(marker)
+	for i := len(reversed) - 1; i >= 0; i-- {
+		if i < len(reversed)-1 {
+			snapshot.WriteByte('\n')
+		}
+		snapshot.WriteString(reversed[i])
+	}
+	return snapshot.String()
 }
 
 // waitFor blocks until a log line containing substr appears, or times out.
@@ -680,6 +734,18 @@ func TestLogBufferTailSnapshotBoundsBytesAndPreservesUTF8(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "最新の診断") {
 		t.Fatalf("tailSnapshot() = %q, want newest partial line", got)
+	}
+}
+
+func TestLogBufferTailSnapshotBoundsOversizedPartial(t *testing.T) {
+	const maxBytes = 128
+	partial := strings.Repeat("x", 2*1024*1024) + "latest-diagnostic"
+	logs := logBuffer{partial: partial}
+
+	got := logs.tailSnapshot(maxBytes, 10)
+	want := logTailTruncated + partial[len(partial)-(maxBytes-len(logTailTruncated)):]
+	if got != want {
+		t.Fatalf("tailSnapshot() length = %d, want exact bounded suffix of length %d", len(got), len(want))
 	}
 }
 
