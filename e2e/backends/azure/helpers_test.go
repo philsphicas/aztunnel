@@ -710,7 +710,7 @@ func TestLogBufferTailSnapshotBoundsLines(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 
-	if got, want := logs.tailSnapshot(1024, 2), "newest\npartial"; got != want {
+	if got, want := logs.tailSnapshot(1024, 2), logTailTruncated+"newest\npartial"; got != want {
 		t.Fatalf("tailSnapshot() = %q, want %q", got, want)
 	}
 }
