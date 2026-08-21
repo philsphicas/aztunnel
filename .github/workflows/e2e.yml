@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
@@ -22,7 +21,6 @@ concurrency:
 jobs:
   e2e-mock:
     name: E2E (mock)
-    if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'skip-e2e')
     runs-on: ubuntu-latest
     # The mock backend does not need OIDC; explicitly drop
     # id-token: write so PR-supplied code (`make build` /
@@ -58,7 +56,6 @@ jobs:
 
   e2e-azure:
     name: E2E (azure / ${{ matrix.auth }})
-    if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'skip-e2e')
     runs-on: ubuntu-latest
     environment: e2e-azure
     # Parallelism strategy: split the Azure suite along the existing
@@ -142,20 +139,11 @@ jobs:
     if: always()
     steps:
       - name: Check matrix results
-        env:
-          SKIP_E2E: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'skip-e2e') }}
         run: |
           mock="${{ needs.e2e-mock.result }}"
           azure="${{ needs.e2e-azure.result }}"
           echo "e2e-mock: $mock"
           echo "e2e-azure: $azure"
-          if [ "$SKIP_E2E" = "true" ]; then
-            if [ "$mock" != "skipped" ] || [ "$azure" != "skipped" ]; then
-              echo "::error::skip-e2e requested but jobs were not both skipped (mock=$mock, azure=$azure)"
-              exit 1
-            fi
-            exit 0
-          fi
           if [ "$mock" != "success" ] || [ "$azure" != "success" ]; then
             echo "::error::e2e matrix not green (mock=$mock, azure=$azure)"
             exit 1

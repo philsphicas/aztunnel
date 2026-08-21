@@ -17,9 +17,6 @@ updates:
     schedule:
       interval: daily
     open-pull-requests-limit: 5
-    ignore:
-      # The custom Go updater owns setup-go alongside the toolchain pins.
-      - dependency-name: actions/setup-go
     labels:
       - dependencies
     groups:

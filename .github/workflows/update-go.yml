@@ -56,15 +56,26 @@ jobs:
           current_baseline="$(awk '$1 == "go" { sub(/\r$/, "", $2); print $2; exit }' go.work)"
           target_baseline="${target_go%.*}.0"
 
-          target_lint="$(gh api repos/golangci/golangci-lint/releases/latest --jq .tag_name)"
+          latest_lint="$(gh api repos/golangci/golangci-lint/releases/latest --jq .tag_name)"
           current_lint="$(tr -d '\r\n' < .golangci-version)"
-          if [[ ! "$target_lint" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::GitHub returned an unexpected golangci-lint version: $target_lint"
+          if [[ ! "$current_lint" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+             [[ ! "$latest_lint" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected exact stable golangci-lint versions; current=$current_lint latest=$latest_lint"
             exit 1
           fi
 
+          lint_update=false
+          target_lint="$current_lint"
+          current_lint_semver="${current_lint#v}"
+          latest_lint_semver="${latest_lint#v}"
+          if [[ "$(printf '%s\n%s\n' "$current_lint_semver" "$latest_lint_semver" | sort -V | tail -n1)" == "$latest_lint_semver" ]] &&
+             [[ "$current_lint_semver" != "$latest_lint_semver" ]]; then
+            lint_update=true
+            target_lint="$latest_lint"
+          fi
+
           update_available="$go_update"
-          if [[ "$current_lint" != "$target_lint" ]]; then
+          if [[ "$lint_update" == "true" ]]; then
             update_available=true
           fi
 
@@ -72,7 +83,8 @@ jobs:
           if [[ "$current_baseline" != "$target_baseline" ]]; then
             requires_review=true
           fi
-          if [[ "${current_lint%%.*}" != "${target_lint%%.*}" ]]; then
+          if [[ "$lint_update" == "true" ]] &&
+             [[ "${current_lint%%.*}" != "${target_lint%%.*}" ]]; then
             requires_review=true
           fi
 
