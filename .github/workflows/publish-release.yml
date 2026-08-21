@@ -373,6 +373,7 @@ jobs:
           PROBE_TAG: dev-ref-probe-${{ github.run_id }}-${{ github.run_attempt }}
           REF_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
           RETIRED_TAG: dev-retired-${{ github.run_id }}-${{ github.run_attempt }}
+          STAGE_TAG: dev-stage-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if [[ -z "$REF_TOKEN" ]]; then
@@ -442,24 +443,34 @@ jobs:
             echo "::error::The dev GitHub Release targets ${old_release_target}, but refs/tags/dev points to ${old_dev_sha}; refusing an unsafe release swap."
             exit 1
           fi
-          if gh release view "$RETIRED_TAG" >/dev/null 2>&1 ||
+          if gh release view "$STAGE_TAG" >/dev/null 2>&1 ||
+            gh release view "$RETIRED_TAG" >/dev/null 2>&1 ||
+            ref_exists "refs/tags/${STAGE_TAG}" ||
             ref_exists "refs/tags/${RETIRED_TAG}" ||
             ref_exists "refs/tags/${PROBE_TAG}"; then
-            echo "::error::Development publication refs for this run already exist; clean up the interrupted run before retrying."
+            echo "::error::Development publication release or refs for this run already exist; clean up the interrupted run before retrying."
             exit 1
           fi
 
           probe_created=false
-          cleanup_probe() {
+          stage_created=false
+          retired_created=false
+          cleanup_preflight_refs() {
             status=$?
             trap - EXIT
-            if [[ "$probe_created" == "true" ]] &&
-              ! delete_ref "refs/tags/${PROBE_TAG}"; then
-              echo "::warning::Permission probe cleanup failed for refs/tags/${PROBE_TAG}; delete it manually."
-            fi
+            for created_ref in \
+              "${probe_created}|${PROBE_TAG}" \
+              "${stage_created}|${STAGE_TAG}" \
+              "${retired_created}|${RETIRED_TAG}"; do
+              IFS='|' read -r created tag <<< "$created_ref"
+              if [[ "$created" == "true" ]] &&
+                ! delete_ref "refs/tags/${tag}"; then
+                echo "::warning::Preflight cleanup failed for refs/tags/${tag}; delete it manually."
+              fi
+            done
             exit "$status"
           }
-          trap cleanup_probe EXIT
+          trap cleanup_preflight_refs EXIT
 
           # Exercise create, workflow-bearing update, and delete permissions
           # before staging a release or changing any final channel image tag.
@@ -469,7 +480,16 @@ jobs:
           delete_ref "refs/tags/${PROBE_TAG}"
           probe_created=false
 
+          create_ref "refs/tags/${STAGE_TAG}" "$COMMIT_SHA"
+          stage_created=true
+          stage_sha="$(remote_tag_commit "$STAGE_TAG")"
+          if [[ "$stage_sha" != "$COMMIT_SHA" ]]; then
+            echo "::error::refs/tags/${STAGE_TAG} did not resolve to development commit ${COMMIT_SHA}."
+            exit 1
+          fi
+
           create_ref "refs/tags/${RETIRED_TAG}" "$old_dev_sha"
+          retired_created=true
           updated_retired_sha="$(remote_tag_commit "$RETIRED_TAG")"
           if [[ "$updated_retired_sha" != "$old_dev_sha" ]]; then
             echo "::error::refs/tags/${RETIRED_TAG} did not resolve to the current dev commit ${old_dev_sha}."
@@ -509,7 +529,7 @@ jobs:
           )
 
           gh release create "$STAGE_TAG" "${files[@]}" \
-            --target "$COMMIT_SHA" \
+            --verify-tag \
             --title "Staged development build ${VERSION}" \
             --notes "Private staging release for ${COMMIT_SHA}." \
             --draft
