@@ -935,6 +935,40 @@ func TestRunControlLoop(t *testing.T) {
 	})
 }
 
+func TestRunControlLoop_ControlDialTrace(t *testing.T) {
+	useInsecureTransport(t)
+
+	t.Run("success", func(t *testing.T) {
+		logger, rec := captureLogger()
+		drivenControlLoop(t, logger)
+		if !waitForRecord(t, rec, "control channel dial trace", time.Second) {
+			t.Fatalf("missing successful control dial trace in records: %v", rec.records(t))
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		logger, rec := captureLogger()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err := runControlLoop(ctx, ControlConfig{
+			Endpoint:      "127.0.0.1:1",
+			EntityPath:    "test-entity",
+			TokenProvider: &mockTokenProvider{token: "test-token"},
+			Handler:       func(context.Context, *websocket.Conn) {},
+			DialTimeout:   time.Second,
+			Logger:        logger,
+		})
+		if err == nil {
+			t.Fatal("expected control dial failure")
+		}
+
+		if !waitForRecord(t, rec, "control channel dial trace (dial failed)", time.Second) {
+			t.Fatalf("missing failed control dial trace in records: %v", rec.records(t))
+		}
+	})
+}
+
 // ---------- TestListenAndServe ----------
 
 func TestListenAndServe(t *testing.T) {

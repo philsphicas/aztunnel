@@ -201,8 +201,13 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, cfg.DialTimeout)
 	defer dialCancel()
+	var trace *dialTrace
+	if logger.Enabled(ctx, slog.LevelDebug) {
+		dialCtx, trace = newDialTrace(dialCtx, time.Now())
+	}
 	ws, resp, dialErr := websocket.Dial(dialCtx, listenURL, cfg.Options.dialOptions())
 	if dialErr != nil {
+		trace.log(ctx, logger, "control channel dial trace (dial failed)")
 		// Operator-driven cancellation propagated through dialCtx
 		// is classified as context_cancelled (no setEnd call —
 		// the classifier sees ctx.Err and maps it). Other dial
@@ -216,6 +221,7 @@ func runControlLoop(ctx context.Context, cfg ControlConfig) (connected bool, err
 		}
 		return false, fmt.Errorf("dial control: %w", sanitizeErr(dialErr))
 	}
+	trace.log(ctx, logger, "control channel dial trace")
 	defer func() { _ = ws.CloseNow() }()
 
 	// control_started fires here, after the dial has succeeded —

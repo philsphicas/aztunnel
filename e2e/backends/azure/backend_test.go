@@ -18,6 +18,10 @@ import (
 	"github.com/philsphicas/aztunnel/e2e/scenarios"
 )
 
+// listenerStartupTimeout covers the listener's 30s control dial timeout,
+// the 1s initial reconnect delay, and a short second connection attempt.
+const listenerStartupTimeout = 40 * time.Second
+
 // azureBackend implements scenarios.Backend against a real Azure
 // Relay namespace. It is the source-of-truth side of the mock-vs-Azure
 // conformance matrix: any scenario divergence between this backend and
@@ -268,7 +272,7 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 	spawnListener := func(t testing.TB) *scenarios.Listener {
 		t.Helper()
 		lst := startListener(t, env, auth, listenerArgs...)
-		waitForLog(t, lst, "control_started", 30*time.Second)
+		waitForLog(t, lst, "control_started", listenerStartupTimeout)
 		metricsAddr := lst.MetricsAddr(t, 15*time.Second)
 		return &scenarios.Listener{
 			Addr:             metricsAddr,
@@ -575,7 +579,7 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	if opts.NumListeners > 0 {
 		lp := startListener(t, env, auth, "--metrics-addr", "127.0.0.1:0", "--log-level", "debug")
 		listenerLogs = func() string { return lp.logs.String() }
-		waitForLog(t, lp, "control_started", 30*time.Second)
+		waitForLog(t, lp, "control_started", listenerStartupTimeout)
 	}
 
 	if opts.SenderMode == scenarios.ModeConnect {
