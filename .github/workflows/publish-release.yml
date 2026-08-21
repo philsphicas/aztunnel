@@ -695,7 +695,10 @@ jobs:
             current_dev_release_id="$(
               gh release view dev --json databaseId --jq .databaseId 2>/dev/null
             )"
-            if [[ "$current_dev_release_id" == "$stage_release_id" ]]; then
+            release_already_intact=false
+            if [[ "$current_dev_release_id" == "$old_release_id" ]]; then
+              release_already_intact=true
+            elif [[ "$current_dev_release_id" == "$stage_release_id" ]]; then
               if ! gh release delete dev --yes; then
                 echo "::error::Failed to remove the new dev release during rollback; manual GitHub Release repair is required."
                 rollback_incomplete=true
@@ -719,21 +722,23 @@ jobs:
               fi
             fi
 
-            retired_release_id="$(
-              gh release view dev-retired --json databaseId --jq .databaseId 2>/dev/null
-            )"
-            if [[ "$retired_release_id" == "$old_release_id" ]]; then
-              if ! gh release edit dev-retired \
-                --tag dev \
-                --title "Development Build" \
-                --prerelease \
-                --latest=false; then
-                echo "::error::Failed to restore the retired GitHub Release to dev; manual release repair is required."
+            if [[ "$release_already_intact" != "true" ]]; then
+              retired_release_id="$(
+                gh release view dev-retired --json databaseId --jq .databaseId 2>/dev/null
+              )"
+              if [[ "$retired_release_id" == "$old_release_id" ]]; then
+                if ! gh release edit dev-retired \
+                  --tag dev \
+                  --title "Development Build" \
+                  --prerelease \
+                  --latest=false; then
+                  echo "::error::Failed to restore the retired GitHub Release to dev; manual release repair is required."
+                  rollback_incomplete=true
+                fi
+              else
+                echo "::error::The captured GitHub Release ${old_release_id} is not available at dev or dev-retired; manual release repair is required."
                 rollback_incomplete=true
               fi
-            else
-              echo "::error::The captured GitHub Release ${old_release_id} is not available at dev-retired; manual release repair is required."
-              rollback_incomplete=true
             fi
 
             restored_release_id="$(
