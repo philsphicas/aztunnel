@@ -463,9 +463,9 @@ jobs:
 
           # Exercise create, workflow-bearing update, and delete permissions
           # before staging a release or changing any final channel image tag.
-          create_ref "refs/tags/${PROBE_TAG}" "$COMMIT_SHA"
+          create_ref "refs/tags/${PROBE_TAG}" "$old_dev_sha"
           probe_created=true
-          update_ref "refs/tags/${PROBE_TAG}" "$old_dev_sha"
+          update_ref "refs/tags/${PROBE_TAG}" "$COMMIT_SHA"
           delete_ref "refs/tags/${PROBE_TAG}"
           probe_created=false
 
