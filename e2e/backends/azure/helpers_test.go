@@ -583,7 +583,7 @@ func waitForLog(t testing.TB, proc *aztunnelProcess, substr string, timeout time
 	t.Helper()
 	line, ok := proc.logs.waitFor(substr, timeout)
 	if !ok {
-		t.Fatalf("timed out waiting for log: %q", substr)
+		t.Fatalf("timed out waiting for log: %q\n--- process logs ---\n%s", substr, proc.logs.String())
 	}
 	return line
 }
