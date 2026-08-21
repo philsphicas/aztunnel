@@ -1,0 +1,162 @@
+name: Update Go
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-go
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up latest stable Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          check-latest: true
+          cache: false
+
+      - name: Determine Go update
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          current="$(go work edit -json | jq -r '.Toolchain // ("go" + .Go)')"
+          current="${current#go}"
+          latest="$(go env GOVERSION)"
+          latest="${latest#go}"
+
+          if [[ ! "$current" =~ ^1\.[0-9]+\.[0-9]+$ ]] ||
+             [[ ! "$latest" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected exact stable Go versions; current=$current latest=$latest"
+            exit 1
+          fi
+
+          go_update=false
+          target_go="$current"
+          if [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" == "$latest" ]] &&
+             [[ "$current" != "$latest" ]]; then
+            go_update=true
+            target_go="$latest"
+          fi
+
+          current_baseline="$(awk '$1 == "go" { sub(/\r$/, "", $2); print $2; exit }' go.work)"
+          target_baseline="${target_go%.*}.0"
+
+          latest_lint="$(gh api repos/golangci/golangci-lint/releases/latest --jq .tag_name)"
+          current_lint="$(tr -d '\r\n' < .golangci-version)"
+          if [[ ! "$current_lint" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+             [[ ! "$latest_lint" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected exact stable golangci-lint versions; current=$current_lint latest=$latest_lint"
+            exit 1
+          fi
+
+          lint_update=false
+          target_lint="$current_lint"
+          current_lint_semver="${current_lint#v}"
+          latest_lint_semver="${latest_lint#v}"
+          if [[ "$(printf '%s\n%s\n' "$current_lint_semver" "$latest_lint_semver" | sort -V | tail -n1)" == "$latest_lint_semver" ]] &&
+             [[ "$current_lint_semver" != "$latest_lint_semver" ]]; then
+            lint_update=true
+            target_lint="$latest_lint"
+          fi
+
+          update_available="$go_update"
+          if [[ "$lint_update" == "true" ]]; then
+            update_available=true
+          fi
+
+          requires_review=false
+          if [[ "$current_baseline" != "$target_baseline" ]]; then
+            requires_review=true
+          fi
+          if [[ "$lint_update" == "true" ]] &&
+             [[ "${current_lint%%.*}" != "${target_lint%%.*}" ]]; then
+            requires_review=true
+          fi
+
+          echo "current-go=$current" >> "$GITHUB_OUTPUT"
+          echo "target-go=$target_go" >> "$GITHUB_OUTPUT"
+          echo "target-lint=$target_lint" >> "$GITHUB_OUTPUT"
+          echo "requires-review=$requires_review" >> "$GITHUB_OUTPUT"
+          echo "update-available=$update_available" >> "$GITHUB_OUTPUT"
+
+      - name: Verify matching Docker builders are published
+        if: steps.version.outputs.update-available == 'true'
+        run: |
+          docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-bookworm" >/dev/null
+          docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-alpine" >/dev/null
+
+      - name: Update toolchain pins
+        if: steps.version.outputs.update-available == 'true'
+        run: |
+          echo "${{ steps.version.outputs.target-lint }}" > .golangci-version
+          bash scripts/update-go-version.sh "${{ steps.version.outputs.target-go }}"
+
+      - name: Require automation credential
+        if: steps.version.outputs.update-available == 'true'
+        shell: bash
+        env:
+          GH_AUTOMATION_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+        run: |
+          if [[ -z "$GH_AUTOMATION_TOKEN" ]]; then
+            echo "::error::GH_AUTOMATION_TOKEN is required to create updater PRs that trigger normal pull-request CI."
+            exit 1
+          fi
+
+      - name: Create or update pull request
+        id: pull-request
+        if: steps.version.outputs.update-available == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          # This must not be GITHUB_TOKEN: updater pushes need to trigger normal PR CI.
+          token: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          branch: automation/update-go
+          delete-branch: true
+          commit-message: "chore(go): update Go to ${{ steps.version.outputs.target-go }}"
+          title: "chore(go): update Go to ${{ steps.version.outputs.target-go }}"
+          body: |
+            Updates the preferred Go toolchain to `${{ steps.version.outputs.target-go }}` and golangci-lint to `${{ steps.version.outputs.target-lint }}`.
+
+            - module `go` directives remain the `major.minor.0` language baseline
+            - `go.work` selects the exact preferred patch toolchain
+            - Docker builder pins use that same exact toolchain
+            - every module is tidied independently
+
+            Feature-version Go updates and golangci-lint major updates require review. Other updates may auto-merge only after required checks pass.
+          labels: dependencies
+
+      - name: Enable auto-merge for safe updates
+        if: >
+          steps.version.outputs.requires-review == 'false' &&
+          (steps.pull-request.outputs.pull-request-operation == 'created' ||
+           steps.pull-request.outputs.pull-request-operation == 'updated')
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+        run: gh pr merge --auto --squash "${{ steps.pull-request.outputs.pull-request-number }}"
+
+      - name: Require review for feature updates
+        if: >
+          steps.version.outputs.requires-review == 'true' &&
+          (steps.pull-request.outputs.pull-request-operation == 'created' ||
+           steps.pull-request.outputs.pull-request-operation == 'updated')
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          PR_NUMBER: ${{ steps.pull-request.outputs.pull-request-number }}
+        run: |
+          if [[ "$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest != null')" == "true" ]]; then
+            gh pr merge --disable-auto "$PR_NUMBER"
+          fi

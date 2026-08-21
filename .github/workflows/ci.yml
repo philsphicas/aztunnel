@@ -15,9 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: go.work
+
+      - name: Verify Go toolchain synchronization
+        run: make check-go-version
 
       - name: Build
         run: make build
@@ -33,9 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: go.work
 
       - name: Test with coverage
         run: go test -race -coverprofile=coverage.txt ./...
@@ -77,31 +80,35 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: go.work
+
+      - name: Read golangci-lint version
+        id: golangci
+        run: echo "version=$(tr -d '\r\n' < .golangci-version)" >> "$GITHUB_OUTPUT"
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.1
+          version: ${{ steps.golangci.outputs.version }}
 
       - name: golangci-lint (mockrelay)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.1
+          version: ${{ steps.golangci.outputs.version }}
           working-directory: mockrelay
 
       - name: golangci-lint (e2e)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.1
+          version: ${{ steps.golangci.outputs.version }}
           working-directory: e2e
 
       - name: golangci-lint (e2e/infra)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.1
+          version: ${{ steps.golangci.outputs.version }}
           working-directory: e2e/infra
 
   vulncheck:
@@ -109,9 +116,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: go.work
 
       - name: govulncheck
         run: make vulncheck

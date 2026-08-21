@@ -1,10 +1,11 @@
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GO_VERSION := $(shell awk '/^toolchain / { sub(/^go/, "", $$2); gsub(/\r/, "", $$2); print $$2; exit }' go.work)
 GOFLAGS  := -trimpath
 LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-mock-fast e2e-mock-matrix e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure perf-matrix perf-placement perf-placement-azure perf-axes-mock perf-table perf-grid perf-history perf-compare perf-clean-history perf-gate vulncheck check-installable help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-mock-fast e2e-mock-matrix e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure perf-matrix perf-placement perf-placement-azure perf-axes-mock perf-table perf-grid perf-history perf-compare perf-clean-history perf-gate vulncheck check-installable check-go-version help
 
 .DEFAULT_GOAL := help
 
@@ -21,6 +22,9 @@ check-installable: ## Assert root go.mod has no replace directives (required for
 		exit 1; \
 	fi
 	@echo "ok: root go.mod has no replace directives"
+
+check-go-version: ## Verify Go language and toolchain pins stay synchronized
+	bash scripts/check-go-version.sh
 
 test: ## Run tests (with -race if CGO is available)
 ifneq ($(RACE),)
@@ -58,17 +62,19 @@ install: ## Install to $$GOPATH/bin
 	go install $(GOFLAGS) $(LDFLAGS) ./cmd/aztunnel
 
 docker: ## Build Docker image (scratch)
-	docker build --build-arg VERSION=$(VERSION) -t aztunnel .
+	docker build --build-arg VERSION=$(VERSION) \
+		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-bookworm \
+		-t aztunnel .
 
 docker-alpine: ## Build Docker image (alpine)
 	docker build --build-arg VERSION=$(VERSION) \
-		--build-arg BUILDER_IMAGE=golang:1-alpine \
+		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-alpine \
 		--build-arg RUNTIME_IMAGE=alpine \
 		-t aztunnel:alpine .
 
 docker-bookworm: ## Build Docker image (bookworm)
 	docker build --build-arg VERSION=$(VERSION) \
-		--build-arg BUILDER_IMAGE=golang:1-bookworm \
+		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-bookworm \
 		--build-arg RUNTIME_IMAGE=debian:bookworm-slim \
 		-t aztunnel:bookworm .
 
@@ -154,6 +160,7 @@ e2e-janitor: ## Delete orphaned per-invocation hybrid connections older than 4h
 vulncheck: ## Check Go dependencies for known vulnerabilities
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 	cd e2e && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	cd e2e/infra && go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 # Performance characterization scenarios (e2e/scenarios/performance.go).
 # Filters the shared e2e suite down to the performance scenarios via
