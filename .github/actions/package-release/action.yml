@@ -1,0 +1,79 @@
+name: Package release
+description: Cross-build and package one aztunnel release target
+
+inputs:
+  version:
+    description: Version embedded in both binaries and the bundle name
+    required: true
+  goos:
+    description: Target operating system
+    required: true
+  goarch:
+    description: Target architecture
+    required: true
+
+outputs:
+  asset:
+    description: Packaged release asset filename
+    value: ${{ steps.package.outputs.asset }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build and package
+      id: package
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TARGET_OS: ${{ inputs.goos }}
+        TARGET_ARCH: ${{ inputs.goarch }}
+      run: |
+        set -euo pipefail
+
+        bundle="aztunnel-${VERSION}-${TARGET_OS}-${TARGET_ARCH}"
+        stage="${RUNNER_TEMP}/${bundle}"
+        rm -rf "$stage"
+        mkdir -p "$stage" dist
+
+        extension=""
+        if [[ "$TARGET_OS" == "windows" ]]; then
+          extension=".exe"
+        fi
+
+        CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" \
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+          -o "${stage}/aztunnel${extension}" ./cmd/aztunnel
+
+        CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" \
+          GOWORK="${GITHUB_WORKSPACE}/go.work" \
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+          -o "${stage}/aztunnel-relay${extension}" ./mockrelay/cmd/aztunnel-relay
+
+        cp LICENSE README.md "$stage/"
+        cat > "${stage}/RELAY-NOTICE.txt" <<'EOF'
+        aztunnel-relay is a non-production mock/development relay.
+        It is bundled to preserve the existing release contract, but is not supported
+        as a production relay service. See mockrelay/README.md in the source repository.
+        EOF
+
+        if [[ "$TARGET_OS" == "windows" ]]; then
+          asset="${bundle}.zip"
+          TZ=UTC find "$stage" -exec touch -t 198001010000 {} +
+          (
+            cd "$RUNNER_TEMP"
+            zip -X -q -r "${GITHUB_WORKSPACE}/dist/${asset}" "$bundle"
+          )
+        else
+          asset="${bundle}.tar.gz"
+          chmod 0755 "${stage}/aztunnel" "${stage}/aztunnel-relay"
+          tar --sort=name \
+            --mtime="UTC 1970-01-01" \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -cf - \
+            -C "$RUNNER_TEMP" "$bundle" |
+            gzip -n > "dist/${asset}"
+        fi
+
+        echo "asset=$asset" >> "$GITHUB_OUTPUT"

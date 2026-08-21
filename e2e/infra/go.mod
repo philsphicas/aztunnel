@@ -14,7 +14,7 @@
 // used for the workspace-development experience.
 module github.com/philsphicas/aztunnel/e2e/infra
 
-go 1.26.4
+go 1.27.0
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0
@@ -38,7 +38,7 @@ require (
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 )
 
 replace github.com/philsphicas/aztunnel/e2e => ..
