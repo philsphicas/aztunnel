@@ -26,25 +26,33 @@ jobs:
           check-latest: true
           cache: false
 
-      - name: Resolve update policy
-        id: versions
+      - name: Determine Go update
+        id: version
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          target_go="$(go env GOVERSION)"
-          target_go="${target_go#go}"
-          if [[ ! "$target_go" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::setup-go returned an unexpected stable version: $target_go"
+          current="$(go work edit -json | jq -r '.Toolchain // ("go" + .Go)')"
+          current="${current#go}"
+          latest="$(go env GOVERSION)"
+          latest="${latest#go}"
+
+          if [[ ! "$current" =~ ^1\.[0-9]+\.[0-9]+$ ]] ||
+             [[ ! "$latest" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected exact stable Go versions; current=$current latest=$latest"
             exit 1
           fi
 
-          current_go="$(awk '$1 == "toolchain" { sub(/^go/, "", $2); sub(/\r$/, "", $2); print $2; exit }' go.work)"
-          if [[ -z "$current_go" ]]; then
-            current_go="$(awk '$1 == "go" { sub(/\r$/, "", $2); print $2; exit }' go.work)"
+          go_update=false
+          target_go="$current"
+          if [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" == "$latest" ]] &&
+             [[ "$current" != "$latest" ]]; then
+            go_update=true
+            target_go="$latest"
           fi
+
           current_baseline="$(awk '$1 == "go" { sub(/\r$/, "", $2); print $2; exit }' go.work)"
           target_baseline="${target_go%.*}.0"
 
@@ -55,6 +63,11 @@ jobs:
             exit 1
           fi
 
+          update_available="$go_update"
+          if [[ "$current_lint" != "$target_lint" ]]; then
+            update_available=true
+          fi
+
           requires_review=false
           if [[ "$current_baseline" != "$target_baseline" ]]; then
             requires_review=true
@@ -63,22 +76,26 @@ jobs:
             requires_review=true
           fi
 
-          echo "current-go=$current_go" >> "$GITHUB_OUTPUT"
+          echo "current-go=$current" >> "$GITHUB_OUTPUT"
           echo "target-go=$target_go" >> "$GITHUB_OUTPUT"
           echo "target-lint=$target_lint" >> "$GITHUB_OUTPUT"
           echo "requires-review=$requires_review" >> "$GITHUB_OUTPUT"
+          echo "update-available=$update_available" >> "$GITHUB_OUTPUT"
 
       - name: Verify matching Docker builders are published
+        if: steps.version.outputs.update-available == 'true'
         run: |
-          docker buildx imagetools inspect "golang:${{ steps.versions.outputs.target-go }}-bookworm" >/dev/null
-          docker buildx imagetools inspect "golang:${{ steps.versions.outputs.target-go }}-alpine" >/dev/null
+          docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-bookworm" >/dev/null
+          docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-alpine" >/dev/null
 
       - name: Update toolchain pins
+        if: steps.version.outputs.update-available == 'true'
         run: |
-          echo "${{ steps.versions.outputs.target-lint }}" > .golangci-version
-          bash scripts/update-go-version.sh "${{ steps.versions.outputs.target-go }}"
+          echo "${{ steps.version.outputs.target-lint }}" > .golangci-version
+          bash scripts/update-go-version.sh "${{ steps.version.outputs.target-go }}"
 
       - name: Require automation credential
+        if: steps.version.outputs.update-available == 'true'
         shell: bash
         env:
           GH_AUTOMATION_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
@@ -90,16 +107,17 @@ jobs:
 
       - name: Create or update pull request
         id: pull-request
+        if: steps.version.outputs.update-available == 'true'
         uses: peter-evans/create-pull-request@v8
         with:
           # This must not be GITHUB_TOKEN: updater pushes need to trigger normal PR CI.
           token: ${{ secrets.GH_AUTOMATION_TOKEN }}
           branch: automation/update-go
           delete-branch: true
-          commit-message: "chore(go): update Go to ${{ steps.versions.outputs.target-go }}"
-          title: "chore(go): update Go to ${{ steps.versions.outputs.target-go }}"
+          commit-message: "chore(go): update Go to ${{ steps.version.outputs.target-go }}"
+          title: "chore(go): update Go to ${{ steps.version.outputs.target-go }}"
           body: |
-            Updates the preferred Go toolchain to `${{ steps.versions.outputs.target-go }}` and golangci-lint to `${{ steps.versions.outputs.target-lint }}`.
+            Updates the preferred Go toolchain to `${{ steps.version.outputs.target-go }}` and golangci-lint to `${{ steps.version.outputs.target-lint }}`.
 
             - module `go` directives remain the `major.minor.0` language baseline
             - `go.work` selects the exact preferred patch toolchain
@@ -110,13 +128,19 @@ jobs:
           labels: dependencies
 
       - name: Enable auto-merge for safe updates
-        if: steps.pull-request.outputs.pull-request-number && steps.versions.outputs.requires-review == 'false'
+        if: >
+          steps.version.outputs.requires-review == 'false' &&
+          (steps.pull-request.outputs.pull-request-operation == 'created' ||
+           steps.pull-request.outputs.pull-request-operation == 'updated')
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
         run: gh pr merge --auto --squash "${{ steps.pull-request.outputs.pull-request-number }}"
 
       - name: Require review for feature updates
-        if: steps.pull-request.outputs.pull-request-number && steps.versions.outputs.requires-review == 'true'
+        if: >
+          steps.version.outputs.requires-review == 'true' &&
+          (steps.pull-request.outputs.pull-request-operation == 'created' ||
+           steps.pull-request.outputs.pull-request-operation == 'updated')
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
           PR_NUMBER: ${{ steps.pull-request.outputs.pull-request-number }}
