@@ -153,22 +153,27 @@ func TestClassifyDialError_OtherErrors(t *testing.T) {
 }
 
 func TestClassifyDialError_RealRefusedConnection(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
+	for attempt := 0; attempt < 10; attempt++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
 
-	_, err = net.DialTimeout("tcp", addr, time.Second)
-	if err == nil {
-		t.Fatal("dial unexpectedly succeeded")
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			_ = conn.Close()
+			continue
+		}
+		if got := classifyDialError(err); got != protocol.CodeConnectionRefused {
+			t.Fatalf("classifyDialError(%v) = %q, want %q", err, got, protocol.CodeConnectionRefused)
+		}
+		return
 	}
-	if got := classifyDialError(err); got != protocol.CodeConnectionRefused {
-		t.Fatalf("classifyDialError(%v) = %q, want %q", err, got, protocol.CodeConnectionRefused)
-	}
+	t.Fatal("dial unexpectedly succeeded after 10 attempts")
 }
 
 // --- listener_id tests ---
