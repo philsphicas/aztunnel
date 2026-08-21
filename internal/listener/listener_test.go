@@ -12,7 +12,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -138,9 +137,9 @@ func TestClassifyDialError_OtherErrors(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"refused", &net.OpError{Op: "dial", Err: syscall.ECONNREFUSED}, protocol.CodeConnectionRefused},
-		{"host unreachable", &net.OpError{Op: "dial", Err: syscall.EHOSTUNREACH}, protocol.CodeHostUnreachable},
-		{"net unreachable", &net.OpError{Op: "dial", Err: syscall.ENETUNREACH}, protocol.CodeNetworkUnreachable},
+		{"refused", &net.OpError{Op: "dial", Err: errConnectionRefused}, protocol.CodeConnectionRefused},
+		{"host unreachable", &net.OpError{Op: "dial", Err: errHostUnreachable}, protocol.CodeHostUnreachable},
+		{"net unreachable", &net.OpError{Op: "dial", Err: errNetworkUnreachable}, protocol.CodeNetworkUnreachable},
 		{"context deadline", context.DeadlineExceeded, protocol.CodeTimeout},
 		{"unclassified", errors.New("something broke"), ""},
 	}
@@ -151,6 +150,30 @@ func TestClassifyDialError_OtherErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClassifyDialError_RealRefusedConnection(t *testing.T) {
+	for attempt := 0; attempt < 10; attempt++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		if err := ln.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			_ = conn.Close()
+			continue
+		}
+		if got := classifyDialError(err); got != protocol.CodeConnectionRefused {
+			t.Fatalf("classifyDialError(%v) = %q, want %q", err, got, protocol.CodeConnectionRefused)
+		}
+		return
+	}
+	t.Fatal("dial unexpectedly succeeded after 10 attempts")
 }
 
 // --- listener_id tests ---
@@ -554,7 +577,7 @@ func runDialFailureHandler(t *testing.T, target string,
 
 func TestListener_DialFailed_LogIncludesCode_Refused(t *testing.T) {
 	stub := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return nil, &net.OpError{Op: "dial", Net: network, Err: syscall.ECONNREFUSED}
+		return nil, &net.OpError{Op: "dial", Net: network, Err: errConnectionRefused}
 	}
 	logs := runDialFailureHandler(t, "127.0.0.1:9", stub)
 

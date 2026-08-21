@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -86,7 +87,7 @@ func binaries(t *testing.T) (aztunnelPath, relayPath string) {
 }
 
 func buildPkg(binDir, name, pkgPath string) (string, error) {
-	exe := filepath.Join(binDir, name)
+	exe := filepath.Join(binDir, executableName(name, runtime.GOOS))
 	cmd := exec.Command("go", "build", "-o", exe, pkgPath) //nolint:gosec // test-only build of in-tree packages
 	cmd.Env = os.Environ()
 	var out bytes.Buffer
@@ -96,6 +97,34 @@ func buildPkg(binDir, name, pkgPath string) (string, error) {
 		return "", fmt.Errorf("go build %s: %w\n%s", pkgPath, err, out.String())
 	}
 	return exe, nil
+}
+
+func executableName(name, goos string) string {
+	if goos == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+func TestExecutableName(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		goos string
+		want string
+	}{
+		"windows": {"windows", "aztunnel.exe"},
+		"linux":   {"linux", "aztunnel"},
+		"darwin":  {"darwin", "aztunnel"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := executableName("aztunnel", tt.goos); got != tt.want {
+				t.Fatalf("executableName(%q, %q) = %q, want %q", "aztunnel", tt.goos, got, tt.want)
+			}
+		})
+	}
 }
 
 // relayProc is a running aztunnel-relay subprocess.
@@ -147,7 +176,7 @@ func startRelay(t *testing.T, ctx context.Context, extraArgs ...string) *relayPr
 		out:      out,
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Signal(os.Interrupt)
+		stopProcess(cmd.Process)
 		_ = cmd.Wait()
 		if t.Failed() {
 			t.Logf("relay output:\n%s", out.String())
@@ -246,7 +275,7 @@ func startConnectSender(t *testing.T, ctx context.Context, relayAddr, entity, ta
 	}
 	proc := &clientProc{cmd: cmd, out: out}
 	t.Cleanup(func() {
-		_ = cmd.Process.Signal(os.Interrupt)
+		stopProcess(cmd.Process)
 		_ = cmd.Wait()
 		if t.Failed() {
 			t.Logf("connect output:\n%s", out.String())
@@ -269,7 +298,7 @@ func startClient(t *testing.T, ctx context.Context, binary, label string, args [
 	}
 	proc := &clientProc{cmd: cmd, out: out}
 	t.Cleanup(func() {
-		_ = cmd.Process.Signal(os.Interrupt)
+		stopProcess(cmd.Process)
 		_ = cmd.Wait()
 		if t.Failed() {
 			t.Logf("%s output:\n%s", label, out.String())
@@ -278,11 +307,19 @@ func startClient(t *testing.T, ctx context.Context, binary, label string, args [
 	return proc
 }
 
-// stopAndWait sends SIGINT and waits for the process to exit. Used
-// when a test needs deterministic teardown earlier than t.Cleanup.
+// stopAndWait terminates the process and waits for it to exit. Used when
+// a test needs deterministic teardown earlier than t.Cleanup.
 func (p *clientProc) stopAndWait() {
-	_ = p.cmd.Process.Signal(os.Interrupt)
+	stopProcess(p.cmd.Process)
 	_ = p.cmd.Wait()
+}
+
+func stopProcess(p *os.Process) {
+	if runtime.GOOS == "windows" {
+		_ = p.Kill()
+		return
+	}
+	_ = p.Signal(os.Interrupt)
 }
 
 // waitForLog blocks until substr appears in the captured output or

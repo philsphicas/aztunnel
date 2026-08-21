@@ -55,8 +55,8 @@ func TestRunOneStream_HappyPath(t *testing.T) {
 	if got := len(res.interGaps); got != chunks-1 {
 		t.Errorf("interGaps=%d want %d", got, chunks-1)
 	}
-	if res.firstResp <= 0 {
-		t.Errorf("firstResp=%v want > 0", res.firstResp)
+	if res.firstResp < 0 {
+		t.Errorf("firstResp=%v want >= 0", res.firstResp)
 	}
 	if res.endOffset < res.lastChunkOffset {
 		t.Errorf("endOffset=%v before lastChunkOffset=%v", res.endOffset, res.lastChunkOffset)

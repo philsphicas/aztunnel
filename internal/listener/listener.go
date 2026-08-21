@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -264,13 +263,13 @@ func classifyDialError(err error) string {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return protocol.CodeTimeout
 	}
-	if errors.Is(err, syscall.ECONNREFUSED) {
+	if errors.Is(err, errConnectionRefused) {
 		return protocol.CodeConnectionRefused
 	}
-	if errors.Is(err, syscall.EHOSTUNREACH) {
+	if errors.Is(err, errHostUnreachable) {
 		return protocol.CodeHostUnreachable
 	}
-	if errors.Is(err, syscall.ENETUNREACH) {
+	if errors.Is(err, errNetworkUnreachable) {
 		return protocol.CodeNetworkUnreachable
 	}
 	return ""
