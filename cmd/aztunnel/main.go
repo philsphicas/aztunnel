@@ -40,7 +40,7 @@ func main() {
 	ctx, err := parser.Parse(os.Args[1:])
 	parser.FatalIfErrorf(err)
 
-	parser.FatalIfErrorf(ctx.Run(&CLI.Globals))
+	parser.FatalIfErrorf(ctx.Run(&CLI.Globals, parser))
 }
 
 // resolveMetrics creates a Metrics instance and starts the HTTP server if

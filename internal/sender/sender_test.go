@@ -18,6 +18,25 @@ import (
 	"github.com/philsphicas/aztunnel/internal/protocol"
 )
 
+func TestSOCKS5ProxyOccupiedBindReturnsError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve bind address: %v", err)
+	}
+	defer ln.Close() //nolint:errcheck // test cleanup
+
+	err = SOCKS5Proxy(context.Background(), SOCKS5Config{
+		BindAddress: ln.Addr().String(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err == nil {
+		t.Fatal("expected occupied bind address to return an error")
+	}
+	if !strings.Contains(err.Error(), "listen "+ln.Addr().String()) {
+		t.Errorf("error = %q, want bind failure for %s", err, ln.Addr())
+	}
+}
+
 // --- stdioConn tests ---
 
 type fakeReadCloser struct {

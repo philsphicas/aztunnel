@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"os"
 	"os/signal"
 
@@ -13,7 +11,8 @@ import (
 // Socks5ProxyCmd runs a local SOCKS5 proxy through the relay.
 type Socks5ProxyCmd struct {
 	AuthFlags
-	BindFlags
+	LocalListenerFlags
+	Bind string `short:"b" help:"Local bind address:port." default:"127.0.0.1:1080"`
 }
 
 // Run executes the socks5-proxy command.
@@ -28,16 +27,9 @@ func (s *Socks5ProxyCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	bind := s.Bind
-	if s.Gateway {
-		_, port, err := net.SplitHostPort(bind)
-		if err != nil {
-			return fmt.Errorf("invalid --bind address %q: %w", bind, err)
-		}
-		if port == "" {
-			port = "0"
-		}
-		bind = "0.0.0.0:" + port
+	bind, err := resolveBindAddress(s.Bind, s.Gateway)
+	if err != nil {
+		return err
 	}
 	logger := newLogger(globals.LogLevel)
 	warnInsecureTLS(opts, logger)

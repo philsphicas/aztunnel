@@ -34,13 +34,14 @@ Usage:
   aztunnel relay-sender connect <host:port> [flags]
   aztunnel arc connect [flags]
   aztunnel arc port-forward [flags]
+  aztunnel version
 
 Global Options:
       --log-level string            Log level: debug, info, warn, error (default "info")
       --metrics-addr string         Prometheus metrics server address (e.g. :9090); disabled if empty
       --metrics-max-targets int     Max unique target labels in metrics; 0 = unlimited (default 500)
       --help, -h                    Show this help message
-      --version                     Print version and exit
+      --version                     Print version and exit (preferred)
 
 Relay Listener:
   Start a relay-listener that accepts connections from the Azure Relay
@@ -82,7 +83,7 @@ Relay Sender - SOCKS5 Proxy:
       --relay string                Azure Relay namespace name, FQDN, or URI
       --hyco string                 Hybrid connection name
       --relay-suffix string         Namespace suffix for sovereign clouds
-  -b, --bind string                 Local bind address:port (default "127.0.0.1:0")
+  -b, --bind string                 Local bind address:port (default "127.0.0.1:1080")
       --gateway                     Bind to 0.0.0.0 instead of 127.0.0.1
       --tcp-keepalive duration      TCP keepalive interval (default 30s)
 
