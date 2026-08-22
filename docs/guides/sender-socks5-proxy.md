@@ -26,8 +26,7 @@ Start the SOCKS5 proxy:
 ```sh
 aztunnel relay-sender socks5-proxy \
   --relay my-relay-ns \
-  --hyco my-tunnel \
-  --bind 127.0.0.1:1080
+  --hyco my-tunnel
 ```
 
 The proxy listens on `127.0.0.1:1080` and forwards each connection through
@@ -143,11 +142,12 @@ ssh -o ProxyCommand="nc -x 127.0.0.1:1080 %h %p" user@10.0.0.5
 
 ## Ephemeral port
 
-If you don't care which port the proxy binds to, omit `--bind` or use
-port `0`. The OS picks an available port automatically:
+The default bind is `127.0.0.1:1080`. To have the OS pick an available
+ephemeral port instead, explicitly pass port `0`:
 
 ```sh
-aztunnel relay-sender socks5-proxy --relay my-relay-ns --hyco my-tunnel
+aztunnel relay-sender socks5-proxy --relay my-relay-ns --hyco my-tunnel \
+  --bind 127.0.0.1:0
 ```
 
 aztunnel logs the assigned port:
@@ -160,7 +160,7 @@ If you're running it as a [bgtask](https://github.com/philsphicas/bgtask),
 `bgtask ls` shows the listening port automatically:
 
 ```sh
-bgtask run --name proxy -- aztunnel relay-sender socks5-proxy
+bgtask run --name proxy -- aztunnel relay-sender socks5-proxy --bind 127.0.0.1:0
 bgtask ls
 # → proxy  running  :52431  aztunnel relay-sender socks5-proxy
 ```
@@ -204,7 +204,7 @@ export AZTUNNEL_HYCO_NAME=my-tunnel
 export AZTUNNEL_KEY_NAME=send-policy
 export AZTUNNEL_KEY='<your-sas-key>'
 
-aztunnel relay-sender socks5-proxy --bind 127.0.0.1:1080
+aztunnel relay-sender socks5-proxy
 ```
 
 ## Debugging

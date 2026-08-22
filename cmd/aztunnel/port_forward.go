@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"net"
 	"os"
 	"os/signal"
 
@@ -13,7 +11,8 @@ import (
 // PortForwardCmd forwards a local port through the relay.
 type PortForwardCmd struct {
 	AuthFlags
-	BindFlags
+	LocalListenerFlags
+	Bind   string `short:"b" help:"Local bind address:port." default:"127.0.0.1:0"`
 	Target string `arg:"" required:"" help:"Target host:port."`
 }
 
@@ -29,16 +28,9 @@ func (p *PortForwardCmd) Run(globals *Globals) error {
 		return err
 	}
 
-	bind := p.Bind
-	if p.Gateway {
-		_, port, err := net.SplitHostPort(bind)
-		if err != nil {
-			return fmt.Errorf("invalid --bind address %q: %w", bind, err)
-		}
-		if port == "" {
-			port = "0"
-		}
-		bind = "0.0.0.0:" + port
+	bind, err := resolveBindAddress(p.Bind, p.Gateway)
+	if err != nil {
+		return err
 	}
 	logger := newLogger(globals.LogLevel)
 	warnInsecureTLS(opts, logger)

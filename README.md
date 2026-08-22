@@ -171,7 +171,7 @@ Run a local SOCKS5 proxy, forwarding any target through the relay:
 aztunnel relay-listener --relay my-ns --hyco my-hyco --allow "10.0.0.0/8:*"
 
 # Local:
-aztunnel relay-sender socks5-proxy --relay my-ns --hyco my-hyco -b 127.0.0.1:1080
+aztunnel relay-sender socks5-proxy --relay my-ns --hyco my-hyco
 
 # Use it:
 curl --socks5 127.0.0.1:1080 http://10.0.0.5:8080/health
@@ -247,9 +247,10 @@ Commands:
   relay-sender connect                  One-shot stdin/stdout connection (ProxyCommand)
   arc connect                           One-shot connection through an Arc relay (ProxyCommand)
   arc port-forward                      Forward a local port through an Arc relay
+  version                               Print the version and exit
 
 Global flags:
-  --version                 Print the version and exit
+  --version                   Print the version and exit (preferred)
   --log-level string          Log level: debug, info, warn, error (default "info")
   --metrics-addr string       Address for Prometheus metrics server (e.g. :9090); disabled if empty
   --metrics-max-targets int   Max unique target labels in metrics (default 500, 0 = unlimited)
@@ -290,7 +291,7 @@ aztunnel relay-sender socks5-proxy [flags]
 Flags:
   --relay string       Azure Relay namespace name
   --hyco string            Hybrid connection name
-  -b, --bind string        Local bind address:port (default "127.0.0.1:0")
+  -b, --bind string        Local bind address:port (default "127.0.0.1:1080")
   --gateway                Bind to 0.0.0.0 instead of 127.0.0.1
   --tcp-keepalive duration TCP keepalive interval (default 30s)
 ```
