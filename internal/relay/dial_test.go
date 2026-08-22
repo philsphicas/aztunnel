@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -224,6 +225,56 @@ func TestDialWithLogger(t *testing.T) {
 }
 
 func TestDialWithRetry(t *testing.T) {
+	t.Run("retries pre-response attempt deadline then succeeds", func(t *testing.T) {
+		var attempts atomic.Int32
+		firstCancelled := make(chan struct{})
+
+		srv := dialTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) == 1 {
+				<-r.Context().Done()
+				close(firstCancelled)
+				return
+			}
+
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Errorf("accept second attempt: %v", err)
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		ws, err := dialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger, retryConfig{
+			attemptTimeout: 50 * time.Millisecond,
+			initialDelay:   10 * time.Millisecond,
+			maxDelay:       10 * time.Millisecond,
+			multiplier:     1,
+		})
+		if err != nil {
+			t.Fatalf("dialWithRetry: %v", err)
+		}
+		defer ws.CloseNow()
+
+		select {
+		case <-firstCancelled:
+		case <-time.After(time.Second):
+			t.Fatal("first request context was not cancelled at the per-attempt deadline")
+		}
+		if got := attempts.Load(); got != 2 {
+			t.Fatalf("attempts = %d, want 2", got)
+		}
+		// This models the observed pre-registration blackhole. A retry can
+		// still duplicate work if registration succeeded but HTTP 101 was
+		// lost because the Relay protocol has no idempotency key.
+	})
+
 	t.Run("retries on 404 then succeeds", func(t *testing.T) {
 		var mu sync.Mutex
 		attempts := 0
@@ -328,6 +379,48 @@ func TestDialWithRetry(t *testing.T) {
 		}
 		if !errors.Is(err, context.DeadlineExceeded) {
 			t.Errorf("error should wrap context.DeadlineExceeded, got: %v", err)
+		}
+	})
+
+	t.Run("parent cancellation during pre-response wait is not retried", func(t *testing.T) {
+		var attempts atomic.Int32
+		requestStarted := make(chan struct{})
+
+		srv := dialTestServer(t, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) == 1 {
+				close(requestStarted)
+			}
+			<-r.Context().Done()
+		}))
+
+		tp := &mockTokenProvider{token: "test-token"}
+		endpoint := strings.TrimPrefix(srv.URL, "https://")
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		ctx, cancel := context.WithCancel(context.Background())
+
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := DialWithRetry(ctx, endpoint, "test-entity", tp, ClientOptions{}, logger)
+			errCh <- err
+		}()
+
+		select {
+		case <-requestStarted:
+		case <-time.After(time.Second):
+			t.Fatal("request did not reach server")
+		}
+		cancel()
+
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("DialWithRetry did not exit after parent cancellation")
+		}
+		if got := attempts.Load(); got != 1 {
+			t.Fatalf("attempts = %d, want 1", got)
 		}
 	})
 

@@ -209,6 +209,12 @@ func (*azureBackend) ColdStartLatencyThreshold() time.Duration {
 	return 6 * time.Second
 }
 
+// listenerStartupReadinessTimeout covers one 30s control dial, the initial
+// 1s reconnect backoff, and a short successful second attempt. West US 2 can
+// blackhole an upgrade until the first dial deadline, so waiting exactly 30s
+// races the listener's working reconnect path.
+const listenerStartupReadinessTimeout = 40 * time.Second
+
 // Setup brings up the requested topology (NumListeners listeners and
 // max(NumSenders,1) senders), waits until every listener has logged
 // "control_started" and every sender has logged its bind
@@ -268,7 +274,7 @@ func (b *azureBackend) Setup(t testing.TB, opts scenarios.SetupOptions) *scenari
 	spawnListener := func(t testing.TB) *scenarios.Listener {
 		t.Helper()
 		lst := startListener(t, env, auth, listenerArgs...)
-		waitForLog(t, lst, "control_started", 30*time.Second)
+		waitForLog(t, lst, "control_started", listenerStartupReadinessTimeout)
 		metricsAddr := lst.MetricsAddr(t, 15*time.Second)
 		return &scenarios.Listener{
 			Addr:             metricsAddr,
@@ -575,7 +581,7 @@ func (b *azureBackend) SetupExpectingFailure(t testing.TB, opts scenarios.SetupO
 	if opts.NumListeners > 0 {
 		lp := startListener(t, env, auth, "--metrics-addr", "127.0.0.1:0", "--log-level", "debug")
 		listenerLogs = func() string { return lp.logs.String() }
-		waitForLog(t, lp, "control_started", 30*time.Second)
+		waitForLog(t, lp, "control_started", listenerStartupReadinessTimeout)
 	}
 
 	if opts.SenderMode == scenarios.ModeConnect {

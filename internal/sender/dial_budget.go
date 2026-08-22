@@ -10,10 +10,10 @@ import "time"
 // listener will then dial its target for an app that's gone. See
 // issue #94 ("ghost rendezvous").
 //
-// 30s preserves the existing 30s per-attempt dial timeout and permits
-// several 1–5s backoff cycles before giving up; longer than any
-// reasonable local-app socket timeout, so existing happy-path callers
-// see no behaviour change.
+// 30s preserves the sender's existing total connection budget. Relay
+// handshake attempts and their exponential backoffs all fit inside this
+// bound, so a stalled attempt can recover without extending how long the
+// local app socket waits.
 const defaultDialBudget = 30 * time.Second
 
 // dialBudget returns d unchanged, or defaultDialBudget when d is
