@@ -2,22 +2,27 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"net"
 	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/willabides/kongplete"
 )
 
-// CLI defines the top-level command structure.
-var CLI struct {
+// CLIConfig defines the top-level command structure.
+type CLIConfig struct {
 	Globals
 
 	RelayListener RelayListenerCmd             `cmd:"" name:"relay-listener" help:"Listen on Azure Relay and forward connections to local targets."`
 	RelaySender   RelaySenderCmd               `cmd:"" name:"relay-sender" help:"Send connections through Azure Relay."`
 	Arc           ArcCmd                       `cmd:"" help:"Connect through Azure Arc managed relays."`
-	Version       VersionFlag                  `name:"version" help:"Print version and exit."`
+	VersionFlag   VersionFlag                  `name:"version" help:"Print version and exit (preferred)."`
+	Version       VersionCmd                   `cmd:"" help:"Print version and exit."`
 	Completion    kongplete.InstallCompletions `cmd:"" help:"Output shell completion script." hidden:""`
 }
+
+var CLI CLIConfig
 
 // Globals holds flags inherited by all commands.
 type Globals struct {
@@ -31,9 +36,22 @@ type VersionFlag bool
 
 // BeforeApply prints the version and exits.
 func (v VersionFlag) BeforeApply(app *kong.Kong) error {
-	_, _ = fmt.Fprintln(app.Stdout, version)
+	writeVersion(app.Stdout)
 	app.Exit(0)
 	return nil
+}
+
+// VersionCmd supports the backwards-compatible `aztunnel version` form.
+type VersionCmd struct{}
+
+// Run prints the version.
+func (*VersionCmd) Run(app *kong.Kong) error {
+	writeVersion(app.Stdout)
+	return nil
+}
+
+func writeVersion(w io.Writer) {
+	_, _ = fmt.Fprintln(w, version)
 }
 
 // AuthFlags holds Azure Relay authentication flags shared across relay commands.
@@ -45,11 +63,24 @@ type AuthFlags struct {
 	RelayInsecureTLS bool   `name:"relay-insecure-tls" help:"Skip TLS certificate verification (mock/self-hosted only)."`
 }
 
-// BindFlags holds local bind flags shared across port-forward and socks5 commands.
-type BindFlags struct {
-	Bind         string        `short:"b" help:"Local bind address:port." default:"127.0.0.1:0"`
+// LocalListenerFlags holds behavior shared by local TCP listener commands.
+type LocalListenerFlags struct {
 	Gateway      bool          `help:"Bind to 0.0.0.0 instead of 127.0.0.1."`
 	TCPKeepAlive time.Duration `name:"tcp-keepalive" help:"TCP keepalive interval." default:"30s"`
+}
+
+func resolveBindAddress(bind string, gateway bool) (string, error) {
+	if !gateway {
+		return bind, nil
+	}
+	_, port, err := net.SplitHostPort(bind)
+	if err != nil {
+		return "", fmt.Errorf("invalid --bind address %q: %w", bind, err)
+	}
+	if port == "" {
+		port = "0"
+	}
+	return "0.0.0.0:" + port, nil
 }
 
 // RelaySenderCmd is a grouping command for relay sender subcommands.
