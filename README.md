@@ -48,22 +48,21 @@ make install      # installs to $GOPATH/bin
 docker run --rm ghcr.io/philsphicas/aztunnel:dev --help
 ```
 
-Stable releases use semantic-version tags such as `:0.3.0`, the rolling
-minor tag `:0.3`, and `:latest`. The `:dev` channel tracks the latest
-successfully validated commit on `main`; it is a best-effort development
-snapshot rather than a supported stable release.
+For a release named `vX.Y.Z`, Docker tags omit the leading `v`. Stable releases
+publish the exact version, rolling minor, and latest tags shown below. The
+development tags track the latest successfully validated commit on `main`;
+they are best-effort snapshots rather than supported stable releases.
 
-Image variants:
+| Image                                | Variant            | Stable release tags                                    | Development tag |
+| ------------------------------------ | ------------------ | ------------------------------------------------------ | --------------- |
+| `ghcr.io/philsphicas/aztunnel`       | scratch (default)  | `:X.Y.Z`, `:X.Y`, `:latest`                            | `:dev`          |
+| `ghcr.io/philsphicas/aztunnel`       | Alpine             | `:X.Y.Z-alpine`, `:X.Y-alpine`, `:latest-alpine`       | `:dev-alpine`   |
+| `ghcr.io/philsphicas/aztunnel`       | Bookworm           | `:X.Y.Z-bookworm`, `:X.Y-bookworm`, `:latest-bookworm` | `:dev-bookworm` |
+| `ghcr.io/philsphicas/aztunnel-relay` | Bookworm (default) | `:X.Y.Z`, `:X.Y`, `:latest`                            | `:dev`          |
+| `ghcr.io/philsphicas/aztunnel-relay` | Alpine             | `:X.Y.Z-alpine`, `:X.Y-alpine`, `:latest-alpine`       | `:dev-alpine`   |
 
-| Stable / development tag                                                 | Base                   | Description                   |
-| ------------------------------------------------------------------------ | ---------------------- | ----------------------------- |
-| `:latest`, `:0.3`, `:0.3.0` / `:dev`                                     | `scratch`              | Static binary, smallest image |
-| `:latest-alpine`, `:0.3-alpine`, `:0.3.0-alpine` / `:dev-alpine`         | `alpine`               | Includes shell and apk        |
-| `:latest-bookworm`, `:0.3-bookworm`, `:0.3.0-bookworm` / `:dev-bookworm` | `debian:bookworm-slim` | Includes bash and apt         |
-
-The separate `ghcr.io/philsphicas/aztunnel-relay` image keeps its existing
-Bookworm default and Alpine variant. `aztunnel-relay` is a mock/development
-relay and is not supported for production use.
+`aztunnel-relay` is a mock/development relay and is not supported for
+production use.
 
 Build locally:
 
