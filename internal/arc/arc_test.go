@@ -6,10 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -388,7 +391,216 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
+func relayInfoForHost(t *testing.T, host string) *RelayInfo {
+	t.Helper()
+	namespace, suffix, ok := strings.Cut(host, ".")
+	if !ok {
+		t.Fatalf("host %q does not contain the Arc namespace separator", host)
+	}
+	return &RelayInfo{
+		NamespaceName:             namespace,
+		NamespaceNameSuffix:       suffix,
+		HybridConnectionName:      "test-hyco",
+		AccessKey:                 "test-key",
+		ServiceConfigurationToken: "test-token",
+	}
+}
+
+func relayInfoForTestServer(t *testing.T, srv *httptest.Server) *RelayInfo {
+	t.Helper()
+	return relayInfoForHost(t, strings.TrimPrefix(srv.URL, "https://"))
+}
+
+func isConnectionRefused(err error) bool {
+	// Winsock uses WSAECONNREFUSED (10061), while Unix platforms expose
+	// the portable ECONNREFUSED value.
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.Errno(10061))
+}
+
 func TestDialWithLoggerRetry(t *testing.T) {
+	t.Run("retries pre-response attempt deadline then succeeds", func(t *testing.T) {
+		var attempts atomic.Int32
+		firstCancelled := make(chan struct{})
+
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) == 1 {
+				<-r.Context().Done()
+				close(firstCancelled)
+				return
+			}
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				t.Errorf("accept second attempt: %v", err)
+				return
+			}
+			defer ws.CloseNow()
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		ws, err := dialWithOptions(ctx, relayInfoForTestServer(t, srv), 22, logger, DialOptions{}, retryConfig{
+			attemptTimeout: 50 * time.Millisecond,
+			initialDelay:   10 * time.Millisecond,
+			maxDelay:       10 * time.Millisecond,
+			multiplier:     1,
+		})
+		if err != nil {
+			t.Fatalf("dialWithOptions: %v", err)
+		}
+		defer ws.CloseNow()
+
+		select {
+		case <-firstCancelled:
+		case <-time.After(time.Second):
+			t.Fatal("first request context was not cancelled at the per-attempt deadline")
+		}
+		if got := attempts.Load(); got != 2 {
+			t.Fatalf("attempts = %d, want 2", got)
+		}
+	})
+
+	t.Run("parent cancellation during pre-response wait is not retried", func(t *testing.T) {
+		var attempts atomic.Int32
+		requestStarted := make(chan struct{})
+
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			if attempts.Add(1) == 1 {
+				close(requestStarted)
+			}
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		info := relayInfoForTestServer(t, srv)
+		go func() {
+			_, err := dialWithOptions(ctx, info, 22, logger, DialOptions{}, retryConfig{
+				attemptTimeout: time.Second,
+				initialDelay:   10 * time.Millisecond,
+				maxDelay:       10 * time.Millisecond,
+				multiplier:     1,
+			})
+			errCh <- err
+		}()
+
+		select {
+		case <-requestStarted:
+		case <-time.After(time.Second):
+			t.Fatal("request did not reach server")
+		}
+		cancel()
+
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %v, want context.Canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("dialWithOptions did not exit after parent cancellation")
+		}
+		if got := attempts.Load(); got != 1 {
+			t.Fatalf("attempts = %d, want 1", got)
+		}
+	})
+
+	t.Run("pre-response connection reset fails immediately without retry", func(t *testing.T) {
+		var attempts atomic.Int32
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			attempts.Add(1)
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_ = conn.Close()
+		}))
+		defer srv.Close()
+
+		origTransport := http.DefaultTransport
+		http.DefaultTransport = &http.Transport{
+			TLSClientConfig: srv.Client().Transport.(*http.Transport).TLSClientConfig,
+		}
+		defer func() { http.DefaultTransport = origTransport }()
+
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		_, err := dialWithOptions(ctx, relayInfoForTestServer(t, srv), 22, logger, DialOptions{}, retryConfig{
+			attemptTimeout: 200 * time.Millisecond,
+			initialDelay:   10 * time.Millisecond,
+			maxDelay:       10 * time.Millisecond,
+			multiplier:     1,
+		})
+		if err == nil {
+			t.Fatal("expected reset error")
+		}
+		if got := attempts.Load(); got != 1 {
+			t.Fatalf("attempts = %d, want 1", got)
+		}
+	})
+
+	t.Run("connection refused fails immediately without retry", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		host := listener.Addr().String()
+		if err := listener.Close(); err != nil {
+			t.Fatalf("close listener: %v", err)
+		}
+
+		info := relayInfoForHost(t, host)
+		if got := info.NamespaceName + "." + info.NamespaceNameSuffix; got != host {
+			t.Fatalf("Arc relay host = %q, want closed listener %q", got, host)
+		}
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		start := time.Now()
+		_, err = dialWithOptions(ctx, info, 22, logger, DialOptions{}, retryConfig{
+			attemptTimeout: 200 * time.Millisecond,
+			initialDelay:   300 * time.Millisecond,
+			maxDelay:       300 * time.Millisecond,
+			multiplier:     1,
+		})
+		if err == nil {
+			t.Fatal("expected connection-refused error")
+		}
+		var opErr *net.OpError
+		if !errors.As(err, &opErr) {
+			t.Fatalf("error = %T %v, want a network dial error", err, err)
+		}
+		if !isConnectionRefused(err) {
+			t.Fatalf("network dial error = %v, want connection refused", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("connection refusal was retried until the parent deadline: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed >= 300*time.Millisecond {
+			t.Fatalf("connection refusal took %s; expected immediate failure before retry delay", elapsed)
+		}
+	})
+
 	t.Run("retries on 404 then succeeds", func(t *testing.T) {
 		var mu sync.Mutex
 		attempts := 0
@@ -403,6 +615,7 @@ func TestDialWithLoggerRetry(t *testing.T) {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
+
 			ws, err := websocket.Accept(w, r, nil)
 			if err != nil {
 				return

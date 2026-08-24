@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -204,11 +205,18 @@ func Dial(ctx context.Context, info *RelayInfo, port int) (*websocket.Conn, erro
 
 // Retry parameters for DialWithOptions.
 const (
-	retryInitial    = 1 * time.Second
-	retryMax        = 5 * time.Second
-	retryMultiplier = 2
-	dialTimeout     = 30 * time.Second
+	retryAttemptTimeout = 10 * time.Second
+	retryInitial        = 1 * time.Second
+	retryMax            = 5 * time.Second
+	retryMultiplier     = 2
 )
+
+type retryConfig struct {
+	attemptTimeout time.Duration
+	initialDelay   time.Duration
+	maxDelay       time.Duration
+	multiplier     int
+}
 
 // Progress-log timings are vars (not consts) so tests can shorten them
 // without using real time.
@@ -242,8 +250,8 @@ type DialOptions struct {
 }
 
 // DialWithLogger is like Dial but logs the connection attempt and retries
-// on transient 404/503 errors (no active listener) with exponential backoff
-// until ctx expires.
+// on transient 404/503 errors (no active listener) and pre-response attempt
+// deadlines with exponential backoff until ctx expires.
 func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog.Logger) (*websocket.Conn, error) {
 	return DialWithOptions(ctx, info, port, logger, DialOptions{})
 }
@@ -251,6 +259,15 @@ func DialWithLogger(ctx context.Context, info *RelayInfo, port int, logger *slog
 // DialWithOptions is like DialWithLogger but accepts options that adjust
 // progress logging during retries.
 func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slog.Logger, opts DialOptions) (*websocket.Conn, error) {
+	return dialWithOptions(ctx, info, port, logger, opts, retryConfig{
+		attemptTimeout: retryAttemptTimeout,
+		initialDelay:   retryInitial,
+		maxDelay:       retryMax,
+		multiplier:     retryMultiplier,
+	})
+}
+
+func dialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slog.Logger, opts DialOptions, cfg retryConfig) (*websocket.Conn, error) {
 	if port == 0 {
 		port = defaultPort
 	}
@@ -268,7 +285,7 @@ func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slo
 	headers.Set("Service-Configuration-Token", info.ServiceConfigurationToken)
 	headers.Set("Microsoft-Guestgateway-Target", fmt.Sprintf("localhost:%d", port))
 
-	delay := retryInitial
+	delay := cfg.initialDelay
 	start := time.Now()
 	attempts := 0
 	var lastStatus int
@@ -279,7 +296,7 @@ func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slo
 		connectURL := fmt.Sprintf("wss://%s/$hc/%s?sb-hc-action=connect&sb-hc-id=%s",
 			wssHost, info.HybridConnectionName, newUUID())
 
-		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+		dialCtx, cancel := context.WithTimeout(ctx, cfg.attemptTimeout)
 		ws, resp, err := websocket.Dial(dialCtx, connectURL, relay.WSDialOptions(headers, nil))
 		cancel()
 
@@ -306,17 +323,28 @@ func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slo
 			return nil, giveUpErr(attempts, time.Since(start), lastStatus, ctxErr)
 		}
 
-		if resp == nil || !relay.IsRetryableStatus(resp.StatusCode) {
+		retryableStatus := resp != nil && relay.IsRetryableStatus(resp.StatusCode)
+		retryableAttemptDeadline := resp == nil &&
+			ctx.Err() == nil &&
+			errors.Is(err, context.DeadlineExceeded)
+		if !retryableStatus && !retryableAttemptDeadline {
 			logger.Warn("arc relay dial failed", "error", sanitizeErr(err))
 			return nil, fmt.Errorf("dial arc relay: %w", sanitizeErr(err))
 		}
 
-		lastStatus = resp.StatusCode
-		logger.Debug("arc relay dial returned retryable status",
-			"status", resp.StatusCode,
-			"attempt", attempts,
-			"delay", delay,
-			"error", sanitizeErr(err))
+		if retryableStatus {
+			lastStatus = resp.StatusCode
+			logger.Debug("arc relay dial returned retryable status",
+				"status", resp.StatusCode,
+				"attempts", attempts,
+				"delay", delay,
+				"error", sanitizeErr(err))
+		} else {
+			logger.Debug("arc relay dial attempt timed out before HTTP response",
+				"attempts", attempts,
+				"delay", delay,
+				"error", sanitizeErr(err))
+		}
 
 		// Progress logging:
 		//   - ExplainSetup=true: emit immediately on first retry, then every
@@ -328,7 +356,7 @@ func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slo
 		//   - ExplainSetup=false: stay quiet for progressLogQuietDelay (covers
 		//     transient hiccups), then emit progress every progressLogPeriod
 		//     so operators see real "listener never appears" cases.
-		if opts.ExplainSetup {
+		if retryableStatus && opts.ExplainSetup {
 			if attempts == 1 {
 				logger.Info("waiting for Arc agent to register a relay listener (expected after creating or updating the HybridConnectivity configuration)",
 					"status", resp.StatusCode)
@@ -341,7 +369,7 @@ func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slo
 				lastProgressLog = time.Now()
 				progressLogged = true
 			}
-		} else if time.Since(start) >= progressLogQuietDelay && time.Since(lastProgressLog) >= progressLogPeriod {
+		} else if retryableStatus && time.Since(start) >= progressLogQuietDelay && time.Since(lastProgressLog) >= progressLogPeriod {
 			logger.Info("still waiting for arc relay listener",
 				"elapsed", time.Since(start).Truncate(time.Second),
 				"attempts", attempts,
@@ -356,7 +384,7 @@ func DialWithOptions(ctx context.Context, info *RelayInfo, port int, logger *slo
 		case <-time.After(delay):
 		}
 
-		delay = min(delay*retryMultiplier, retryMax)
+		delay = min(delay*time.Duration(cfg.multiplier), cfg.maxDelay)
 	}
 }
 
