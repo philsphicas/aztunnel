@@ -216,8 +216,8 @@ ports.
 
 ## Limitations
 
-This is a test fixture, not a production relay. It intentionally does
-not support the following:
+This is a test fixture, not a production relay. It has the following
+limitations:
 
 - **Dummy-key auth only.** The relay accepts any SAS token signed with
   the configured key (default: a hard-coded dev key), OR a JWT-shaped
