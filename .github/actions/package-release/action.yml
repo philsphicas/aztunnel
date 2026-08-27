@@ -3,7 +3,7 @@ description: Cross-build and package one aztunnel release target
 
 inputs:
   version:
-    description: Version embedded in both binaries and the bundle name
+    description: Version embedded in the binary and the bundle name
     required: true
   goos:
     description: Target operating system
@@ -44,17 +44,7 @@ runs:
           go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
           -o "${stage}/aztunnel${extension}" ./cmd/aztunnel
 
-        CGO_ENABLED=0 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" \
-          GOWORK="${GITHUB_WORKSPACE}/go.work" \
-          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
-          -o "${stage}/aztunnel-relay${extension}" ./mockrelay/cmd/aztunnel-relay
-
         cp LICENSE README.md "$stage/"
-        cat > "${stage}/RELAY-NOTICE.txt" <<'EOF'
-        aztunnel-relay is a non-production mock/development relay.
-        It is bundled to preserve the existing release contract, but is not supported
-        as a production relay service. See mockrelay/README.md in the source repository.
-        EOF
 
         if [[ "$TARGET_OS" == "windows" ]]; then
           asset="${bundle}.zip"
@@ -65,7 +55,7 @@ runs:
           )
         else
           asset="${bundle}.tar.gz"
-          chmod 0755 "${stage}/aztunnel" "${stage}/aztunnel-relay"
+          chmod 0755 "${stage}/aztunnel"
           tar --sort=name \
             --mtime="UTC 1970-01-01" \
             --owner=0 \

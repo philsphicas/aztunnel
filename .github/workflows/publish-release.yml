@@ -694,7 +694,6 @@ jobs:
 
           This rolling prerelease is built from the latest successfully validated commit on \`main\`.
           Development builds are short-lived snapshots and receive best-effort support.
-          The bundled \`aztunnel-relay\` is a non-production mock/development relay.
 
           Publication stages versioned assets before moving the \`dev\` tag and metadata. GitHub
           Releases and GHCR do not support an atomic transaction, so a failed promotion is surfaced
