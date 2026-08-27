@@ -18,7 +18,7 @@ import (
 )
 
 func TestAutomemlimitActive(t *testing.T) {
-	// automemlimit is activated via blank import in main.go. It reads the
+	// automemlimit is initialized in main.go. It reads the
 	// cgroup memory limit (container or systemd MemoryMax=) and sets
 	// GOMEMLIMIT to 90% of that value. On machines without a cgroup limit
 	// it logs "memory is not limited, skipping" and leaves GOMEMLIMIT at

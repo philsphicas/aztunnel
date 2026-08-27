@@ -32,7 +32,7 @@ import (
 var version = "dev"
 
 func init() {
-	_, _ = memlimit.SetGoMemLimitWithOpts(memlimit.WithLogger(nil))
+	_, _ = memlimit.Set()
 }
 
 // CLI is the top-level command structure for aztunnel-relay.
