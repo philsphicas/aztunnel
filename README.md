@@ -79,8 +79,9 @@ and the rolling [`dev` prerelease](https://github.com/philsphicas/aztunnel/relea
 provide Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 bundles.
 Unix bundles are `.tar.gz` archives that preserve executable permissions;
 Windows bundles are `.zip` archives. Each bundle contains `aztunnel`,
-the non-production `aztunnel-relay`, `README.md`, `LICENSE`, and a relay
-support notice.
+`README.md`, and `LICENSE`. `aztunnel-relay` is a non-production
+mock/development relay and is not included in these bundles; use its
+[Docker image](#docker) if you need it.
 
 Each release also includes `aztunnel-<version>-checksums.txt`. Verify a
 download from the directory containing the bundle and manifest with:
