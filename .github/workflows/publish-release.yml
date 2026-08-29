@@ -297,13 +297,95 @@ jobs:
             fi
           fi
 
-          files=(
+          bundle_files=(
             "aztunnel-${VERSION}-linux-amd64.tar.gz"
             "aztunnel-${VERSION}-linux-arm64.tar.gz"
             "aztunnel-${VERSION}-darwin-amd64.tar.gz"
             "aztunnel-${VERSION}-darwin-arm64.tar.gz"
             "aztunnel-${VERSION}-windows-amd64.zip"
           )
+
+          files=("${bundle_files[@]}")
+          if [[ "$CHANNEL" == "stable" ]]; then
+            extract_tar_binary() {
+              local archive="$1"
+              local member="$2"
+              local output="$3"
+              local member_count
+
+              member_count="$(
+                tar -tzf "$archive" |
+                  awk -v member="$member" '$0 == member { count++ } END { print count + 0 }'
+              )"
+              if [[ "$member_count" != "1" ]]; then
+                echo "::error::Expected exactly one ${member} in ${archive}, found ${member_count}."
+                exit 1
+              fi
+              tar -xOzf "$archive" "$member" > "$output"
+              if [[ ! -s "$output" ]]; then
+                echo "::error::Extracted compatibility binary ${output} is empty."
+                exit 1
+              fi
+              chmod 0755 "$output"
+            }
+
+            extract_zip_binary() {
+              local archive="$1"
+              local member="$2"
+              local output="$3"
+              local member_count
+
+              member_count="$(
+                unzip -Z1 "$archive" |
+                  awk -v member="$member" '$0 == member { count++ } END { print count + 0 }'
+              )"
+              if [[ "$member_count" != "1" ]]; then
+                echo "::error::Expected exactly one ${member} in ${archive}, found ${member_count}."
+                exit 1
+              fi
+              unzip -p "$archive" "$member" > "$output"
+              if [[ ! -s "$output" ]]; then
+                echo "::error::Extracted compatibility binary ${output} is empty."
+                exit 1
+              fi
+            }
+
+            legacy_files=(
+              "aztunnel-linux-amd64"
+              "aztunnel-linux-arm64"
+              "aztunnel-darwin-amd64"
+              "aztunnel-darwin-arm64"
+              "aztunnel-windows-amd64.exe"
+            )
+            extract_tar_binary \
+              "aztunnel-${VERSION}-linux-amd64.tar.gz" \
+              "aztunnel-${VERSION}-linux-amd64/aztunnel" \
+              "aztunnel-linux-amd64"
+            extract_tar_binary \
+              "aztunnel-${VERSION}-linux-arm64.tar.gz" \
+              "aztunnel-${VERSION}-linux-arm64/aztunnel" \
+              "aztunnel-linux-arm64"
+            extract_tar_binary \
+              "aztunnel-${VERSION}-darwin-amd64.tar.gz" \
+              "aztunnel-${VERSION}-darwin-amd64/aztunnel" \
+              "aztunnel-darwin-amd64"
+            extract_tar_binary \
+              "aztunnel-${VERSION}-darwin-arm64.tar.gz" \
+              "aztunnel-${VERSION}-darwin-arm64/aztunnel" \
+              "aztunnel-darwin-arm64"
+            extract_zip_binary \
+              "aztunnel-${VERSION}-windows-amd64.zip" \
+              "aztunnel-${VERSION}-windows-amd64/aztunnel.exe" \
+              "aztunnel-windows-amd64.exe"
+
+            files+=("${legacy_files[@]}")
+            reported_version="$(./aztunnel-linux-amd64 --version)"
+            if [[ "$reported_version" != "$VERSION" ]]; then
+              echo "::error::Compatibility binary reports ${reported_version:-<empty>}, expected ${VERSION}."
+              exit 1
+            fi
+          fi
+
           sha256sum "${files[@]}" > "aztunnel-${VERSION}-checksums.txt"
           sha256sum --check "aztunnel-${VERSION}-checksums.txt"
 
@@ -558,6 +640,11 @@ jobs:
             "release-assets/aztunnel-${VERSION}-darwin-amd64.tar.gz"
             "release-assets/aztunnel-${VERSION}-darwin-arm64.tar.gz"
             "release-assets/aztunnel-${VERSION}-windows-amd64.zip"
+            "release-assets/aztunnel-linux-amd64"
+            "release-assets/aztunnel-linux-arm64"
+            "release-assets/aztunnel-darwin-amd64"
+            "release-assets/aztunnel-darwin-arm64"
+            "release-assets/aztunnel-windows-amd64.exe"
             "release-assets/aztunnel-${VERSION}-checksums.txt"
           )
           if [[ "$(cat .stable-draft-exists)" == "false" ]]; then
