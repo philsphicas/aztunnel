@@ -382,14 +382,12 @@ aztunnel automatically tunes the Go garbage collector based on the memory
 limit of the environment it runs in. When a cgroup memory limit is detected
 (container `--memory`, systemd `MemoryMax=`), `GOMEMLIMIT` is set to 90%
 of that limit so the GC can make informed decisions and avoid OOM kills.
-If no cgroup limit is found, `GOMEMLIMIT` is left at the Go default and
-automemlimit logs "memory is not limited, skipping".
+If no cgroup limit is found, `GOMEMLIMIT` remains at the Go default.
 
 This is powered by [automemlimit](https://github.com/KimMachineGun/automemlimit)
 and requires no configuration. To override the behavior, set `GOMEMLIMIT`
 explicitly (e.g., `GOMEMLIMIT=512MiB`) or set `AUTOMEMLIMIT=0.8` to change
-the ratio. To use total system memory as a fallback when no cgroup limit
-exists, set `AUTOMEMLIMIT_EXPERIMENT=system`.
+the ratio.
 
 ## Environment variables
 
@@ -403,7 +401,6 @@ exists, set `AUTOMEMLIMIT_EXPERIMENT=system`.
 | `AZTUNNEL_METRICS_ADDR`    | Address for Prometheus metrics server (e.g. `:9090`) |
 | `GOMEMLIMIT`               | Override automatic memory limit (e.g. `512MiB`)      |
 | `AUTOMEMLIMIT`             | Ratio of cgroup limit to use (default `0.9`)         |
-| `AUTOMEMLIMIT_EXPERIMENT`  | Comma-separated experiments (e.g. `system`)          |
 
 ## License
 
