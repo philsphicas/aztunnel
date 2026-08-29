@@ -99,7 +99,9 @@ func (o ClientOptions) dialOptions() *websocket.DialOptions {
 // cache, forces a TLS 1.3 minimum, and (when the caller has not
 // supplied their own) installs relayCurvePreferences so the initial
 // ClientHello key_share is P-384 and Azure Relay does not respond
-// with a HelloRetryRequest.
+// with a HelloRetryRequest. HTTP keep-alives are disabled because this
+// transport serves exactly one WebSocket dial; a failed handshake
+// connection placed in its idle pool could never be reused.
 //
 // headers may be nil; baseTLS may be nil. When baseTLS is nil and the
 // cloned transport already carries a TLSClientConfig (test harnesses
@@ -114,12 +116,19 @@ func (o ClientOptions) dialOptions() *websocket.DialOptions {
 // touch TLSConfig.NextProtos). The ClientSessionCache field is a
 // pointer to a shared, concurrency-safe LRU, so cloning still shares
 // the same cache across dials — which is what makes resumption work.
+// Disabling HTTP keep-alives does not affect upgraded WebSocket
+// connections, TCP keepalive, or TLS session resumption. Revisit that
+// policy if this helper ever returns a shared transport or supports
+// WebSockets over HTTP/2.
 func WSDialOptions(headers http.Header, baseTLS *tls.Config) *websocket.DialOptions {
 	tr := defaultTransportClone()
 	if baseTLS == nil && tr.TLSClientConfig != nil {
 		baseTLS = tr.TLSClientConfig
 	}
 	tr.TLSClientConfig = tlsConfigForDial(baseTLS)
+	// Go 1.16+ preserves protocol-switch requests when HTTP keep-alives
+	// are disabled (golang/go#36381), so successful upgrades are unaffected.
+	tr.DisableKeepAlives = true
 
 	var c http.Client
 	if dc := http.DefaultClient; dc != nil {

@@ -3,9 +3,11 @@ package relay
 import (
 	"context"
 	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -128,6 +130,9 @@ func TestWSDialOptionsAlwaysAttachesSessionCache(t *testing.T) {
 		if tr.TLSClientConfig.MinVersion != tls.VersionTLS13 {
 			t.Errorf("MinVersion = %#x, want %#x", tr.TLSClientConfig.MinVersion, tls.VersionTLS13)
 		}
+		if !tr.DisableKeepAlives {
+			t.Error("DisableKeepAlives = false, want true for one-shot WebSocket transport")
+		}
 	})
 
 	t.Run("caller InsecureSkipVerify preserved", func(t *testing.T) {
@@ -246,6 +251,109 @@ func TestWSDialOptionsAlwaysAttachesSessionCache(t *testing.T) {
 	})
 }
 
+type failedHandshakeConnTracker struct {
+	mu       sync.Mutex
+	seen     map[net.Conn]struct{}
+	closed   map[net.Conn]struct{}
+	closedCh chan net.Conn
+}
+
+func newFailedHandshakeConnTracker(capacity int) *failedHandshakeConnTracker {
+	return &failedHandshakeConnTracker{
+		seen:     make(map[net.Conn]struct{}),
+		closed:   make(map[net.Conn]struct{}),
+		closedCh: make(chan net.Conn, capacity),
+	}
+}
+
+func (t *failedHandshakeConnTracker) observe(conn net.Conn, state http.ConnState) {
+	t.mu.Lock()
+	t.seen[conn] = struct{}{}
+	_, wasClosed := t.closed[conn]
+	if state == http.StateClosed && !wasClosed {
+		t.closed[conn] = struct{}{}
+	}
+	t.mu.Unlock()
+
+	if state == http.StateClosed && !wasClosed {
+		t.closedCh <- conn
+	}
+}
+
+func (t *failedHandshakeConnTracker) counts() (seen, closed int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.seen), len(t.closed)
+}
+
+func TestWSDialOptionsClosesFailedHandshakeConnections(t *testing.T) {
+	const attempts = 3
+
+	for _, bodySize := range []int{512, 2 << 10} {
+		t.Run(strconv.Itoa(bodySize)+" bytes", func(t *testing.T) {
+			tracker := newFailedHandshakeConnTracker(attempts)
+			body := strings.Repeat("x", bodySize)
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Proto != "HTTP/1.1" {
+					t.Errorf("request protocol = %q, want HTTP/1.1", r.Proto)
+				}
+				w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(body))
+			}))
+			srv.EnableHTTP2 = false
+			srv.Config.ConnState = tracker.observe
+			srv.TLS = &tls.Config{NextProtos: []string{"http/1.1"}}
+			srv.StartTLS()
+			t.Cleanup(srv.Close)
+
+			baseTLS := srv.Client().Transport.(*http.Transport).TLSClientConfig
+			wssURL := "wss://" + strings.TrimPrefix(srv.URL, "https://")
+			for range attempts {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				_, resp, err := websocket.Dial(ctx, wssURL, WSDialOptions(nil, baseTLS))
+				cancel()
+				if err == nil {
+					t.Fatal("dial unexpectedly succeeded")
+				}
+				if resp == nil || resp.StatusCode != http.StatusNotFound {
+					t.Fatalf("response = %#v, want HTTP 404", resp)
+				}
+				_ = resp.Body.Close()
+			}
+
+			timer := time.NewTimer(2 * time.Second)
+			defer timer.Stop()
+			distinctClosed := make(map[net.Conn]struct{}, attempts)
+			for len(distinctClosed) < attempts {
+				select {
+				case conn := <-tracker.closedCh:
+					distinctClosed[conn] = struct{}{}
+				case <-timer.C:
+					seen, closed := tracker.counts()
+					t.Fatalf("connections did not close promptly: seen=%d closed=%d, want %d distinct closed connections", seen, closed, attempts)
+				}
+			}
+
+			seen, closed := tracker.counts()
+			if seen != attempts || closed != attempts {
+				t.Fatalf("connection states: seen=%d closed=%d, want %d/%d", seen, closed, attempts, attempts)
+			}
+		})
+	}
+}
+
+func headerValuesContainToken(values []string, token string) bool {
+	for _, value := range values {
+		for part := range strings.SplitSeq(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // TestWSDialOptionsSessionResumption verifies that two sequential
 // dials through WSDialOptions actually resume the TLS session: the
 // second connection sees ConnectionState.DidResume == true on the
@@ -259,6 +367,17 @@ func TestWSDialOptionsSessionResumption(t *testing.T) {
 	)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		connection := r.Header.Values("Connection")
+		if !headerValuesContainToken(connection, "upgrade") {
+			t.Errorf("Connection headers = %q, want Upgrade token", connection)
+		}
+		if headerValuesContainToken(connection, "close") {
+			t.Errorf("Connection headers = %q, must not contain close token", connection)
+		}
+		if r.Proto != "HTTP/1.1" {
+			t.Errorf("request protocol = %q, want HTTP/1.1", r.Proto)
+		}
+
 		n := int(dialNum.Add(1))
 		if r.TLS != nil && r.TLS.DidResume {
 			mu.Lock()
@@ -272,7 +391,10 @@ func TestWSDialOptionsSessionResumption(t *testing.T) {
 		_ = ws.Close(websocket.StatusNormalClosure, "ok")
 	})
 
-	srv := httptest.NewTLSServer(handler)
+	srv := httptest.NewUnstartedServer(handler)
+	srv.EnableHTTP2 = false
+	srv.TLS = &tls.Config{NextProtos: []string{"http/1.1"}}
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
 	// Caller TLSConfig reused across dials. tlsConfigForDial stamps
