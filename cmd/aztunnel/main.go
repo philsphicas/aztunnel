@@ -23,7 +23,7 @@ import (
 var version = "dev"
 
 func init() {
-	_, _ = memlimit.SetGoMemLimitWithOpts(memlimit.WithLogger(nil))
+	_, _ = memlimit.Set()
 }
 
 func main() {

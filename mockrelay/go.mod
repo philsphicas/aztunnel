@@ -12,7 +12,7 @@ module github.com/philsphicas/aztunnel/mockrelay
 go 1.27.0
 
 require (
-	github.com/KimMachineGun/automemlimit v0.7.5
+	github.com/KimMachineGun/automemlimit v1.0.0
 	github.com/alecthomas/kong v1.16.1
 	github.com/coder/websocket v1.8.15
 	github.com/philsphicas/aztunnel v0.0.0
