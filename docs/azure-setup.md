@@ -152,6 +152,10 @@ runcmd:
   - systemctl enable --now aztunnel-listener
 ```
 
+The unversioned executable URL intentionally tracks the latest stable release
+and is retained for cloud-init compatibility. Pin a versioned release bundle
+instead when image builds must be reproducible.
+
 The `AZTUNNEL_RELAY_NAME` and `AZTUNNEL_HYCO_NAME` environment variables are read
 from `/opt/aztunnel/env`. The systemd unit never needs to change — only the
 env file contains deployment-specific values, which makes templating in

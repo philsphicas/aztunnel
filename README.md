@@ -83,11 +83,30 @@ Windows bundles are `.zip` archives. Each bundle contains `aztunnel`,
 mock/development relay and is not included in these bundles; use its
 [Docker image](#docker) if you need it.
 
-Each release also includes `aztunnel-<version>-checksums.txt`. Verify a
-download from the directory containing the bundle and manifest with:
+Stable releases also retain the unversioned raw executable names from earlier
+releases so automated `releases/latest/download/...` installs keep working:
+
+| Platform      | Latest stable executable     |
+| ------------- | ---------------------------- |
+| Linux amd64   | `aztunnel-linux-amd64`       |
+| Linux arm64   | `aztunnel-linux-arm64`       |
+| macOS amd64   | `aztunnel-darwin-amd64`      |
+| macOS arm64   | `aztunnel-darwin-arm64`      |
+| Windows amd64 | `aztunnel-windows-amd64.exe` |
+
+Use a versioned bundle when the deployment must remain pinned to an immutable
+release. Use a raw executable with `/releases/latest/download/<asset>` when it
+should intentionally track the latest stable release.
+
+Each release also includes `aztunnel-<version>-checksums.txt`. Stable manifests
+cover both the versioned bundles and raw executables; development manifests
+cover the bundles. To verify one downloaded asset without requiring every file
+in the manifest:
 
 ```sh
-sha256sum --check aztunnel-<version>-checksums.txt
+VERSION=vX.Y.Z
+ASSET=aztunnel-${VERSION}-linux-amd64.tar.gz
+grep -F "  ${ASSET}" "aztunnel-${VERSION}-checksums.txt" | sha256sum --check -
 ```
 
 ## Prerequisites

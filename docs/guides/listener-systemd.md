@@ -22,6 +22,9 @@ sudo chmod +x /opt/aztunnel/aztunnel
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin aztunnel
 ```
 
+The unversioned executable URL intentionally tracks the latest stable release.
+Pin a versioned release bundle instead when deployments must be reproducible.
+
 ## Environment file
 
 Store deployment-specific values in an env file. The systemd unit reads
