@@ -21,8 +21,7 @@ func TestAutomemlimitActive(t *testing.T) {
 	// automemlimit is initialized in main.go. It reads the
 	// cgroup memory limit (container or systemd MemoryMax=) and sets
 	// GOMEMLIMIT to 90% of that value. On machines without a cgroup limit
-	// it logs "memory is not limited, skipping" and leaves GOMEMLIMIT at
-	// the default (math.MaxInt64).
+	// GOMEMLIMIT remains at the default (math.MaxInt64).
 	//
 	// This test verifies the import is wired up and doesn't panic. In CI
 	// containers with memory limits, GOMEMLIMIT will be a real value.
