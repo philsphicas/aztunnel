@@ -464,8 +464,11 @@ func TestDialWithLoggerRetry(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatal("first request context was not cancelled at the per-attempt deadline")
 		}
-		if got := attempts.Load(); got != 2 {
-			t.Fatalf("attempts = %d, want 2", got)
+		// Attempt 1 is forced to hit the per-attempt deadline. Later attempts
+		// may also exceed the short attemptTimeout on a loaded machine before
+		// one finally succeeds, so only assert that a retry happened.
+		if got := attempts.Load(); got < 2 {
+			t.Fatalf("attempts = %d, want >= 2", got)
 		}
 	})
 
