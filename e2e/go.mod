@@ -25,7 +25,7 @@ require (
 	github.com/philsphicas/aztunnel v0.0.0
 	github.com/philsphicas/aztunnel/mockrelay v0.0.0-00010101000000-000000000000
 	github.com/prometheus/client_model v0.6.2
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 )
 
 require (
