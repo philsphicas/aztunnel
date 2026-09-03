@@ -12,6 +12,42 @@ updates:
         update-types:
           - minor
           - patch
+  - package-ecosystem: gomod
+    directory: /e2e
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: gomod
+    directory: /e2e/infra
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: gomod
+    directory: /mockrelay
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
