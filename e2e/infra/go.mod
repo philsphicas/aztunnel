@@ -26,7 +26,7 @@ require (
 	github.com/google/go-github/v86 v86.0.0
 	github.com/google/uuid v1.6.0
 	github.com/philsphicas/aztunnel/e2e v0.0.0
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 )
 
 require (
