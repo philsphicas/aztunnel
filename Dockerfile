@@ -1,4 +1,4 @@
-ARG BUILDER_IMAGE=golang:1.27.0-bookworm
+ARG BUILDER_IMAGE=golang:1.27.1-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 ARG CGO_ENABLED=0
 
