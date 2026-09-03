@@ -2,7 +2,7 @@
 // used by setup-go, local workspace commands, releases, and Docker builders.
 go 1.27.0
 
-toolchain go1.27.0
+toolchain go1.27.1
 
 use (
 	.
