@@ -1,0 +1,26 @@
+ARG BUILDER_IMAGE=mcr.microsoft.com/oss/go/microsoft/golang:1.27.1-azurelinux3.0
+ARG RUNTIME_IMAGE=mcr.microsoft.com/azurelinux/base/core:3.0
+
+FROM ${BUILDER_IMAGE} AS builder
+# Never fall back to an upstream Go toolchain without the system-crypto backend.
+ENV GOTOOLCHAIN=local
+# Use the same TLS compatibility setting as the runtime when testing this stage.
+ENV CGO_ENABLED=0 GODEBUG=tlsmlkem=0
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+# Microsoft Go 1.27 supports OS OpenSSL with cgo disabled on amd64 and arm64.
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /aztunnel ./cmd/aztunnel
+
+FROM ${RUNTIME_IMAGE}
+# Keep cryptography and trust roots owned by the runtime OS packages.
+RUN tdnf install -y openssl-libs ca-certificates && tdnf clean all
+# Remove once the ML-KEM fix ships in Azure Linux's OpenSSL packages:
+# https://github.com/microsoft/go/issues/2472
+ENV GODEBUG=tlsmlkem=0
+COPY --from=builder /aztunnel /usr/local/bin/aztunnel
+ENTRYPOINT ["aztunnel"]

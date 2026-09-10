@@ -68,6 +68,7 @@ updates:
     ignore:
       # The custom Go updater changes module, workspace, and builder pins atomically.
       - dependency-name: golang
+      - dependency-name: mcr.microsoft.com/oss/go/microsoft/golang
     labels:
       - dependencies
     groups:

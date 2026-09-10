@@ -107,6 +107,13 @@ jobs:
             file: Dockerfile
             builder_variant: bookworm
             runtime: debian:bookworm-slim
+          - id: client-azurelinux3
+            image_suffix: ""
+            variant: -azurelinux3
+            file: Dockerfile.azurelinux3
+            builder_repository: mcr.microsoft.com/oss/go/microsoft/golang
+            builder_variant: azurelinux3.0
+            runtime: mcr.microsoft.com/azurelinux/base/core:3.0
           - id: relay-bookworm
             image_suffix: -relay
             variant: ""
@@ -163,7 +170,7 @@ jobs:
             org.opencontainers.image.version=${{ inputs.version }}
           build-args: |
             VERSION=${{ inputs.version }}
-            BUILDER_IMAGE=golang:${{ steps.go.outputs.version }}-${{ matrix.builder_variant }}
+            BUILDER_IMAGE=${{ matrix.builder_repository || 'golang' }}:${{ steps.go.outputs.version }}-${{ matrix.builder_variant }}
             RUNTIME_IMAGE=${{ matrix.runtime }}
 
       - name: Record candidate digest
@@ -255,6 +262,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: image-client-bookworm
+          path: image-refs
+
+      - name: Download client Azure Linux 3 digest
+        uses: actions/download-artifact@v8
+        with:
+          name: image-client-azurelinux3
           path: image-refs
 
       - name: Download relay Bookworm digest
@@ -744,6 +757,7 @@ jobs:
           promote image-refs/client-scratch.txt "ghcr.io/${GITHUB_REPOSITORY}" ""
           promote image-refs/client-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}" "-alpine"
           promote image-refs/client-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}" "-bookworm"
+          promote image-refs/client-azurelinux3.txt "ghcr.io/${GITHUB_REPOSITORY}" "-azurelinux3"
           promote image-refs/relay-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" ""
           promote image-refs/relay-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" "-alpine"
 
@@ -813,13 +827,24 @@ jobs:
             "ghcr.io/${GITHUB_REPOSITORY}|dev-bookworm|image-refs/client-bookworm.txt"
             "ghcr.io/${GITHUB_REPOSITORY}-relay|dev|image-refs/relay-bookworm.txt"
             "ghcr.io/${GITHUB_REPOSITORY}-relay|dev-alpine|image-refs/relay-alpine.txt"
+            "ghcr.io/${GITHUB_REPOSITORY}|dev-azurelinux3|image-refs/client-azurelinux3.txt"
           )
           inspect_digest() {
             local reference="$1"
             local context="$2"
+            local allow_missing="${3:-false}"
             local inspect_output
             local digest
             if ! inspect_output="$(docker buildx imagetools inspect "$reference" 2>&1)"; then
+              # Only a newly introduced variant may lack a rolling tag. Do not
+              # mistake authentication, network, or other registry failures for absence.
+              if [[ "$allow_missing" == "true" ]] &&
+                { grep -Eiq 'manifest unknown|MANIFEST_UNKNOWN' <<< "$inspect_output" ||
+                  grep -Fxq "ERROR: ${reference}: not found" <<< "$inspect_output"; }; then
+                echo "::notice::${reference} does not exist yet; this publication will create it." >&2
+                printf '%s\n' absent
+                return 0
+              fi
               echo "::error::Failed to inspect ${context} ${reference}: ${inspect_output}" >&2
               return 1
             fi
@@ -836,7 +861,11 @@ jobs:
           snapshots=()
           for entry in "${images[@]}"; do
             IFS='|' read -r image tag source_file <<< "$entry"
-            if ! digest="$(inspect_digest "${image}:${tag}" "existing rolling image")"; then
+            allow_missing=false
+            if [[ "$tag" == "dev-azurelinux3" ]]; then
+              allow_missing=true
+            fi
+            if ! digest="$(inspect_digest "${image}:${tag}" "existing rolling image" "$allow_missing")"; then
               echo "::error::Cannot snapshot existing ${image}:${tag}; refusing to mutate the rolling channel."
               exit 1
             fi
@@ -849,6 +878,7 @@ jobs:
           done
 
           images_mutated=false
+          mutated_images=()
           publication_complete=false
           delete_ref() {
             local ref="$1"
@@ -882,6 +912,15 @@ jobs:
             if [[ "$images_mutated" == "true" ]]; then
               for snapshot in "${snapshots[@]}"; do
                 IFS='|' read -r image tag digest <<< "$snapshot"
+                if [[ " ${mutated_images[*]} " != *" ${image}:${tag} "* ]]; then
+                  continue
+                fi
+                if [[ "$digest" == "absent" ]]; then
+                  # Deleting a manifest could also delete its immutable candidate tag.
+                  echo "::error::${image}:${tag} had no previous digest and may now exist; inspect and remove only the new rolling tag manually if necessary."
+                  rollback_incomplete=true
+                  continue
+                fi
                 if ! docker buildx imagetools create --tag "${image}:${tag}" "${image}@${digest}"; then
                   echo "::error::Failed to restore ${image}:${tag} to ${digest}; manual GHCR repair is required."
                   rollback_incomplete=true
@@ -988,6 +1027,7 @@ jobs:
             IFS='|' read -r image tag source_file <<< "$entry"
             source="$(cat "$source_file")"
             images_mutated=true
+            mutated_images+=("${image}:${tag}")
             docker buildx imagetools create --tag "${image}:${tag}" "$source"
             if ! promoted_digest="$(inspect_digest "${image}:${tag}" "promoted image")"; then
               echo "::error::Cannot verify promoted ${image}:${tag}; rolling back the development channel."

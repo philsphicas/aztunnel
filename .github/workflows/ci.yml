@@ -67,6 +67,42 @@ jobs:
             e2e/coverage-e2e.txt
           retention-days: 14
 
+  container-azurelinux3:
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Azure Linux 3 image
+        run: make docker-azurelinux3 VERSION=ci
+
+      - name: Test with Microsoft Go and OS cryptography
+        run: |
+          docker build --file Dockerfile.azurelinux3 --target builder \
+            --build-arg VERSION=ci --tag aztunnel-builder:azurelinux3 .
+          docker run --rm aztunnel-builder:azurelinux3 sh -ec '
+            go version -m /aztunnel > /tmp/build-info
+            grep -q "microsoft_systemcrypto=1" /tmp/build-info
+            grep -q "CGO_ENABLED=0" /tmp/build-info
+            go test ./internal/relay ./internal/arc
+            cd e2e
+            go test -tags=e2e -timeout=5m \
+              -run "^(TestMockEmulates|TestMockFeature_ZeroDelayProfile)" ./backends/mock
+          '
+
+      - name: Verify runtime uses OS OpenSSL and trust roots
+        run: |
+          docker run --rm --entrypoint sh aztunnel:azurelinux3 -ec '
+            rpm -q openssl-libs ca-certificates
+            test -s /etc/pki/tls/certs/ca-bundle.crt
+            test "$(readlink -f /etc/ssl/certs/ca-certificates.crt)" = \
+              "$(readlink -f /etc/pki/tls/certs/ca-bundle.crt)"
+            LD_DEBUG=libs aztunnel --version 2>/tmp/loader.log
+            grep -E "calling init: .*/libcrypto.so.3" /tmp/loader.log
+          '
+
   format:
     runs-on: ubuntu-latest
     steps:

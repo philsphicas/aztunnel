@@ -5,7 +5,7 @@ LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm fmt fmt-check e2e e2e-mock e2e-mock-fast e2e-mock-matrix e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure perf-matrix perf-placement perf-placement-azure perf-axes-mock perf-table perf-grid perf-history perf-compare perf-clean-history perf-gate vulncheck check-installable check-go-version help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm docker-azurelinux3 fmt fmt-check e2e e2e-mock e2e-mock-fast e2e-mock-matrix e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure perf-matrix perf-placement perf-placement-azure perf-axes-mock perf-table perf-grid perf-history perf-compare perf-clean-history perf-gate vulncheck check-installable check-go-version help
 
 .DEFAULT_GOAL := help
 
@@ -77,6 +77,11 @@ docker-bookworm: ## Build Docker image (bookworm)
 		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-bookworm \
 		--build-arg RUNTIME_IMAGE=debian:bookworm-slim \
 		-t aztunnel:bookworm .
+
+docker-azurelinux3: ## Build Docker image (Azure Linux 3 with OS OpenSSL)
+	docker build -f Dockerfile.azurelinux3 --build-arg VERSION=$(VERSION) \
+		--build-arg BUILDER_IMAGE=mcr.microsoft.com/oss/go/microsoft/golang:$(GO_VERSION)-azurelinux3.0 \
+		-t aztunnel:azurelinux3 .
 
 fmt: ## Format markdown and YAML with prettier
 	npx --yes prettier --write .

@@ -99,6 +99,7 @@ jobs:
         run: |
           docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-bookworm" >/dev/null
           docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-alpine" >/dev/null
+          docker buildx imagetools inspect "mcr.microsoft.com/oss/go/microsoft/golang:${{ steps.version.outputs.target-go }}-azurelinux3.0" >/dev/null
 
       - name: Update toolchain pins
         if: steps.version.outputs.update-available == 'true'

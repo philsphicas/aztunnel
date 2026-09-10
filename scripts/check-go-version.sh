@@ -119,7 +119,7 @@ while IFS= read -r -d '' workflow; do
   fi
 done < <("${git_command[@]}" ls-files -z -- '.github/workflows/*.yml' '.github/workflows/*.yaml')
 
-if ! grep -qE 'BUILDER_IMAGE[[:space:]]*=[[:space:]]*golang:\$\{\{[[:space:]]*steps\.go\.outputs\.version[[:space:]]*\}\}-\$\{\{[[:space:]]*matrix\.builder_variant[[:space:]]*\}\}' \
+if ! grep -qF "BUILDER_IMAGE=\${{ matrix.builder_repository || 'golang' }}:\${{ steps.go.outputs.version }}-\${{ matrix.builder_variant }}" \
   .github/workflows/publish-release.yml; then
   error "release publisher must derive Docker builders from the go.work toolchain"
 fi
