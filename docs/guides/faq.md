@@ -131,11 +131,16 @@ Yes. Pre-built images are available on GitHub Container Registry:
 ghcr.io/philsphicas/aztunnel:latest
 ```
 
-| Tag                | Base                   | Description                   |
-| ------------------ | ---------------------- | ----------------------------- |
-| `:latest`          | `scratch`              | Static binary, smallest image |
-| `:latest-alpine`   | `alpine`               | Includes shell and apk        |
-| `:latest-bookworm` | `debian:bookworm-slim` | Includes bash and apt         |
+| Tag                   | Base                                         | Description                                      |
+| --------------------- | -------------------------------------------- | ------------------------------------------------ |
+| `:latest`             | `scratch`                                    | Static binary, smallest image                    |
+| `:latest-alpine`      | `alpine`                                     | Includes shell and apk                           |
+| `:latest-bookworm`    | `debian:bookworm-slim`                       | Includes bash and apt                            |
+| `:latest-azurelinux3` | `mcr.microsoft.com/azurelinux/base/core:3.0` | Microsoft Go with OS OpenSSL and CA certificates |
+
+See the [README Docker section](../../README.md#docker) for versioned and
+development tags, and the Azure Linux variant's temporary TLS compatibility
+setting.
 
 See [Listener: Kubernetes sidecar](listener-kubernetes-sidecar.md) for
 Kubernetes deployment patterns.
