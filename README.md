@@ -53,13 +53,14 @@ publish the exact version, rolling minor, and latest tags shown below. The
 development tags track the latest successfully validated commit on `main`;
 they are best-effort snapshots rather than supported stable releases.
 
-| Image                                | Variant            | Stable release tags                                    | Development tag |
-| ------------------------------------ | ------------------ | ------------------------------------------------------ | --------------- |
-| `ghcr.io/philsphicas/aztunnel`       | scratch (default)  | `:X.Y.Z`, `:X.Y`, `:latest`                            | `:dev`          |
-| `ghcr.io/philsphicas/aztunnel`       | Alpine             | `:X.Y.Z-alpine`, `:X.Y-alpine`, `:latest-alpine`       | `:dev-alpine`   |
-| `ghcr.io/philsphicas/aztunnel`       | Bookworm           | `:X.Y.Z-bookworm`, `:X.Y-bookworm`, `:latest-bookworm` | `:dev-bookworm` |
-| `ghcr.io/philsphicas/aztunnel-relay` | Bookworm (default) | `:X.Y.Z`, `:X.Y`, `:latest`                            | `:dev`          |
-| `ghcr.io/philsphicas/aztunnel-relay` | Alpine             | `:X.Y.Z-alpine`, `:X.Y-alpine`, `:latest-alpine`       | `:dev-alpine`   |
+| Image                                | Variant            | Stable release tags                                             | Development tag    |
+| ------------------------------------ | ------------------ | --------------------------------------------------------------- | ------------------ |
+| `ghcr.io/philsphicas/aztunnel`       | scratch (default)  | `:X.Y.Z`, `:X.Y`, `:latest`                                     | `:dev`             |
+| `ghcr.io/philsphicas/aztunnel`       | Alpine             | `:X.Y.Z-alpine`, `:X.Y-alpine`, `:latest-alpine`                | `:dev-alpine`      |
+| `ghcr.io/philsphicas/aztunnel`       | Bookworm           | `:X.Y.Z-bookworm`, `:X.Y-bookworm`, `:latest-bookworm`          | `:dev-bookworm`    |
+| `ghcr.io/philsphicas/aztunnel`       | Azure Linux 3      | `:X.Y.Z-azurelinux3`, `:X.Y-azurelinux3`, `:latest-azurelinux3` | `:dev-azurelinux3` |
+| `ghcr.io/philsphicas/aztunnel-relay` | Bookworm (default) | `:X.Y.Z`, `:X.Y`, `:latest`                                     | `:dev`             |
+| `ghcr.io/philsphicas/aztunnel-relay` | Alpine             | `:X.Y.Z-alpine`, `:X.Y-alpine`, `:latest-alpine`                | `:dev-alpine`      |
 
 `aztunnel-relay` is a mock/development relay and is not supported for
 production use.
@@ -70,7 +71,25 @@ Build locally:
 make docker            # scratch (default)
 make docker-alpine     # alpine variant
 make docker-bookworm   # bookworm variant
+make docker-azurelinux3 # Azure Linux 3 with OS OpenSSL
 ```
+
+The `-azurelinux3` variant uses `mcr.microsoft.com/azurelinux/base/core:3.0`
+and the Microsoft build of Go, on both Linux amd64 and arm64. It uses Azure
+Linux's `openssl-libs` and `ca-certificates` packages rather than bundled
+cryptographic libraries or certificates copied from a different distribution.
+Go still implements the TLS protocol; supported cryptographic operations use
+the OS OpenSSL `libcrypto`. Microsoft Go 1.27 supports this with `CGO_ENABLED=0`,
+but the resulting binary still requires the OS libraries and cannot run in
+scratch. The other image variants and release bundles continue to use upstream
+Go. Using system OpenSSL does not by itself establish FIPS compliance.
+
+This variant temporarily sets `GODEBUG=tlsmlkem=0` to work around
+[an Azure Linux OpenSSL ML-KEM bug](https://github.com/microsoft/go/issues/2472)
+until the fixed OS package is published. This disables post-quantum TLS key
+exchange, not TLS or system cryptography. If you override `GODEBUG`, retain
+`tlsmlkem=0` until the fix is available. This setting does not affect the other
+variants.
 
 ### Release bundles
 
