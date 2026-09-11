@@ -38,7 +38,9 @@ jobs:
 
       - name: Read shared release image definitions
         id: images
-        run: echo "matrix=$(jq -c . .github/release-images.json)" >> "$GITHUB_OUTPUT"
+        run: |
+          matrix="$(node .github/scripts/release.cjs image-matrix)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build-bundles:
     concurrency:
@@ -232,41 +234,17 @@ jobs:
           path: release-assets
           skip-decompress: true
 
-      - name: Download client scratch digest
+      - name: Download image digests
         uses: actions/download-artifact@v8
         with:
-          name: image-client-scratch
+          pattern: image-*
+          merge-multiple: true
           path: image-refs
 
-      - name: Download client Alpine digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-client-alpine
-          path: image-refs
-
-      - name: Download client Bookworm digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-client-bookworm
-          path: image-refs
-
-      - name: Download client Azure Linux 3 digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-client-azurelinux3
-          path: image-refs
-
-      - name: Download relay Bookworm digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-relay-bookworm
-          path: image-refs
-
-      - name: Download relay Alpine digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-relay-alpine
-          path: image-refs
+      - name: Validate image artifacts against the release matrix
+        run: |
+          node .github/scripts/release-images.cjs validate-refs \
+            "ghcr.io/${GITHUB_REPOSITORY}" image-refs
 
       - name: Validate inputs and create checksums
         env:
@@ -780,14 +758,9 @@ jobs:
             exit 1
           fi
 
-          images=(
-            "ghcr.io/${GITHUB_REPOSITORY}|dev|image-refs/client-scratch.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}|dev-alpine|image-refs/client-alpine.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}|dev-bookworm|image-refs/client-bookworm.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}-relay|dev|image-refs/relay-bookworm.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}-relay|dev-alpine|image-refs/relay-alpine.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}|dev-azurelinux3|image-refs/client-azurelinux3.txt"
-          )
+          node .github/scripts/release-images.cjs dev-images \
+            "ghcr.io/${GITHUB_REPOSITORY}" > .dev-image-entries
+          mapfile -t images < .dev-image-entries
           inspect_digest() {
             local reference="$1"
             local context="$2"
@@ -819,11 +792,7 @@ jobs:
 
           snapshots=()
           for entry in "${images[@]}"; do
-            IFS='|' read -r image tag source_file <<< "$entry"
-            allow_missing=false
-            if [[ "$tag" == "dev-azurelinux3" ]]; then
-              allow_missing=true
-            fi
+            IFS='|' read -r image tag source_file allow_missing <<< "$entry"
             if ! digest="$(inspect_digest "${image}:${tag}" "existing rolling image" "$allow_missing")"; then
               echo "::error::Cannot snapshot existing ${image}:${tag}; refusing to mutate the rolling channel."
               exit 1
@@ -983,7 +952,7 @@ jobs:
             --latest=false
 
           for entry in "${images[@]}"; do
-            IFS='|' read -r image tag source_file <<< "$entry"
+            IFS='|' read -r image tag source_file _ <<< "$entry"
             source="$(cat "$source_file")"
             images_mutated=true
             mutated_images+=("${image}:${tag}")

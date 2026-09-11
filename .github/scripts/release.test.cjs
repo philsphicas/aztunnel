@@ -20,16 +20,20 @@ const {
   requireCI,
   requireNoPendingTag,
   ships,
+  validateImageMatrix,
   validateRequest,
 } = require("./release.cjs");
 const {
   candidateState,
+  developmentImageEntries,
   inspectImage,
   promoteStableImages,
+  readImageRefs,
 } = require("./release-images.cjs");
 
 const sha = "a".repeat(40);
 const oldSHA = "b".repeat(40);
+const requestCommitSHA = "e".repeat(40);
 const digest = `sha256:${"c".repeat(64)}`;
 const inputs = {
   images: { "golang:1.27.1-bookworm": digest },
@@ -246,6 +250,7 @@ test("breaking declarations take precedence regardless of commit order", () => {
 test("container changes and a forced refresh can release an unchanged commit", () => {
   assert.equal(makePlan({ baseline: null }).version, "v0.4.1");
   assert.equal(makePlan({ force: true }).version, "v0.4.1");
+  assert.equal(makePlan({ force: true }).force, true);
   const changed = structuredClone(inputs);
   changed.azurelinux_packages["linux/arm64"] = ["openssl-libs-3.1"];
   const request = makePlan({ inputs: changed });
@@ -295,18 +300,8 @@ function dockerOutput(command, args) {
   return args[0] === "run" ? rpmInventory : `Name: base\nDigest: ${digest}\n`;
 }
 
-test("shared image matrix retains every published variant", () => {
-  assert.deepEqual(
-    matrix.include.map((image) => image.id),
-    [
-      "client-scratch",
-      "client-alpine",
-      "client-bookworm",
-      "client-azurelinux3",
-      "relay-bookworm",
-      "relay-alpine",
-    ],
-  );
+test("shared image matrix validates its definitions and runtime package probe", () => {
+  assert.equal(validateImageMatrix(matrix), matrix.include);
   for (const image of matrix.include) {
     assert.ok(fs.existsSync(path.join(__dirname, "..", "..", image.file)));
   }
@@ -321,6 +316,52 @@ test("shared image matrix retains every published variant", () => {
     assert.ok(dockerfile.includes(command));
     assert.ok(packageProbe.includes(command));
   }
+});
+
+test("matrix rejects ambiguous tags and unsafe artifact identifiers", () => {
+  assert.throws(() => validateImageMatrix({ include: [] }), /at least one/);
+  assert.throws(() => validateImageMatrix({}), /at least one/);
+  for (const override of [
+    { id: "../client" },
+    { id: "client\nother" },
+    { image_suffix: "|injected" },
+    { variant: "alpine" },
+    { file: "../Dockerfile" },
+    { file: "/Dockerfile" },
+    { builder_variant: "" },
+    { runtime: "" },
+    { allow_missing_dev: "true" },
+  ]) {
+    assert.throws(() =>
+      validateImageMatrix({ include: [{ ...matrix.include[0], ...override }] }),
+    );
+  }
+  assert.throws(
+    () =>
+      validateImageMatrix({ include: [matrix.include[0], matrix.include[0]] }),
+    /Duplicate/,
+  );
+  assert.throws(
+    () =>
+      validateImageMatrix({
+        include: [
+          matrix.include[0],
+          { ...matrix.include[0], id: "different-id" },
+        ],
+      }),
+    /Duplicate/,
+  );
+});
+
+test("Dependabot explicitly emits the routine release prefix for every ecosystem", () => {
+  const config = fs.readFileSync(
+    path.join(__dirname, "..", "dependabot.yml"),
+    "utf8",
+  );
+  const ecosystems = config.match(/^\s*- package-ecosystem:/gm);
+  const prefixes = config.match(/^\s+prefix: "?chore\(deps\)"?\s*$/gm);
+  assert.ok(ecosystems.length > 0);
+  assert.equal(prefixes.length, ecosystems.length);
 });
 
 test("observations deduplicate bases, pin probes and inspect both architectures", () => {
@@ -485,6 +526,99 @@ function promotionOptions(images = matrix.include) {
   };
 }
 
+function referenceFiles(options) {
+  const files = new Map(
+    Object.entries(options.refs).map(([id, value]) => [`${id}.txt`, value]),
+  );
+  return {
+    files,
+    readdirSync() {
+      return [...files.keys()];
+    },
+    readFileSync(file) {
+      const name = path.basename(file);
+      assert.ok(files.has(name), name);
+      return files.get(name);
+    },
+  };
+}
+
+test("artifact collection and both promotion paths follow added and removed matrix entries", () => {
+  const added = {
+    ...matrix.include[0],
+    id: "client-new-variant",
+    variant: "-new-variant",
+    allow_missing_dev: true,
+  };
+  for (const images of [[...matrix.include, added], matrix.include.slice(1)]) {
+    const options = promotionOptions(images);
+    const refs = readImageRefs(
+      options.imageBase,
+      images,
+      "image-refs",
+      referenceFiles(options),
+    );
+    assert.deepEqual(
+      Object.keys(refs),
+      images.map(({ id }) => id),
+    );
+    const entries = developmentImageEntries(options.imageBase, images);
+    assert.deepEqual(
+      entries,
+      images.map(
+        ({ id, image_suffix, variant, allow_missing_dev }) =>
+          `${options.imageBase}${image_suffix}|dev${variant}|image-refs/${id}.txt|${allow_missing_dev === true}`,
+      ),
+    );
+    const registry = imageRegistry();
+    promoteStableImages({ ...options, refs }, registry.execute);
+    assert.equal(registry.writes.length, images.length * 3);
+    for (const { image_suffix, variant } of images) {
+      assert.equal(
+        registry.tags.get(
+          `${options.imageBase}${image_suffix}:0.4.1${variant}`,
+        ),
+        digest,
+      );
+    }
+  }
+});
+
+test("image artifact validation refuses missing, extra, or mismatched candidates", () => {
+  const options = promotionOptions();
+  for (const mutation of [
+    (files) => files.delete("client-scratch.txt"),
+    (files) => files.set("unexpected.txt", options.refs["client-scratch"]),
+  ]) {
+    const files = referenceFiles(options);
+    mutation(files.files);
+    assert.throws(
+      () =>
+        readImageRefs(options.imageBase, options.images, "image-refs", files),
+      /do not match/,
+    );
+  }
+  const files = referenceFiles(options);
+  files.files.set("client-scratch.txt", `ghcr.io/another/image@${digest}`);
+  assert.throws(
+    () => readImageRefs(options.imageBase, options.images, "image-refs", files),
+    /Invalid candidate/,
+  );
+});
+
+test("publication workflow collects all image artifacts and generates the dev list", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", "workflows", "publish-release.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /pattern: image-\*/);
+  assert.match(workflow, /merge-multiple: true/);
+  assert.match(workflow, /release-images\.cjs validate-refs/);
+  assert.match(workflow, /release-images\.cjs dev-images/);
+  assert.doesNotMatch(workflow, /name: image-(?:client|relay)-/);
+  assert.doesNotMatch(workflow, /"ghcr\.io\/.*\|dev/);
+});
+
 test("stable promotion covers all variants and never rewrites existing exact versions", () => {
   const registry = imageRegistry();
   const options = promotionOptions();
@@ -615,7 +749,19 @@ function harness({
   versions = ["v0.4.0"],
   tags = "v0.4.0",
   open = [],
+  pending = null,
   commits = [],
+  requestCommit = requestCommitSHA,
+  provenance = [
+    {
+      merged_at: "2026-09-11T00:00:00Z",
+      base: { ref: "main" },
+      head: {
+        ref: "automation/maintenance-release",
+        repo: { full_name: "example/aztunnel" },
+      },
+    },
+  ],
 } = {}) {
   const disk = new Map([
     [".github/release-images.json", JSON.stringify(matrix)],
@@ -632,7 +778,21 @@ function harness({
   const github = {
     paginate: async () => versions.map((tag_name) => ({ tag_name })),
     rest: {
-      repos: { listReleases() {} },
+      repos: {
+        listReleases() {},
+        listPullRequestsAssociatedWithCommit: async (args) => {
+          calls.push({ name: "requestProvenance", args });
+          return { data: provenance };
+        },
+        getContent: async () => {
+          assert.ok(pending, "An open release PR needs a request fixture.");
+          return {
+            data: {
+              content: Buffer.from(JSON.stringify(pending)).toString("base64"),
+            },
+          };
+        },
+      },
       actions: {
         listWorkflowRuns: async () => ({
           data: { workflow_runs: [{ head_sha: sha, conclusion: "success" }] },
@@ -670,6 +830,10 @@ function harness({
     assert.equal(command, "git");
     if (args[0] === "tag") return tags;
     if (args[0] === "merge-base") return "";
+    if (args[0] === "log") {
+      calls.push({ name: "requestOrigin", args });
+      return requestCommit;
+    }
     if (args[0] === "rev-parse")
       return args[1] === "v0.4.0^{commit}" ? oldSHA : sha;
     if (args[0] === "rev-list")
@@ -713,7 +877,8 @@ test("unchanged preparation writes no files and closes a superseded candidate", 
       source_sha: oldSHA,
       container_inputs: baseline,
     },
-    open: [{ number: 12 }],
+    open: [{ number: 12, head: { sha: oldSHA } }],
+    pending: { previous_tag: "v0.3.0", source_sha: oldSHA },
   });
   h.env.RELEASE_BUMP = "patch";
   const before = new Map(h.disk);
@@ -758,6 +923,57 @@ test("weekly refresh preserves an explicit decision for the same source", async 
   assert.equal(h.outputs.decision_required, true);
 });
 
+test("forced-only requests survive weekly refreshes and explicit bump dispatches", async () => {
+  const baseline = observeInputs(matrix, "toolchain go1.27.1", dockerOutput);
+  let pending = makePlan({ inputs: baseline, baseline, force: true });
+  for (const bump of ["auto", "auto", "patch"]) {
+    const h = harness({
+      request: {
+        version: "v0.4.0",
+        source_sha: oldSHA,
+        container_inputs: baseline,
+      },
+      open: [{ number: 12, head: { sha: oldSHA } }],
+      pending,
+    });
+    h.env.RELEASE_BUMP = bump;
+    h.env.RELEASE_FORCE = "false";
+    await prepare(h);
+    pending = JSON.parse(h.disk.get(".github/release.json"));
+    assert.equal(h.outputs.ready, true);
+    assert.equal(pending.force, true);
+    assert.equal(pending.version, "v0.4.1");
+    assert.ok(!h.calls.some(({ name }) => name === "updatePR"));
+  }
+});
+
+test("force intent never leaks to a different baseline or source", async () => {
+  const baseline = observeInputs(matrix, "toolchain go1.27.1", dockerOutput);
+  const pending = makePlan({ inputs: baseline, baseline, force: true });
+  for (const override of [
+    { previous_tag: "v0.3.0" },
+    { source_sha: oldSHA },
+    { force: false },
+  ]) {
+    const h = harness({
+      request: {
+        version: "v0.4.0",
+        source_sha: oldSHA,
+        container_inputs: baseline,
+      },
+      open: [{ number: 12, head: { sha: oldSHA } }],
+      pending: { ...pending, ...override },
+    });
+    await prepare(h);
+    assert.equal(h.outputs.ready, false);
+    assert.ok(
+      h.calls.some(
+        ({ name, args }) => name === "updatePR" && args.state === "closed",
+      ),
+    );
+  }
+});
+
 test("approval tags only the approved source, not the request's merge commit", async () => {
   const request = makePlan({ force: true });
   const h = harness({ request });
@@ -768,6 +984,96 @@ test("approval tags only the approved source, not the request's merge commit", a
     ref: "refs/tags/v0.4.1",
     sha,
   });
+});
+
+test("approval requires a merged release PR from this repository", async () => {
+  const valid = {
+    merged_at: "2026-09-11T00:00:00Z",
+    base: { ref: "main" },
+    head: {
+      ref: "automation/maintenance-release",
+      repo: { full_name: "example/aztunnel" },
+    },
+  };
+  for (const provenance of [
+    [],
+    [{ ...valid, merged_at: null }],
+    [{ ...valid, base: { ref: "release/0.4" } }],
+    [{ ...valid, head: { ...valid.head, ref: "some-other-feature" } }],
+    [
+      {
+        ...valid,
+        head: { ...valid.head, repo: { full_name: "fork/aztunnel" } },
+      },
+    ],
+  ]) {
+    const h = harness({ request: makePlan({ force: true }), provenance });
+    await assert.rejects(approve(h), /did not arrive through a merged/);
+    assert.ok(!h.calls.some(({ name }) => name === "createRef"));
+  }
+});
+
+test("approval finds request provenance independently of HEAD and merge method", async () => {
+  const provenance = [
+    {
+      merged_at: "2026-09-11T00:00:00Z",
+      base: { ref: "main" },
+      head: { ref: "unrelated" },
+    },
+    {
+      merged_at: "2026-09-11T00:00:00Z",
+      merge_commit_sha: oldSHA,
+      base: { ref: "main" },
+      head: {
+        ref: "automation/maintenance-release",
+        repo: { full_name: "example/aztunnel" },
+      },
+    },
+  ];
+  const h = harness({ request: makePlan({ force: true }), provenance });
+  h.context.sha = "f".repeat(40);
+  await approve(h);
+  assert.deepEqual(h.calls.find(({ name }) => name === "requestOrigin").args, [
+    "log",
+    "--first-parent",
+    "-1",
+    "--format=%H",
+    "--",
+    ".github/release.json",
+  ]);
+  assert.equal(
+    h.calls.find(({ name }) => name === "requestProvenance").args.commit_sha,
+    requestCommitSHA,
+  );
+  assert.equal(h.calls.find(({ name }) => name === "createRef").args.sha, sha);
+});
+
+test("approval of an absent or deleted request is an explicit no-op", async () => {
+  const h = harness();
+  await approve(h);
+  assert.deepEqual(h.calls, [
+    {
+      name: "notice",
+      message: "No release request on main; nothing to approve.",
+    },
+  ]);
+});
+
+test("missing request history and failed provenance lookups never create a tag", async () => {
+  const missing = harness({
+    request: makePlan({ force: true }),
+    requestCommit: "",
+  });
+  await assert.rejects(approve(missing), /No mainline commit/);
+  const unavailable = harness({ request: makePlan({ force: true }) });
+  unavailable.github.rest.repos.listPullRequestsAssociatedWithCommit =
+    async () => {
+      throw new Error("GitHub unavailable");
+    };
+  await assert.rejects(approve(unavailable), /GitHub unavailable/);
+  for (const h of [missing, unavailable]) {
+    assert.ok(!h.calls.some(({ name }) => name === "createRef"));
+  }
 });
 
 test("approval reruns never overwrite or recreate an existing tag", async () => {
@@ -800,8 +1106,10 @@ test("approval rejects stale requests, conflicting tags, failed CI and missing a
   });
   await assert.rejects(approve(ci), /must succeed/);
   const ancestry = harness({ request });
-  ancestry.execute = () => {
-    throw new Error("not an ancestor");
+  const ancestryExecute = ancestry.execute;
+  ancestry.execute = (command, args) => {
+    if (args[0] === "merge-base") throw new Error("not an ancestor");
+    return ancestryExecute(command, args);
   };
   await assert.rejects(approve(ancestry), /not an ancestor/);
   for (const h of [stale, conflict, ci, ancestry]) {

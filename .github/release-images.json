@@ -26,6 +26,7 @@
     },
     {
       "id": "client-azurelinux3",
+      "allow_missing_dev": true,
       "image_suffix": "",
       "variant": "-azurelinux3",
       "file": "Dockerfile.azurelinux3",

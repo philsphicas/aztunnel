@@ -77,6 +77,8 @@ jobs:
           commit-message: "chore(release): prepare ${{ steps.plan.outputs.version }}"
           title: "chore(release): ${{ steps.plan.outputs.version }}"
           body-path: ${{ steps.plan.outputs.body_path }}
+          # v8 supports always-true to re-draft an existing PR, not just a new one.
+          # https://github.com/peter-evans/create-pull-request/blob/v8/src/main.ts
           draft: ${{ steps.plan.outputs.decision_required == 'true' && 'always-true' || 'false' }}
 
       - name: Mark decided release ready for approval

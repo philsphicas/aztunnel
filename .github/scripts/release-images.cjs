@@ -1,7 +1,7 @@
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
-const { parseVersion } = require("./release.cjs");
+const { parseVersion, validateImageMatrix } = require("./release.cjs");
 
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 
@@ -40,21 +40,55 @@ function candidateState(reference, execute = docker) {
   return { build: digest === null, digest: digest || "" };
 }
 
+function candidateDigest(image, source) {
+  const digest = source?.slice(image.length + 1);
+  if (!source?.startsWith(`${image}@`) || !digestPattern.test(digest)) {
+    throw new Error(`Invalid candidate reference for ${image}.`);
+  }
+  return digest;
+}
+
+function readImageRefs(imageBase, images, directory, files = fs) {
+  validateImageMatrix({ include: images });
+  const expected = images.map(({ id }) => `${id}.txt`).sort();
+  const actual = files.readdirSync(directory).sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(
+      `Image artifacts do not match the release matrix: expected ${expected.join(", ")}, found ${actual.join(", ")}.`,
+    );
+  }
+  return Object.fromEntries(
+    images.map(({ id, image_suffix }) => {
+      const reference = files
+        .readFileSync(path.join(directory, `${id}.txt`), "utf8")
+        .trim();
+      candidateDigest(`${imageBase}${image_suffix}`, reference);
+      return [id, reference];
+    }),
+  );
+}
+
+function developmentImageEntries(imageBase, images) {
+  validateImageMatrix({ include: images });
+  return images.map(
+    ({ id, image_suffix, variant, allow_missing_dev }) =>
+      `${imageBase}${image_suffix}|dev${variant}|image-refs/${id}.txt|${allow_missing_dev === true}`,
+  );
+}
+
 function promoteStableImages(
   { version, imageBase, images, refs },
   execute = docker,
 ) {
   parseVersion(version);
+  validateImageMatrix({ include: images });
   const semver = version.slice(1);
   const minor = semver.slice(0, semver.lastIndexOf("."));
   // Preflight every exact-version tag before touching any published tag.
   const promotions = images.map(({ id, image_suffix, variant }) => {
     const image = `${imageBase}${image_suffix}`;
     const source = refs[id]?.trim();
-    const digest = source?.slice(image.length + 1);
-    if (!source?.startsWith(`${image}@`) || !digestPattern.test(digest)) {
-      throw new Error(`Invalid candidate reference for ${id}.`);
-    }
+    const digest = candidateDigest(image, source);
     const exact = `${image}:${semver}${variant}`;
     const existing = inspectImage(exact, execute);
     if (existing !== null && existing !== digest) {
@@ -84,7 +118,13 @@ function promoteStableImages(
   }
 }
 
-module.exports = { candidateState, inspectImage, promoteStableImages };
+module.exports = {
+  candidateState,
+  developmentImageEntries,
+  inspectImage,
+  promoteStableImages,
+  readImageRefs,
+};
 
 if (require.main === module) {
   switch (process.argv[2]) {
@@ -97,12 +137,7 @@ if (require.main === module) {
       const images = JSON.parse(
         fs.readFileSync(".github/release-images.json", "utf8"),
       ).include;
-      const refs = Object.fromEntries(
-        images.map(({ id }) => [
-          id,
-          fs.readFileSync(path.join(process.argv[5], `${id}.txt`), "utf8"),
-        ]),
-      );
+      const refs = readImageRefs(process.argv[4], images, process.argv[5]);
       promoteStableImages({
         version: process.argv[3],
         imageBase: process.argv[4],
@@ -111,9 +146,23 @@ if (require.main === module) {
       });
       break;
     }
+    case "validate-refs": {
+      const images = JSON.parse(
+        fs.readFileSync(".github/release-images.json", "utf8"),
+      ).include;
+      readImageRefs(process.argv[3], images, process.argv[4]);
+      break;
+    }
+    case "dev-images": {
+      const images = JSON.parse(
+        fs.readFileSync(".github/release-images.json", "utf8"),
+      ).include;
+      console.log(developmentImageEntries(process.argv[3], images).join("\n"));
+      break;
+    }
     default:
       throw new Error(
-        "Usage: release-images.cjs candidate <reference> | promote <version> <image-base> <refs-directory>",
+        "Usage: release-images.cjs candidate <reference> | promote <version> <image-base> <refs-directory> | validate-refs <image-base> <refs-directory> | dev-images <image-base>",
       );
   }
 }

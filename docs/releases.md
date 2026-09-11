@@ -15,6 +15,10 @@ Development releases continue to follow successful `main` builds independently.
 The PR releases its recorded source commit, **not** its eventual merge commit.
 Code merged after preparation waits for the next release. The recorded source
 must be on `main`, and its newest main CI run must have succeeded.
+Approval also verifies that the request's last mainline change came from a
+merged `automation/maintenance-release` PR in this repository targeting `main`.
+An unrelated PR or direct edit of the request file does not publish a release.
+This is an accidental-release safeguard, not a replacement for branch permissions.
 
 ## When a version decision is needed
 
@@ -24,6 +28,9 @@ test code do not independently trigger one. Module manifests and checksums are
 included conservatively, even in the e2e modules: release builds use the Go
 workspace, so those dependency updates can change versions linked into shipped
 binaries. This favors an occasional extra patch over missing a security update.
+Dependabot explicitly uses the `chore(deps)` commit-message prefix for every
+configured ecosystem, so routine update classification does not depend on
+its inferred commit style.
 
 Features, breaking-change declarations, and unrecognized commit titles produce
 a **draft** PR. Run **Actions > Prepare Maintenance Release > Run workflow** on
@@ -38,12 +45,21 @@ For an urgent security fix, use **Run workflow** immediately instead of waiting
 for Tuesday. `auto` still handles routine patches; select an explicit bump for
 anything needing a version decision. `force` prepares a release even when the
 source and observed container inputs are unchanged.
+That force intent survives scheduled refreshes while the pending request still
+targets the same source and previous stable release. Close the pending PR to
+cancel it; force intent is not inherited by a different source or baseline.
 
 ## Containers without source changes
 
 The preparation workflow compares upstream builder and runtime image digests
 against the previous approved release request. The shared image list is
 `.github/release-images.json`, also used by the publishing workflow.
+The same validated matrix controls artifact collection and both stable and
+development promotion. Missing or unexpected image artifacts fail publication
+before any channel changes. When introducing a variant without a `dev` tag,
+set `allow_missing_dev: true` on that matrix entry; other missing development
+tags remain errors. This keeps initial-tag creation explicit and preserves
+the existing rollback behavior.
 It additionally installs/upgrades Azure Linux runtime packages on **amd64 and
 arm64** and compares the RPM inventories. This catches OpenSSL and other OS
 updates that arrive in package repositories before the base image tag changes.
@@ -83,6 +99,11 @@ required checks; keep drafts and explicit version decisions as the exception.
 
 If preparation fails because the newest main CI run has not passed, rerun it
 after CI succeeds. If tagging fails, rerun **Approve Maintenance Release**.
+That recovery path finds the request's introducing commit even if unrelated
+commits have advanced `main`, and supports merge, squash, and rebase merges.
+GitHub's commit-to-PR association can briefly lag a merge; rerun approval if
+that lookup has not caught up yet. With no request file, approval reports that
+there is nothing to do.
 If a tag already exists, follow or rerun its **Stable Release** run instead:
 tagging retries never move the tag or start a second publication.
 A pending tag or merged release request blocks further preparation until

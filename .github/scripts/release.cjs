@@ -143,6 +143,7 @@ function plan({
     bump: selected,
     explicit_bump: bump !== "auto",
     decision_required: bump === "auto" && needsDecision,
+    force,
     container_inputs: inputs,
     reasons: [
       ...changes.map(
@@ -169,12 +170,76 @@ const packageProbe =
   "tdnf install -y openssl-libs ca-certificates >&2 && " +
   "rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\\n' | LC_ALL=C sort";
 
+function validateImageMatrix(matrix) {
+  if (!Array.isArray(matrix?.include) || matrix.include.length === 0) {
+    throw new Error("Release image matrix must contain at least one image.");
+  }
+  const ids = new Set();
+  const targets = new Set();
+  for (const image of matrix.include) {
+    if (
+      !image ||
+      typeof image.id !== "string" ||
+      !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(image.id)
+    ) {
+      throw new Error("Release image IDs must be lowercase kebab-case.");
+    }
+    for (const field of ["image_suffix", "variant"]) {
+      if (
+        typeof image[field] !== "string" ||
+        !/^(?:-[a-z0-9][a-z0-9._-]*)?$/.test(image[field])
+      ) {
+        throw new Error(`Invalid ${field} for release image ${image.id}.`);
+      }
+    }
+    for (const field of ["file", "builder_variant", "runtime"]) {
+      if (typeof image[field] !== "string" || !/^[^\s|]+$/.test(image[field])) {
+        throw new Error(
+          `Missing or invalid ${field} for release image ${image.id}.`,
+        );
+      }
+    }
+    if (
+      image.file.startsWith("/") ||
+      image.file.includes("\\") ||
+      image.file.split("/").includes("..")
+    ) {
+      throw new Error(
+        `Dockerfile path for ${image.id} must be repository-relative.`,
+      );
+    }
+    if (
+      image.builder_repository !== undefined &&
+      (typeof image.builder_repository !== "string" ||
+        !/^[^\s|]+$/.test(image.builder_repository))
+    ) {
+      throw new Error(
+        `Invalid builder_repository for release image ${image.id}.`,
+      );
+    }
+    if (
+      image.allow_missing_dev !== undefined &&
+      typeof image.allow_missing_dev !== "boolean"
+    ) {
+      throw new Error(`allow_missing_dev for ${image.id} must be a boolean.`);
+    }
+    const target = `${image.image_suffix}|${image.variant}`;
+    if (ids.has(image.id) || targets.has(target)) {
+      throw new Error(`Duplicate release image ID or tag target: ${image.id}.`);
+    }
+    ids.add(image.id);
+    targets.add(target);
+  }
+  return matrix.include;
+}
+
 function observeInputs(matrix, goWork, execute = run) {
+  const definitions = validateImageMatrix(matrix);
   const version = /^toolchain go(1\.\d+\.\d+)\s*$/m.exec(goWork)?.[1];
   if (!version)
     throw new Error("go.work must declare an exact stable Go toolchain.");
   const references = new Set();
-  for (const image of matrix.include) {
+  for (const image of definitions) {
     references.add(
       `${image.builder_repository || "golang"}:${version}-${image.builder_variant}`,
     );
@@ -193,9 +258,7 @@ function observeInputs(matrix, goWork, execute = run) {
     images[reference] = digest;
   }
   const packages = {};
-  const azure = matrix.include.find(
-    (image) => image.id === "client-azurelinux3",
-  );
+  const azure = definitions.find((image) => image.id === "client-azurelinux3");
   if (azure) {
     for (const platform of ["linux/amd64", "linux/arm64"]) {
       const inventory = execute("docker", [
@@ -359,8 +422,9 @@ async function prepare({
     head: `${repo.owner}:${releaseBranch}`,
   });
   let bump = env.RELEASE_BUMP || "auto";
-  // Preserve an explicit version choice across weekly reruns of the same source.
-  if (bump === "auto" && open.length) {
+  let force = env.RELEASE_FORCE === "true";
+  // Preserve explicit intent only while the same source and release baseline apply.
+  if (open.length) {
     const { data } = await github.rest.repos.getContent({
       ...repo,
       path: requestPath,
@@ -369,12 +433,9 @@ async function prepare({
     const pending = JSON.parse(
       Buffer.from(data.content, "base64").toString("utf8"),
     );
-    if (
-      pending.previous_tag === previous &&
-      pending.source_sha === sourceSHA &&
-      pending.explicit_bump
-    ) {
-      bump = pending.bump;
+    if (pending.previous_tag === previous && pending.source_sha === sourceSHA) {
+      if (bump === "auto" && pending.explicit_bump) bump = pending.bump;
+      force = force || pending.force === true;
     }
   }
   const request = plan({
@@ -384,7 +445,7 @@ async function prepare({
     baseline,
     bump,
     commits: readCommits(previous, sourceSHA, execute),
-    force: env.RELEASE_FORCE === "true",
+    force,
   });
   core.setOutput("ready", Boolean(request));
   if (!request) {
@@ -450,12 +511,53 @@ function validateRequest(request, previous, commits) {
   }
 }
 
+async function requireReleaseProvenance(github, repo, execute) {
+  // First-parent follows the mainline introduction for merge, squash, and rebase
+  // merges, including recovery runs after unrelated commits advanced main.
+  const commit = execute("git", [
+    "log",
+    "--first-parent",
+    "-1",
+    "--format=%H",
+    "--",
+    requestPath,
+  ]);
+  if (!shaPattern.test(commit))
+    throw new Error(`No mainline commit introduced ${requestPath}.`);
+  const { data: associated } =
+    await github.rest.repos.listPullRequestsAssociatedWithCommit({
+      ...repo,
+      commit_sha: commit,
+      per_page: 100,
+    });
+  const repository = `${repo.owner}/${repo.repo}`.toLowerCase();
+  if (
+    !associated.some(
+      (pr) =>
+        pr.merged_at &&
+        pr.base?.ref === "main" &&
+        pr.head?.ref === releaseBranch &&
+        pr.head?.repo?.full_name?.toLowerCase() === repository,
+    )
+  ) {
+    throw new Error(
+      `${commit} did not arrive through a merged, same-repository ${releaseBranch} PR targeting main. ` +
+        "If it just merged, retry after GitHub updates the commit association; otherwise prepare a release PR or use a manual stable tag.",
+    );
+  }
+}
+
 async function approve({ github, context, core, execute = run, files = fs }) {
   const repo = context.repo;
+  if (!files.existsSync(requestPath)) {
+    core.notice("No release request on main; nothing to approve.");
+    return;
+  }
   const request = JSON.parse(files.readFileSync(requestPath, "utf8"));
   parseVersion(request.version);
   if (!shaPattern.test(request.source_sha))
     throw new Error("Invalid release source SHA.");
+  await requireReleaseProvenance(github, repo, execute);
   const previous = await latestStable(github, repo);
   // A successful rerun must not move a tag or rebuild a published release.
   if (previous === request.version) {
@@ -517,11 +619,21 @@ module.exports = {
   requireCI,
   requireNoPendingTag,
   ships,
+  validateImageMatrix,
   validateRequest,
 };
 
 if (require.main === module) {
   switch (process.argv[2]) {
+    case "image-matrix":
+      console.log(
+        JSON.stringify({
+          include: validateImageMatrix(
+            JSON.parse(fs.readFileSync(".github/release-images.json", "utf8")),
+          ),
+        }),
+      );
+      break;
     case "validate-version":
       parseVersion(process.argv[3]);
       break;
@@ -530,7 +642,7 @@ if (require.main === module) {
       break;
     default:
       throw new Error(
-        "Usage: release.cjs validate-version <tag> | latest-version (tags on stdin)",
+        "Usage: release.cjs image-matrix | validate-version <tag> | latest-version (tags on stdin)",
       );
   }
 }
