@@ -131,7 +131,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Reuse an existing stable candidate
+        if: inputs.channel == 'stable'
+        id: candidate
+        env:
+          CANDIDATE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.commit_sha }}${{ matrix.variant }}
+        run: node .github/scripts/release-images.cjs candidate "$CANDIDATE" >> "$GITHUB_OUTPUT"
+
       - name: Build immutable candidate
+        if: inputs.channel != 'stable' || steps.candidate.outputs.build == 'true'
         id: build
         uses: docker/build-push-action@v7
         with:
@@ -153,7 +161,7 @@ jobs:
 
       - name: Record candidate digest
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.candidate.outputs.digest || steps.build.outputs.digest }}
           IMAGE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
         run: |
           set -euo pipefail
@@ -709,30 +717,8 @@ jobs:
             exit 1
           fi
 
-          promote() {
-            local source_file="$1"
-            local image="$2"
-            local suffix="$3"
-            local source
-            local tags=()
-            source="$(cat "$source_file")"
-
-            local semver="${VERSION#v}"
-            local minor="${semver%.*}"
-            tags=("${semver}${suffix}" "${minor}${suffix}" "latest${suffix}")
-
-            for tag in "${tags[@]}"; do
-              docker buildx imagetools create --tag "${image}:${tag}" "$source"
-              docker buildx imagetools inspect "${image}:${tag}" >/dev/null
-            done
-          }
-
-          promote image-refs/client-scratch.txt "ghcr.io/${GITHUB_REPOSITORY}" ""
-          promote image-refs/client-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}" "-alpine"
-          promote image-refs/client-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}" "-bookworm"
-          promote image-refs/client-azurelinux3.txt "ghcr.io/${GITHUB_REPOSITORY}" "-azurelinux3"
-          promote image-refs/relay-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" ""
-          promote image-refs/relay-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" "-alpine"
+          node .github/scripts/release-images.cjs promote "$VERSION" \
+            "ghcr.io/${GITHUB_REPOSITORY}" image-refs
 
       - name: Publish rolling development channel
         if: inputs.channel == 'dev'

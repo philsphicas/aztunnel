@@ -52,6 +52,12 @@ as "nothing changed."
 
 Stable publication pulls fresh bases, disables the Docker layer cache, and
 upgrades Azure Linux OS packages before installing OpenSSL and certificates.
+An existing stable candidate is reused by digest on retries rather than rebuilt
+against newer upstream contents. Promotion preflights every exact-version image
+tag: matching tags are left untouched, and any different digest fails the run
+before tag writes. Rolling minor/latest tags can then be repaired on a retry
+without changing already-promoted exact versions. Registry failures never count
+as evidence that an image is absent.
 Container-only refreshes receive a **new version**; published stable releases
 are never rebuilt in place. The observations in the PR are change-detection
 inputs, not a promise that mutable upstream repositories are frozen between

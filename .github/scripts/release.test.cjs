@@ -22,6 +22,11 @@ const {
   ships,
   validateRequest,
 } = require("./release.cjs");
+const {
+  candidateState,
+  inspectImage,
+  promoteStableImages,
+} = require("./release-images.cjs");
 
 const sha = "a".repeat(40);
 const oldSHA = "b".repeat(40);
@@ -370,6 +375,194 @@ test("registry and package probe failures never look like an unchanged week", ()
         args[0] === "run" ? "" : dockerOutput(command, args),
       ),
     /Incomplete/,
+  );
+});
+
+function missingImage(reference) {
+  return Object.assign(new Error("manifest not found"), {
+    status: 1,
+    stdout: "",
+    stderr: `ERROR: ${reference}: not found\n`,
+  });
+}
+
+test("stable retries reuse an existing candidate instead of rebuilding it", () => {
+  const reference = `ghcr.io/example/aztunnel:stable-v0.4.1-${sha}`;
+  const calls = [];
+  assert.deepEqual(
+    candidateState(reference, (args) => {
+      calls.push(args);
+      return `Name: ${reference}\nDigest: ${digest}\n`;
+    }),
+    { build: false, digest },
+  );
+  assert.deepEqual(calls, [["buildx", "imagetools", "inspect", reference]]);
+  assert.deepEqual(
+    candidateState(reference, () => {
+      throw missingImage(reference);
+    }),
+    {
+      build: true,
+      digest: "",
+    },
+  );
+});
+
+test("only explicit manifest absence permits a new stable image build", () => {
+  const reference = "ghcr.io/example/aztunnel:absent";
+  for (const message of ["manifest unknown", "MANIFEST_UNKNOWN"]) {
+    const error = Object.assign(new Error(message), {
+      status: 1,
+      stderr: message,
+    });
+    assert.equal(
+      inspectImage(reference, () => {
+        throw error;
+      }),
+      null,
+    );
+  }
+  for (const error of [
+    Object.assign(new Error("denied"), { status: 1, stderr: "unauthorized" }),
+    Object.assign(new Error("registry unavailable"), {
+      status: 1,
+      stderr: "connection reset",
+    }),
+    Object.assign(new Error("wrong reference"), {
+      status: 1,
+      stderr: "ERROR: other: not found",
+    }),
+    Object.assign(new Error("missing docker"), { code: "ENOENT" }),
+  ]) {
+    assert.throws(
+      () =>
+        candidateState(reference, () => {
+          throw error;
+        }),
+      (actual) => actual === error,
+    );
+  }
+  assert.throws(
+    () => inspectImage(reference, () => "Digest: invalid"),
+    /valid manifest/,
+  );
+});
+
+function imageRegistry(initial = []) {
+  const tags = new Map(initial);
+  const writes = [];
+  return {
+    tags,
+    writes,
+    execute(args) {
+      if (args[2] === "inspect") {
+        const reference = args[3];
+        if (!tags.has(reference)) throw missingImage(reference);
+        return `Name: ${reference}\nDigest: ${tags.get(reference)}\n`;
+      }
+      assert.equal(args[2], "create");
+      const target = args[4];
+      const sourceDigest = args[5].split("@")[1];
+      writes.push(target);
+      tags.set(target, sourceDigest);
+      return "";
+    },
+  };
+}
+
+function promotionOptions(images = matrix.include) {
+  const imageBase = "ghcr.io/example/aztunnel";
+  return {
+    version: "v0.4.1",
+    imageBase,
+    images,
+    refs: Object.fromEntries(
+      images.map((image) => [
+        image.id,
+        `${imageBase}${image.image_suffix}@${digest}\n`,
+      ]),
+    ),
+  };
+}
+
+test("stable promotion covers all variants and never rewrites existing exact versions", () => {
+  const registry = imageRegistry();
+  const options = promotionOptions();
+  promoteStableImages(options, registry.execute);
+  assert.equal(registry.writes.length, matrix.include.length * 3);
+  const exacts = matrix.include.map(
+    (image) =>
+      `${options.imageBase}${image.image_suffix}:0.4.1${image.variant}`,
+  );
+  for (const exact of exacts) assert.equal(registry.tags.get(exact), digest);
+  registry.writes.length = 0;
+  promoteStableImages(options, registry.execute);
+  assert.equal(registry.writes.length, matrix.include.length * 2);
+  assert.ok(registry.writes.every((tag) => !exacts.includes(tag)));
+  for (const exact of exacts) assert.equal(registry.tags.get(exact), digest);
+});
+
+test("any conflicting exact-version digest stops promotion before all tag writes", () => {
+  const options = promotionOptions();
+  const conflict = `${options.imageBase}-relay:0.4.1-alpine`;
+  const registry = imageRegistry([[conflict, `sha256:${"d".repeat(64)}`]]);
+  assert.throws(
+    () => promoteStableImages(options, registry.execute),
+    /Refusing to overwrite immutable/,
+  );
+  assert.deepEqual(registry.writes, []);
+  assert.equal(registry.tags.get(conflict), `sha256:${"d".repeat(64)}`);
+});
+
+test("partial promotion retries repair rolling tags without moving an exact version", () => {
+  const options = promotionOptions(matrix.include.slice(0, 1));
+  const registry = imageRegistry();
+  let interrupted = false;
+  const execute = (args) => {
+    // Simulate the registry accepting an exact tag, then losing the response.
+    const result = registry.execute(args);
+    if (args[2] === "create" && !interrupted) {
+      interrupted = true;
+      throw new Error("connection lost after promotion");
+    }
+    return result;
+  };
+  assert.throws(() => promoteStableImages(options, execute), /connection lost/);
+  const exact = `${options.imageBase}:0.4.1`;
+  assert.equal(registry.tags.get(exact), digest);
+  promoteStableImages(options, execute);
+  assert.equal(registry.writes.filter((tag) => tag === exact).length, 1);
+  assert.equal(registry.tags.get(`${options.imageBase}:0.4`), digest);
+  assert.equal(registry.tags.get(`${options.imageBase}:latest`), digest);
+});
+
+test("promotion fails closed on invalid references, registry errors and digest mismatches", () => {
+  const options = promotionOptions(matrix.include.slice(0, 1));
+  assert.throws(
+    () =>
+      promoteStableImages({
+        ...options,
+        refs: { "client-scratch": `ghcr.io/other/image@${digest}` },
+      }),
+    /Invalid candidate reference/,
+  );
+  assert.throws(
+    () =>
+      promoteStableImages(options, () => {
+        throw new Error("registry unavailable");
+      }),
+    /registry unavailable/,
+  );
+  const registry = imageRegistry();
+  const execute = (args) => {
+    const result = registry.execute(args);
+    if (args[2] === "create")
+      registry.tags.set(args[4], `sha256:${"d".repeat(64)}`);
+    return result;
+  };
+  assert.throws(
+    () => promoteStableImages(options, execute),
+    /does not match candidate/,
   );
 });
 
