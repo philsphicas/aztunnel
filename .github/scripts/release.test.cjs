@@ -125,6 +125,9 @@ test("shipping filter excludes docs, test code and automation-only changes", () 
     ".github/dependabot.yml",
     "scripts/update-go-version.sh",
     ".golangci-version",
+    ".golangci.yml",
+    "mockrelay/.golangci.yml",
+    "mockrelay/.golangci.yaml",
     "mockrelay/README.md",
     "mockrelay/relay_test.go",
   ])
@@ -166,6 +169,20 @@ test("unchanged and non-shipping-only weeks produce no release", () => {
     makePlan({ commits: [commit("docs: update instructions", ["README.md"])] }),
     null,
   );
+});
+
+test("lint-only module configuration never triggers or changes a release decision", () => {
+  const lint = commit("chore: adjust lint rules", ["mockrelay/.golangci.yml"]);
+  assert.equal(makePlan({ commits: [lint] }), null);
+  const request = makePlan({
+    commits: [
+      lint,
+      commit("fix: repair relay behavior", ["mockrelay/relay.go"]),
+    ],
+  });
+  assert.equal(request.version, "v0.4.1");
+  assert.equal(request.decision_required, false);
+  assert.equal(request.reasons.length, 1);
 });
 
 test("workspace-only dependency updates are never silently skipped", () => {

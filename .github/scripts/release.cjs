@@ -63,6 +63,7 @@ function ships(file) {
   if (
     /^(docs|e2e|scripts)\//.test(file) ||
     /(^|\/)(testdata|\.github\/scripts)\//.test(file) ||
+    /(^|\/)\.golangci\.ya?ml$/.test(file) ||
     /(?:_test\.go|\.md)$/.test(file)
   ) {
     return false;
