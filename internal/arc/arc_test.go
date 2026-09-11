@@ -2,6 +2,7 @@ package arc
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -417,6 +418,62 @@ func isConnectionRefused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.Errno(10061))
 }
 
+func stallHandshakeUntilCancelled(r *http.Request, cancelled chan<- struct{}) {
+	<-r.Context().Done()
+	close(cancelled)
+	// Returning normally would let net/http send an implicit HTTP 200.
+	panic(http.ErrAbortHandler)
+}
+
+func TestStalledHandshakeDoesNotRespondAfterTLSCloseNotify(t *testing.T) {
+	cancelled := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		stallHandshakeUntilCancelled(r, cancelled)
+	}))
+	defer srv.Close()
+
+	tlsConfig := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	tlsConfig.MinVersion = tls.VersionTLS13
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second},
+		"tcp", srv.Listener.Addr().String(), tlsConfig)
+	if err != nil {
+		t.Fatalf("dial TLS: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	if err := req.Write(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	// tls.Conn.Close sends close_notify before closing TCP. Keep the read
+	// side open to expose any response from the cancelled handler without
+	// racing the client's deadline or socket close.
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatalf("send TLS close_notify: %v", err)
+	}
+	var response [1]byte
+	n, err := conn.Read(response[:])
+	if n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("stalled handler returned %q, %v after TLS close_notify; want no bytes and EOF", response[:n], err)
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("handler did not observe request cancellation")
+	}
+}
+
 func TestDialWithLoggerRetry(t *testing.T) {
 	t.Run("retries pre-response attempt deadline then succeeds", func(t *testing.T) {
 		var attempts atomic.Int32
@@ -424,8 +481,7 @@ func TestDialWithLoggerRetry(t *testing.T) {
 
 		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if attempts.Add(1) == 1 {
-				<-r.Context().Done()
-				close(firstCancelled)
+				stallHandshakeUntilCancelled(r, firstCancelled)
 				return
 			}
 			ws, err := websocket.Accept(w, r, nil)
