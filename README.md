@@ -93,6 +93,10 @@ variants.
 
 ### Release bundles
 
+Maintenance releases are prepared weekly and published by merging a release PR.
+See the [release policy and maintainer guide](docs/releases.md) for urgent releases,
+version decisions, and container refreshes.
+
 [Stable releases](https://github.com/philsphicas/aztunnel/releases/latest)
 and the rolling [`dev` prerelease](https://github.com/philsphicas/aztunnel/releases/tag/dev)
 provide Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 bundles.

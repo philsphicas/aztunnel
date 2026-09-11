@@ -27,6 +27,19 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
+  image-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.images.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Read shared release image definitions
+        id: images
+        run: echo "matrix=$(jq -c . .github/release-images.json)" >> "$GITHUB_OUTPUT"
+
   build-bundles:
     concurrency:
       group: >-
@@ -77,6 +90,7 @@ jobs:
           retention-days: 14
 
   build-images:
+    needs: image-matrix
     concurrency:
       group: >-
         ${{ inputs.channel == 'dev'
@@ -87,45 +101,7 @@ jobs:
       contents: read
       packages: write
     strategy:
-      matrix:
-        include:
-          - id: client-scratch
-            image_suffix: ""
-            variant: ""
-            file: Dockerfile
-            builder_variant: bookworm
-            runtime: scratch
-          - id: client-alpine
-            image_suffix: ""
-            variant: -alpine
-            file: Dockerfile
-            builder_variant: alpine
-            runtime: alpine
-          - id: client-bookworm
-            image_suffix: ""
-            variant: -bookworm
-            file: Dockerfile
-            builder_variant: bookworm
-            runtime: debian:bookworm-slim
-          - id: client-azurelinux3
-            image_suffix: ""
-            variant: -azurelinux3
-            file: Dockerfile.azurelinux3
-            builder_repository: mcr.microsoft.com/oss/go/microsoft/golang
-            builder_variant: azurelinux3.0
-            runtime: mcr.microsoft.com/azurelinux/base/core:3.0
-          - id: relay-bookworm
-            image_suffix: -relay
-            variant: ""
-            file: mockrelay/Dockerfile
-            builder_variant: bookworm
-            runtime: debian:bookworm-slim
-          - id: relay-alpine
-            image_suffix: -relay
-            variant: -alpine
-            file: mockrelay/Dockerfile
-            builder_variant: alpine
-            runtime: alpine
+      matrix: ${{ fromJSON(needs.image-matrix.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -162,6 +138,8 @@ jobs:
           context: .
           file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: ${{ inputs.channel == 'stable' }}
           push: true
           tags: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.commit_sha }}${{ matrix.variant }}
           labels: |

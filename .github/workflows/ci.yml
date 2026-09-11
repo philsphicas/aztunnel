@@ -36,6 +36,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Test maintenance release automation
+        run: node --test .github/scripts/release.test.cjs
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.work
