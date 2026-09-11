@@ -31,10 +31,7 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Stable release tags must match vMAJOR.MINOR.PATCH exactly."
-            exit 1
-          fi
+          node .github/scripts/release.cjs validate-version "$VERSION"
 
           commit_sha="$(git rev-parse HEAD)"
           git fetch --no-tags origin main

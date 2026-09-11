@@ -85,5 +85,10 @@ If a newer stable release overtakes an open candidate, run preparation again;
 it will refresh the candidate against that release or close it if unnecessary.
 
 Manual strict `vMAJOR.MINOR.PATCH` tags remain supported for deliberate releases.
+All release paths use the same validation: no leading zeros, and each component
+must be at most `9007199254740991` (JavaScript's largest safe integer). Invalid
+unpublished tags are ignored when selecting the newest stable tag; an existing
+published noncanonical numeric version fails preparation explicitly rather
+than silently selecting an older release.
 Automatic preparation is a convenience, not a guarantee that every security
 advisory is relevant, every fix is available, or a fresh image is vulnerability-free.

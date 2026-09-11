@@ -16,20 +16,33 @@ function run(command, args) {
   }).trim();
 }
 
-function parseVersion(tag) {
+function isStableVersion(tag) {
   const match = stablePattern.exec(tag);
-  if (!match) throw new Error(`Invalid stable version: ${tag}`);
-  const parts = match.slice(1).map(Number);
-  if (parts.some((part) => !Number.isSafeInteger(part))) {
-    throw new Error(`Version is too large: ${tag}`);
+  return (
+    match !== null &&
+    match.slice(1).every((part) => Number.isSafeInteger(Number(part)))
+  );
+}
+
+function parseVersion(tag) {
+  if (!isStableVersion(tag)) {
+    throw new Error(
+      `Invalid stable version: ${tag}. Use vMAJOR.MINOR.PATCH without leading zeros; components must be safe integers.`,
+    );
   }
-  return parts;
+  return tag.slice(1).split(".").map(Number);
 }
 
 function compareVersions(left, right) {
   const a = parseVersion(left);
   const b = parseVersion(right);
   return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+}
+
+function latestVersion(tags) {
+  const versions = tags.filter(isStableVersion).sort(compareVersions);
+  if (!versions.length) throw new Error("No valid stable version found.");
+  return versions.at(-1);
 }
 
 function nextVersion(previous, bump) {
@@ -240,9 +253,14 @@ async function latestStable(github, repo) {
       (release) =>
         !release.draft &&
         !release.prerelease &&
-        stablePattern.test(release.tag_name),
+        /^v\d+\.\d+\.\d+$/.test(release.tag_name),
     )
-    .map((release) => release.tag_name)
+    .map((release) => {
+      // Previously published noncanonical versions need explicit repair, not
+      // silent exclusion from the maintenance release baseline.
+      parseVersion(release.tag_name);
+      return release.tag_name;
+    })
     .sort(compareVersions);
   if (!versions.length)
     throw new Error(
@@ -271,7 +289,7 @@ async function requireCI(github, repo, sha) {
 function requireNoPendingTag(previous, execute = run) {
   const tags = execute("git", ["tag", "--list", "v*"])
     .split("\n")
-    .filter((tag) => stablePattern.test(tag));
+    .filter(isStableVersion);
   if (tags.some((tag) => compareVersions(tag, previous) > 0)) {
     throw new Error(
       "A newer stable tag has not finished publishing. Finish or repair that release first.",
@@ -456,7 +474,7 @@ async function approve({ github, context, core, execute = run, files = fs }) {
   await requireCI(github, repo, request.source_sha);
   const tags = execute("git", ["tag", "--list", "v*"])
     .split("\n")
-    .filter((tag) => stablePattern.test(tag));
+    .filter(isStableVersion);
   if (tags.some((tag) => compareVersions(tag, request.version) > 0)) {
     throw new Error("A newer stable tag superseded this request.");
   }
@@ -487,6 +505,8 @@ module.exports = {
   classify,
   compareVersions,
   describe,
+  isStableVersion,
+  latestVersion,
   nextVersion,
   observeInputs,
   packageProbe,
@@ -499,3 +519,18 @@ module.exports = {
   ships,
   validateRequest,
 };
+
+if (require.main === module) {
+  switch (process.argv[2]) {
+    case "validate-version":
+      parseVersion(process.argv[3]);
+      break;
+    case "latest-version":
+      console.log(latestVersion(fs.readFileSync(0, "utf8").split(/\r?\n/)));
+      break;
+    default:
+      throw new Error(
+        "Usage: release.cjs validate-version <tag> | latest-version (tags on stdin)",
+      );
+  }
+}

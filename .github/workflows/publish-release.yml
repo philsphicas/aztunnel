@@ -282,10 +282,7 @@ jobs:
               exit 1
             fi
           else
-            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::Stable version must match vMAJOR.MINOR.PATCH exactly."
-              exit 1
-            fi
+            node ../.github/scripts/release.cjs validate-version "$VERSION"
           fi
 
           bundle_files=(
@@ -419,9 +416,8 @@ jobs:
 
           latest_stable_tag="$(
             git ls-remote --tags --refs origin 'v*' |
-              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
-              sort -V |
-              tail -n1
+              awk '{sub(/^refs\/tags\//, "", $2); print $2}' |
+              node .github/scripts/release.cjs latest-version
           )"
           if [[ "$VERSION" != "$latest_stable_tag" ]]; then
             echo "::error::Refusing ${VERSION}; newest strict stable tag is ${latest_stable_tag}."
@@ -705,9 +701,8 @@ jobs:
           fi
           latest_stable_tag="$(
             git ls-remote --tags --refs origin 'v*' |
-              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
-              sort -V |
-              tail -n1
+              awk '{sub(/^refs\/tags\//, "", $2); print $2}' |
+              node .github/scripts/release.cjs latest-version
           )"
           if [[ "$VERSION" != "$latest_stable_tag" ]]; then
             echo "::error::A newer stable tag (${latest_stable_tag}) superseded ${VERSION} before image promotion."
@@ -1049,9 +1044,8 @@ jobs:
           git merge-base --is-ancestor "$COMMIT_SHA" origin/main
           latest_stable_tag="$(
             git ls-remote --tags --refs origin 'v*' |
-              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
-              sort -V |
-              tail -n1
+              awk '{sub(/^refs\/tags\//, "", $2); print $2}' |
+              node .github/scripts/release.cjs latest-version
           )"
           if [[ "$VERSION" != "$latest_stable_tag" ]]; then
             echo "::error::A newer stable tag (${latest_stable_tag}) appeared before publication."

@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
@@ -7,6 +8,8 @@ const {
   classify,
   compareVersions,
   describe,
+  isStableVersion,
+  latestVersion,
   nextVersion,
   observeInputs,
   packageProbe,
@@ -59,6 +62,44 @@ test("strict versions sort numerically and bump with resets", () => {
   assert.equal(nextVersion("v0.4.9", "minor"), "v0.5.0");
   assert.equal(nextVersion("v0.4.9", "major"), "v1.0.0");
   assert.throws(() => nextVersion("v0.4.0", "auto"));
+});
+
+test("manual publication and tag selection share canonical safe-integer validation", () => {
+  const valid = ["v0.0.0", "v0.4.0", "v1.2.3", "v9007199254740991.0.0"];
+  const invalid = [
+    "v01.2.3",
+    "v1.02.3",
+    "v1.2.03",
+    "v9007199254740992.0.0",
+    "v0.4.1-rc.1",
+    "dev",
+  ];
+  const script = path.join(__dirname, "release.cjs");
+  for (const tag of [...valid, ...invalid]) {
+    const result = spawnSync(
+      process.execPath,
+      [script, "validate-version", tag],
+      { encoding: "utf8" },
+    );
+    assert.ifError(result.error);
+    assert.equal(result.status === 0, valid.includes(tag), tag);
+    assert.equal(isStableVersion(tag), valid.includes(tag), tag);
+    if (!valid.includes(tag))
+      assert.match(result.stderr, /Invalid stable version/);
+  }
+  assert.equal(latestVersion(["v0.9.0", "v0.10.0", ...invalid]), "v0.10.0");
+  const result = spawnSync(process.execPath, [script, "latest-version"], {
+    input: ["v0.9.0", "v0.10.0", ...invalid, ""].join("\r\n"),
+    encoding: "utf8",
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "v0.10.0");
+  assert.throws(() => latestVersion(invalid), /No valid stable version/);
+  assert.throws(
+    () => nextVersion("v0.0.9007199254740991", "patch"),
+    /Invalid stable version/,
+  );
 });
 
 test("shipping filter excludes docs, test code and automation-only changes", () => {
@@ -353,6 +394,7 @@ test("a reserved unpublished version blocks new preparation", () => {
     /not finished/,
   );
   requireNoPendingTag("v0.4.0", () => "dev\nv0.4.0\nv0.5.0-rc.1");
+  requireNoPendingTag("v0.4.0", () => "v0.4.0\nv01.2.3\nv9007199254740992.0.0");
 });
 
 test("CI gate requires the newest run for the exact source to succeed", async () => {
@@ -496,6 +538,16 @@ test("preparation waits for an approved request that has not created its tag yet
   const h = harness({ request: makePlan({ force: true }) });
   await assert.rejects(prepare(h), /awaiting publication/);
   assert.ok(!h.calls.some((call) => call.name === "createRef"));
+});
+
+test("unsupported previously published stable versions fail instead of being skipped", async () => {
+  for (const tag of ["v01.2.3", "v9007199254740992.0.0"]) {
+    for (const versions of [[tag], ["v0.4.0", tag]]) {
+      const h = harness({ versions });
+      await assert.rejects(prepare(h), /Invalid stable version/);
+      assert.ok(!h.disk.has(".github/release.json"));
+    }
+  }
 });
 
 test("weekly refresh preserves an explicit decision for the same source", async () => {
