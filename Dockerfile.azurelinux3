@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 FROM ${RUNTIME_IMAGE}
 # Keep cryptography and trust roots owned by the runtime OS packages.
-RUN tdnf install -y openssl-libs ca-certificates && tdnf clean all
+RUN tdnf upgrade -y && tdnf install -y openssl-libs ca-certificates && tdnf clean all
 # Remove once the ML-KEM fix ships in Azure Linux's OpenSSL packages:
 # https://github.com/microsoft/go/issues/2472
 ENV GODEBUG=tlsmlkem=0

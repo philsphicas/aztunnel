@@ -27,6 +27,21 @@ env:
   DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
+  image-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.images.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - name: Read shared release image definitions
+        id: images
+        run: |
+          matrix="$(node .github/scripts/release.cjs image-matrix)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   build-bundles:
     concurrency:
       group: >-
@@ -77,6 +92,7 @@ jobs:
           retention-days: 14
 
   build-images:
+    needs: image-matrix
     concurrency:
       group: >-
         ${{ inputs.channel == 'dev'
@@ -87,45 +103,7 @@ jobs:
       contents: read
       packages: write
     strategy:
-      matrix:
-        include:
-          - id: client-scratch
-            image_suffix: ""
-            variant: ""
-            file: Dockerfile
-            builder_variant: bookworm
-            runtime: scratch
-          - id: client-alpine
-            image_suffix: ""
-            variant: -alpine
-            file: Dockerfile
-            builder_variant: alpine
-            runtime: alpine
-          - id: client-bookworm
-            image_suffix: ""
-            variant: -bookworm
-            file: Dockerfile
-            builder_variant: bookworm
-            runtime: debian:bookworm-slim
-          - id: client-azurelinux3
-            image_suffix: ""
-            variant: -azurelinux3
-            file: Dockerfile.azurelinux3
-            builder_repository: mcr.microsoft.com/oss/go/microsoft/golang
-            builder_variant: azurelinux3.0
-            runtime: mcr.microsoft.com/azurelinux/base/core:3.0
-          - id: relay-bookworm
-            image_suffix: -relay
-            variant: ""
-            file: mockrelay/Dockerfile
-            builder_variant: bookworm
-            runtime: debian:bookworm-slim
-          - id: relay-alpine
-            image_suffix: -relay
-            variant: -alpine
-            file: mockrelay/Dockerfile
-            builder_variant: alpine
-            runtime: alpine
+      matrix: ${{ fromJSON(needs.image-matrix.outputs.matrix) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -155,13 +133,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Reuse an existing stable candidate
+        if: inputs.channel == 'stable'
+        id: candidate
+        env:
+          CANDIDATE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.commit_sha }}${{ matrix.variant }}
+        run: node .github/scripts/release-images.cjs candidate "$CANDIDATE" >> "$GITHUB_OUTPUT"
+
       - name: Build immutable candidate
+        if: inputs.channel != 'stable' || steps.candidate.outputs.build == 'true'
         id: build
         uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: ${{ inputs.channel == 'stable' }}
           push: true
           tags: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.commit_sha }}${{ matrix.variant }}
           labels: |
@@ -175,7 +163,7 @@ jobs:
 
       - name: Record candidate digest
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.candidate.outputs.digest || steps.build.outputs.digest }}
           IMAGE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
         run: |
           set -euo pipefail
@@ -246,41 +234,17 @@ jobs:
           path: release-assets
           skip-decompress: true
 
-      - name: Download client scratch digest
+      - name: Download image digests
         uses: actions/download-artifact@v8
         with:
-          name: image-client-scratch
+          pattern: image-*
+          merge-multiple: true
           path: image-refs
 
-      - name: Download client Alpine digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-client-alpine
-          path: image-refs
-
-      - name: Download client Bookworm digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-client-bookworm
-          path: image-refs
-
-      - name: Download client Azure Linux 3 digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-client-azurelinux3
-          path: image-refs
-
-      - name: Download relay Bookworm digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-relay-bookworm
-          path: image-refs
-
-      - name: Download relay Alpine digest
-        uses: actions/download-artifact@v8
-        with:
-          name: image-relay-alpine
-          path: image-refs
+      - name: Validate image artifacts against the release matrix
+        run: |
+          node .github/scripts/release-images.cjs validate-refs \
+            "ghcr.io/${GITHUB_REPOSITORY}" image-refs
 
       - name: Validate inputs and create checksums
         env:
@@ -304,10 +268,7 @@ jobs:
               exit 1
             fi
           else
-            if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "::error::Stable version must match vMAJOR.MINOR.PATCH exactly."
-              exit 1
-            fi
+            node ../.github/scripts/release.cjs validate-version "$VERSION"
           fi
 
           bundle_files=(
@@ -441,9 +402,8 @@ jobs:
 
           latest_stable_tag="$(
             git ls-remote --tags --refs origin 'v*' |
-              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
-              sort -V |
-              tail -n1
+              awk '{sub(/^refs\/tags\//, "", $2); print $2}' |
+              node .github/scripts/release.cjs latest-version
           )"
           if [[ "$VERSION" != "$latest_stable_tag" ]]; then
             echo "::error::Refusing ${VERSION}; newest strict stable tag is ${latest_stable_tag}."
@@ -727,39 +687,16 @@ jobs:
           fi
           latest_stable_tag="$(
             git ls-remote --tags --refs origin 'v*' |
-              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
-              sort -V |
-              tail -n1
+              awk '{sub(/^refs\/tags\//, "", $2); print $2}' |
+              node .github/scripts/release.cjs latest-version
           )"
           if [[ "$VERSION" != "$latest_stable_tag" ]]; then
             echo "::error::A newer stable tag (${latest_stable_tag}) superseded ${VERSION} before image promotion."
             exit 1
           fi
 
-          promote() {
-            local source_file="$1"
-            local image="$2"
-            local suffix="$3"
-            local source
-            local tags=()
-            source="$(cat "$source_file")"
-
-            local semver="${VERSION#v}"
-            local minor="${semver%.*}"
-            tags=("${semver}${suffix}" "${minor}${suffix}" "latest${suffix}")
-
-            for tag in "${tags[@]}"; do
-              docker buildx imagetools create --tag "${image}:${tag}" "$source"
-              docker buildx imagetools inspect "${image}:${tag}" >/dev/null
-            done
-          }
-
-          promote image-refs/client-scratch.txt "ghcr.io/${GITHUB_REPOSITORY}" ""
-          promote image-refs/client-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}" "-alpine"
-          promote image-refs/client-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}" "-bookworm"
-          promote image-refs/client-azurelinux3.txt "ghcr.io/${GITHUB_REPOSITORY}" "-azurelinux3"
-          promote image-refs/relay-bookworm.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" ""
-          promote image-refs/relay-alpine.txt "ghcr.io/${GITHUB_REPOSITORY}-relay" "-alpine"
+          node .github/scripts/release-images.cjs promote "$VERSION" \
+            "ghcr.io/${GITHUB_REPOSITORY}" image-refs
 
       - name: Publish rolling development channel
         if: inputs.channel == 'dev'
@@ -821,14 +758,9 @@ jobs:
             exit 1
           fi
 
-          images=(
-            "ghcr.io/${GITHUB_REPOSITORY}|dev|image-refs/client-scratch.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}|dev-alpine|image-refs/client-alpine.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}|dev-bookworm|image-refs/client-bookworm.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}-relay|dev|image-refs/relay-bookworm.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}-relay|dev-alpine|image-refs/relay-alpine.txt"
-            "ghcr.io/${GITHUB_REPOSITORY}|dev-azurelinux3|image-refs/client-azurelinux3.txt"
-          )
+          node .github/scripts/release-images.cjs dev-images \
+            "ghcr.io/${GITHUB_REPOSITORY}" > .dev-image-entries
+          mapfile -t images < .dev-image-entries
           inspect_digest() {
             local reference="$1"
             local context="$2"
@@ -860,11 +792,7 @@ jobs:
 
           snapshots=()
           for entry in "${images[@]}"; do
-            IFS='|' read -r image tag source_file <<< "$entry"
-            allow_missing=false
-            if [[ "$tag" == "dev-azurelinux3" ]]; then
-              allow_missing=true
-            fi
+            IFS='|' read -r image tag source_file allow_missing <<< "$entry"
             if ! digest="$(inspect_digest "${image}:${tag}" "existing rolling image" "$allow_missing")"; then
               echo "::error::Cannot snapshot existing ${image}:${tag}; refusing to mutate the rolling channel."
               exit 1
@@ -1024,7 +952,7 @@ jobs:
             --latest=false
 
           for entry in "${images[@]}"; do
-            IFS='|' read -r image tag source_file <<< "$entry"
+            IFS='|' read -r image tag source_file _ <<< "$entry"
             source="$(cat "$source_file")"
             images_mutated=true
             mutated_images+=("${image}:${tag}")
@@ -1071,9 +999,8 @@ jobs:
           git merge-base --is-ancestor "$COMMIT_SHA" origin/main
           latest_stable_tag="$(
             git ls-remote --tags --refs origin 'v*' |
-              awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ {sub(/^refs\/tags\//, "", $2); print $2}' |
-              sort -V |
-              tail -n1
+              awk '{sub(/^refs\/tags\//, "", $2); print $2}' |
+              node .github/scripts/release.cjs latest-version
           )"
           if [[ "$VERSION" != "$latest_stable_tag" ]]; then
             echo "::error::A newer stable tag (${latest_stable_tag}) appeared before publication."

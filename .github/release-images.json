@@ -1,0 +1,54 @@
+{
+  "include": [
+    {
+      "id": "client-scratch",
+      "image_suffix": "",
+      "variant": "",
+      "file": "Dockerfile",
+      "builder_variant": "bookworm",
+      "runtime": "scratch"
+    },
+    {
+      "id": "client-alpine",
+      "image_suffix": "",
+      "variant": "-alpine",
+      "file": "Dockerfile",
+      "builder_variant": "alpine",
+      "runtime": "alpine"
+    },
+    {
+      "id": "client-bookworm",
+      "image_suffix": "",
+      "variant": "-bookworm",
+      "file": "Dockerfile",
+      "builder_variant": "bookworm",
+      "runtime": "debian:bookworm-slim"
+    },
+    {
+      "id": "client-azurelinux3",
+      "allow_missing_dev": true,
+      "image_suffix": "",
+      "variant": "-azurelinux3",
+      "file": "Dockerfile.azurelinux3",
+      "builder_repository": "mcr.microsoft.com/oss/go/microsoft/golang",
+      "builder_variant": "azurelinux3.0",
+      "runtime": "mcr.microsoft.com/azurelinux/base/core:3.0"
+    },
+    {
+      "id": "relay-bookworm",
+      "image_suffix": "-relay",
+      "variant": "",
+      "file": "mockrelay/Dockerfile",
+      "builder_variant": "bookworm",
+      "runtime": "debian:bookworm-slim"
+    },
+    {
+      "id": "relay-alpine",
+      "image_suffix": "-relay",
+      "variant": "-alpine",
+      "file": "mockrelay/Dockerfile",
+      "builder_variant": "alpine",
+      "runtime": "alpine"
+    }
+  ]
+}
