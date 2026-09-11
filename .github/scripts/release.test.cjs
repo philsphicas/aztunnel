@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
+const { execFileSync, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 const {
@@ -727,9 +728,90 @@ test("commit inspection uses ancestry and complete per-commit shipping paths", (
     return "";
   });
   assert.deepEqual(calls[0], ["merge-base", "--is-ancestor", "v0.4.0", sha]);
+  assert.ok(calls.find((args) => args[0] === "diff").includes("--no-renames"));
   assert.deepEqual(commits, [
     commit("fix: a bug\n\nDetails", ["README.md", "internal/arc/arc.go"]),
   ]);
+});
+
+test("moving shipped code into tests still triggers a release with rename detection enabled", (t) => {
+  const directory = fs.mkdtempSync(
+    path.join(os.tmpdir(), "aztunnel-release-renames-"),
+  );
+  t.after(() =>
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 3 }),
+  );
+  const globalConfig = path.join(directory, ".gitconfig");
+  fs.writeFileSync(globalConfig, "");
+  const execute = (command, args) =>
+    execFileSync(
+      command,
+      [
+        "-c",
+        "user.name=Release regression",
+        "-c",
+        "user.email=release-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: globalConfig,
+        },
+      },
+    ).trim();
+  execute("git", ["init", "--quiet", "--initial-branch=main"]);
+  execute("git", ["config", "diff.renames", "true"]);
+  fs.mkdirSync(path.join(directory, "internal"));
+  fs.mkdirSync(path.join(directory, "e2e"));
+  fs.writeFileSync(
+    path.join(directory, "internal", "helper.go"),
+    "package helper\n",
+  );
+  execute("git", ["add", "--", "internal/helper.go"]);
+  execute("git", ["commit", "--quiet", "-m", "Initial shipped helper"]);
+  execute("git", ["tag", "v0.4.0"]);
+  execute("git", ["mv", "--", "internal/helper.go", "e2e/helper.go"]);
+  execute("git", [
+    "commit",
+    "--quiet",
+    "-m",
+    "refactor: move helper into tests",
+  ]);
+  const sourceSHA = execute("git", ["rev-parse", "HEAD"]);
+
+  const destination = execute("git", [
+    "diff",
+    "--name-only",
+    "-M",
+    "v0.4.0",
+    sourceSHA,
+  ]);
+  assert.equal(destination, "e2e/helper.go");
+  assert.equal(
+    makePlan({
+      sourceSHA,
+      commits: [
+        {
+          sha: sourceSHA,
+          message: "refactor: move helper into tests",
+          files: [destination],
+        },
+      ],
+    }),
+    null,
+  );
+
+  const commits = readCommits("v0.4.0", sourceSHA, execute);
+  assert.deepEqual(commits[0].files, ["e2e/helper.go", "internal/helper.go"]);
+  const request = makePlan({ sourceSHA, commits });
+  assert.ok(request);
+  assert.equal(request.decision_required, true);
 });
 
 test("a reserved unpublished version blocks new preparation", () => {

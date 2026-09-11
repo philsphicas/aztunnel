@@ -301,7 +301,14 @@ function readCommits(previous, sourceSHA, execute = run) {
   return revisions.split("\n").map((sha) => ({
     sha,
     message: execute("git", ["show", "-s", "--format=%B", sha]),
-    files: execute("git", ["diff", "--name-only", "-z", `${sha}^`, sha])
+    files: execute("git", [
+      "diff",
+      "--no-renames",
+      "--name-only",
+      "-z",
+      `${sha}^`,
+      sha,
+    ])
       .split("\0")
       .filter(Boolean),
   }));
