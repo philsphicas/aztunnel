@@ -651,8 +651,25 @@ test("Dependabot merges use the automation credential to trigger main CI", () =>
   assert.match(merge, /merge-method: squash/);
   assert.doesNotMatch(approval, /GH_AUTOMATION_TOKEN/);
   assert.doesNotMatch(workflow, /uses: actions\/checkout/);
-  const condition = (step) => step.match(/if: >\n([\s\S]*?)(?=^        \w)/m)?.[1];
-  assert.ok(condition(guard));
+  assert.match(
+    workflow,
+    /permissions:\r?\n  contents: read\r?\n  pull-requests: write/,
+  );
+  assert.doesNotMatch(workflow, /contents: write/);
+  const condition = (step) =>
+    step
+      .match(/if: >\n([\s\S]*?)(?=^        \w)/m)?.[1]
+      .trim()
+      .replace(/\s+/g, " ");
+  assert.equal(
+    condition(guard),
+    [
+      "steps.metadata.outputs.update-type == 'version-update:semver-patch' ||",
+      "steps.metadata.outputs.update-type == 'version-update:semver-minor' ||",
+      "(steps.metadata.outputs.update-type == 'version-update:semver-major' &&",
+      "steps.metadata.outputs.package-ecosystem == 'github_actions')",
+    ].join(" "),
+  );
   assert.equal(condition(guard), condition(approval));
   assert.equal(condition(guard), condition(merge));
 });
