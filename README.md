@@ -93,7 +93,8 @@ variants.
 
 ### Release bundles
 
-Maintenance releases are prepared weekly and published by merging a release PR.
+Maintenance releases are prepared weekly and published after one approval in
+GitHub Actions (**Review deployments** > `stable-release`).
 See the [release policy and maintainer guide](docs/releases.md) for urgent releases,
 version decisions, and container refreshes.
 
