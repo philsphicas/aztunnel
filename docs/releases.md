@@ -65,7 +65,10 @@ are not sufficient. For a historical Dependabot merge made with `GITHUB_TOKEN`,
 merge the automation fix normally, wait for CI on the new `main` tip, then start
 preparation again; rerunning preparation cannot create the missing CI run.
 
-If approval or tagging fails before a tag is created, rerun the failed job.
+If tagging fails transiently, such as an API or fetch error, rerun the failed job.
+If it reports a changed published baseline, another pending stable tag, or a source
+that is no longer an ancestor of `main`, the proposal is stale: rerunning fails the
+same way, so start a new preparation run instead.
 If the version tag already exists, follow or rerun **Stable Release** instead.
 Tags are never moved, and published stable versions are never overwritten.
 Publication retries reuse existing container candidates and exact-version image
