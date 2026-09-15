@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { spawnSync } = require("node:child_process");
+const { execFileSync, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
@@ -413,6 +413,8 @@ test("maintenance workflow gates captured release inputs behind one environment 
   assert.doesNotMatch(prepareJob, /^\s+environment:/m);
   assert.match(tagJob, /needs: prepare/);
   assert.match(tagJob, /environment:\n\s+name: stable-release/);
+  assert.ok(tagJob.includes("ref: ${{ needs.prepare.outputs.source_sha }}"));
+  assert.match(tagJob, /persist-credentials: true/);
   assert.match(tagJob, /await tag\(\{ github, context, core \}\)/);
   for (const [output, input] of [
     ["version", "RELEASE_VERSION"],
@@ -534,10 +536,18 @@ function harness({
   runs = [successfulCI],
   sourceSHA = sha,
   tagSHA = sha,
+  remoteTags = tags,
+  remoteTagSHA = tagSHA,
+  remoteMainSHA = oldSHA,
   ancestor = true,
 } = {}) {
   const calls = [];
   const outputs = {};
+  const refs = new Map([
+    ["HEAD", sourceSHA],
+    ["origin/main", sourceSHA],
+  ]);
+  let fetched = false;
   const context = { repo: { owner: "example", repo: "aztunnel" } };
   const github = {
     paginate: async (endpoint, args) => {
@@ -590,18 +600,34 @@ function harness({
     assert.equal(command, "git");
     calls.push({ name: "git", args });
     if (args.join(" ") === "rev-parse HEAD") return sourceSHA;
-    if (args.join(" ") === "tag --list v*") return tags;
+    if (args[0] === "fetch") {
+      assert.deepEqual(args, [
+        "fetch",
+        "--no-tags",
+        "--prune",
+        "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+        "+refs/tags/v*:refs/tags/v*",
+      ]);
+      fetched = true;
+      refs.set("origin/main", remoteMainSHA);
+      return "";
+    }
+    if (args.join(" ") === "tag --list v*") return fetched ? remoteTags : tags;
     if (args[0] === "merge-base") {
       assert.deepEqual(args, [
         "merge-base",
         "--is-ancestor",
         sourceSHA,
-        "HEAD",
+        "origin/main",
       ]);
+      assert.equal(fetched, true, "Ancestry must use freshly fetched main.");
+      assert.equal(refs.get("origin/main"), remoteMainSHA);
       if (!ancestor) throw new Error("exit 1");
       return "";
     }
-    if (args[0] === "rev-parse" && args[1] === "v0.4.1^{commit}") return tagSHA;
+    if (args[0] === "rev-parse" && args[1] === "v0.4.1^{commit}")
+      return fetched ? remoteTagSHA : tagSHA;
     throw new Error(`Unexpected git arguments: ${args}`);
   };
   return {
@@ -611,6 +637,7 @@ function harness({
     execute,
     outputs,
     calls,
+    refs,
     env: {
       RELEASE_VERSION: "v0.4.1",
       RELEASE_SOURCE_SHA: sourceSHA,
@@ -767,8 +794,8 @@ test("pending stable tags block preparation while nonstable and older tags do no
   );
 });
 
-test("tagging creates exactly one immutable tag at the approved source, not current main", async () => {
-  const h = harness();
+test("tagging refreshes main and tags after API checks but tags only the immutable approved source", async () => {
+  const h = harness({ sourceSHA: sha, remoteMainSHA: oldSHA });
   await tag(h);
   assert.deepEqual(
     h.calls.filter(({ name }) => name === "createRef"),
@@ -783,11 +810,19 @@ test("tagging creates exactly one immutable tag at the approved source, not curr
     h.calls.some(
       ({ name, args }) =>
         name === "git" &&
-        args.join(" ") === `merge-base --is-ancestor ${sha} HEAD`,
+        args.join(" ") === `merge-base --is-ancestor ${sha} origin/main`,
     ),
   );
   assert.ok(h.calls.some(({ name }) => name === "ci"));
   assert.ok(h.calls.some(({ name }) => name === "releases"));
+  assert.equal(h.refs.get("HEAD"), sha);
+  assert.equal(h.refs.get("origin/main"), oldSHA);
+  assert.deepEqual(
+    h.calls
+      .filter(({ name }) => name !== "notice")
+      .map(({ name, args }) => (name === "git" ? args[0] : name)),
+    ["ci", "releases", "fetch", "merge-base", "tag", "createRef"],
+  );
   assert.equal(
     h.calls.some(
       ({ name, args }) => name === "git" && args.join(" ") === "rev-parse HEAD",
@@ -834,32 +869,120 @@ test("tagging rejects changed published baselines, including a previously publis
   }
 });
 
-test("tagging refuses any other pending release, even below the requested version or during a retry", async () => {
+test("tagging detects other pending tags pushed after checkout, even below the requested version or during a retry", async () => {
   for (const [version, tags] of [
     ["v0.4.1", "v0.4.0\nv0.4.2"],
     ["v0.5.0", "v0.4.0\nv0.4.1"],
     ["v0.4.1", "v0.4.0\nv0.4.1\nv0.5.0"],
   ]) {
-    const h = harness({ tags });
+    const h = harness({ tags: "v0.4.0", remoteTags: tags });
     h.env.RELEASE_VERSION = version;
     await assert.rejects(tag(h), /not finished publishing/);
     assert.equal(h.calls.filter(({ name }) => name === "createRef").length, 0);
   }
 });
 
-test("same-tag retries only direct maintainers to Stable Release; conflicting tags fail", async () => {
-  const h = harness({ tags: "v0.4.0\nv0.4.1" });
+test("same-tag retries discover remote tags pushed after checkout; conflicting sources fail", async () => {
+  const h = harness({ tags: "v0.4.0", remoteTags: "v0.4.0\nv0.4.1" });
   await tag(h);
   assert.equal(h.calls.filter(({ name }) => name === "createRef").length, 0);
   assert.match(
     h.calls.find(({ name }) => name === "notice").message,
     /Follow or rerun its Stable Release.*not be moved or recreated/,
   );
-  const conflict = harness({ tags: "v0.4.0\nv0.4.1", tagSHA: oldSHA });
+  const conflict = harness({
+    tags: "v0.4.0",
+    remoteTags: "v0.4.0\nv0.4.1",
+    remoteTagSHA: oldSHA,
+  });
   await assert.rejects(tag(conflict), /different source/);
   assert.equal(
     conflict.calls.filter(({ name }) => name === "createRef").length,
     0,
+  );
+});
+
+test("a failed remote refresh stops tagging rather than trusting checkout refs", async () => {
+  const h = harness();
+  const execute = h.execute;
+  h.execute = (command, args) => {
+    if (args[0] === "fetch") throw new Error("Fetch authentication failed");
+    return execute(command, args);
+  };
+  await assert.rejects(tag(h), /Fetch authentication failed/);
+  assert.equal(
+    h.calls.some(({ name }) => name === "createRef"),
+    false,
+  );
+});
+
+test("real git refresh detects a stable tag pushed after the approved source checkout", async (t) => {
+  const directory = fs.mkdtempSync(path.join(process.cwd(), ".release-git-"));
+  t.after(() =>
+    fs.rmSync(directory, { recursive: true, force: true, maxRetries: 3 }),
+  );
+  const remote = path.join(directory, "origin.git");
+  const seed = path.join(directory, "seed");
+  const checkout = path.join(directory, "checkout");
+  const git = (cwd, args) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=Release Test",
+        "-c",
+        "user.email=release-test@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "tag.gpgsign=false",
+        ...args,
+      ],
+      {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: path.join(directory, "no-global-config"),
+          GIT_TERMINAL_PROMPT: "0",
+        },
+      },
+    ).trim();
+  git(directory, ["init", "--bare", remote]);
+  git(directory, ["init", "--initial-branch=main", seed]);
+  git(seed, ["commit", "--allow-empty", "-m", "Initial published source"]);
+  const sourceSHA = git(seed, ["rev-parse", "HEAD"]);
+  git(seed, ["tag", "v0.4.0"]);
+  git(seed, ["remote", "add", "origin", remote]);
+  git(seed, ["push", "origin", "main", "refs/tags/v0.4.0"]);
+  git(directory, ["clone", "--branch", "main", remote, checkout]);
+  git(checkout, ["checkout", "--detach", sourceSHA]);
+  assert.equal(git(checkout, ["tag", "--list", "v0.4.2"]), "");
+
+  git(seed, ["commit", "--allow-empty", "-m", "Main advanced after checkout"]);
+  const mainSHA = git(seed, ["rev-parse", "HEAD"]);
+  git(seed, ["tag", "v0.4.2"]);
+  git(seed, ["push", "origin", "main", "refs/tags/v0.4.2"]);
+  assert.equal(git(checkout, ["rev-parse", "origin/main"]), sourceSHA);
+  assert.equal(git(checkout, ["tag", "--list", "v0.4.2"]), "");
+
+  const h = harness({
+    sourceSHA,
+    runs: [{ ...successfulCI, head_sha: sourceSHA }],
+  });
+  h.execute = (command, args) => {
+    assert.equal(command, "git");
+    return git(checkout, args);
+  };
+  await assert.rejects(tag(h), /v0\.4\.2 have not finished publishing/);
+  assert.equal(git(checkout, ["rev-parse", "HEAD"]), sourceSHA);
+  assert.equal(git(checkout, ["rev-parse", "origin/main"]), mainSHA);
+  assert.equal(git(checkout, ["rev-parse", "v0.4.2^{commit}"]), mainSHA);
+  assert.equal(
+    h.calls.some(({ name }) => name === "createRef"),
+    false,
   );
 });
 

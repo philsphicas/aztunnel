@@ -66,9 +66,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.prepare.outputs.source_sha }}
           fetch-depth: 0
-          persist-credentials: false
+          # Keep the read-only checkout credential for refreshing remote refs.
+          persist-credentials: true
 
       - name: Tag approved source
         uses: actions/github-script@v9

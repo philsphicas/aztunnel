@@ -244,18 +244,26 @@ async function tag({
       "Release version must be newer than the previous stable baseline.",
     );
   }
-  try {
-    execute("git", ["merge-base", "--is-ancestor", sourceSHA, "HEAD"]);
-  } catch (error) {
-    throw new Error(
-      "Release source is not an ancestor of current main, or ancestry could not be verified.",
-      { cause: error },
-    );
-  }
   await requireCI(github, context.repo, sourceSHA);
   if ((await latestStable(github, context.repo)) !== previous) {
     throw new Error(
       "Published stable baseline changed; prepare and approve a new release.",
+    );
+  }
+  execute("git", [
+    "fetch",
+    "--no-tags",
+    "--prune",
+    "origin",
+    "+refs/heads/main:refs/remotes/origin/main",
+    "+refs/tags/v*:refs/tags/v*",
+  ]);
+  try {
+    execute("git", ["merge-base", "--is-ancestor", sourceSHA, "origin/main"]);
+  } catch (error) {
+    throw new Error(
+      "Release source is not an ancestor of current main, or ancestry could not be verified.",
+      { cause: error },
     );
   }
   const tags = requireNoPendingTag(previous, execute, version);

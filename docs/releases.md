@@ -12,6 +12,8 @@ Approval creates an immutable version tag on that exact commit. **Stable Release
 then builds and tests it, publishes the binaries and container images, and creates
 the GitHub release with generated release notes. Changes merged while approval
 is pending are not silently included; cancel and start a new run to include them.
+The approved job also runs its tagging script from that exact source revision,
+refreshing remote `main` and stable tags before checking ancestry and creating a tag.
 Development releases continue independently after successful `main` builds.
 
 Each approved week gets a new version even without source changes. Stable builds
@@ -74,6 +76,8 @@ Direct `vMAJOR.MINOR.PATCH` tag pushes remain an intentional maintainer escape
 hatch and bypass the weekly environment approval. The stable workflow still
 validates main ancestry, builds, and tests the tagged commit. Version components
 must have no leading zeros and must be safe integers (at most `9007199254740991`).
+Cancel a pending maintenance run before pushing a release tag manually: direct
+pushes do not participate in the maintenance workflow's concurrency lock.
 
 When migrating from the old process, cancel any pending old maintenance runs and
 close obsolete `automation/maintenance-release` PRs rather than merging them.
