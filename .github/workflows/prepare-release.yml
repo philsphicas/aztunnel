@@ -6,19 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "auto for routine patches; explicitly choose a bump for features or breaking changes"
+        description: "Patch for routine refreshes; choose minor or major for other releases"
         type: choice
-        options: [auto, patch, minor, major]
-        default: auto
-      force:
-        description: Prepare a release even without detected shipping or container changes
-        type: boolean
-        default: false
+        options: [patch, minor, major]
+        default: patch
 
 permissions:
   contents: read
   actions: read
-  pull-requests: read
 
 concurrency:
   group: maintenance-release
@@ -28,66 +23,62 @@ jobs:
   prepare:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      source_sha: ${{ steps.plan.outputs.source_sha }}
+      previous_tag: ${{ steps.plan.outputs.previous_tag }}
     steps:
       - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Require automation credential
         env:
           AUTOMATION_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
         run: |
           if [[ -z "$AUTOMATION_TOKEN" ]]; then
-            echo "::error::GH_AUTOMATION_TOKEN is required so release PRs trigger normal CI and release tags trigger publication."
+            echo "::error::GH_AUTOMATION_TOKEN is required so the approved release tag triggers Stable Release."
             exit 1
           fi
 
-      - uses: docker/setup-qemu-action@v4
-
-      - uses: docker/setup-buildx-action@v4
-
-      - name: Prepare release request and notes
+      - name: Select version and tested source
         id: plan
         uses: actions/github-script@v9
         env:
-          RELEASE_BUMP: ${{ inputs.bump || 'auto' }}
-          RELEASE_FORCE: ${{ inputs.force || false }}
+          RELEASE_BUMP: ${{ inputs.bump || 'patch' }}
         with:
-          github-token: ${{ secrets.GH_AUTOMATION_TOKEN }}
           script: |
             const { prepare } = require('./.github/scripts/release.cjs');
             await prepare({ github, context, core });
 
-      - name: Format release request
-        if: steps.plan.outputs.ready == 'true'
-        run: npx --yes prettier --write .github/release.json
-
-      - name: Create or refresh release PR
-        id: pr
-        if: steps.plan.outputs.ready == 'true'
-        uses: peter-evans/create-pull-request@v8
+  tag:
+    name: Approve ${{ needs.prepare.outputs.version }}
+    needs: prepare
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: stable-release
+      url: https://github.com/${{ github.repository }}/compare/${{ needs.prepare.outputs.previous_tag }}...${{ needs.prepare.outputs.source_sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
         with:
-          token: ${{ secrets.GH_AUTOMATION_TOKEN }}
-          branch: automation/maintenance-release
-          base: main
-          delete-branch: true
-          add-paths: .github/release.json
-          commit-message: "chore(release): prepare ${{ steps.plan.outputs.version }}"
-          title: "chore(release): ${{ steps.plan.outputs.version }}"
-          body-path: ${{ steps.plan.outputs.body_path }}
-          # v8 supports always-true to re-draft an existing PR, not just a new one.
-          # https://github.com/peter-evans/create-pull-request/blob/v8/src/main.ts
-          draft: ${{ steps.plan.outputs.decision_required == 'true' && 'always-true' || 'false' }}
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Mark decided release ready for approval
-        if: steps.pr.outputs.pull-request-number != '' && steps.plan.outputs.decision_required == 'false'
+      - name: Tag approved source
+        uses: actions/github-script@v9
         env:
-          GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
-          PR_NUMBER: ${{ steps.pr.outputs.pull-request-number }}
-        run: |
-          set -euo pipefail
-          if [[ "$(gh pr view "$PR_NUMBER" --json isDraft --jq .isDraft)" == "true" ]]; then
-            gh pr ready "$PR_NUMBER"
-          fi
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASE_PREVIOUS_TAG: ${{ needs.prepare.outputs.previous_tag }}
+        with:
+          # GITHUB_TOKEN-created tags do not trigger Stable Release.
+          github-token: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          script: |
+            const { tag } = require('./.github/scripts/release.cjs');
+            await tag({ github, context, core });
