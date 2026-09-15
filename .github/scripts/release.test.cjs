@@ -624,6 +624,39 @@ test("image artifact validation refuses missing, extra, or mismatched candidates
   );
 });
 
+test("Dependabot merges use the automation credential to trigger main CI", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", "workflows", "dependabot-auto-merge.yml"),
+    "utf8",
+  );
+  const steps = workflow.replace(/\r\n/g, "\n").split(/^\s+- name: /m);
+  const guard = steps.find((step) =>
+    step.startsWith("Require automation credential\n"),
+  );
+  const approval = steps.find((step) => step.startsWith("Approve PR\n"));
+  const merge = steps.find((step) => step.startsWith("Enable auto-merge\n"));
+  assert.ok(guard);
+  assert.ok(approval);
+  assert.ok(merge);
+  assert.ok(steps.indexOf(guard) < steps.indexOf(approval));
+  assert.ok(steps.indexOf(approval) < steps.indexOf(merge));
+  assert.match(
+    guard,
+    /AUTOMATION_TOKEN: \$\{\{ secrets\.GH_AUTOMATION_TOKEN \}\}/,
+  );
+  assert.match(guard, /if \[\[ -z "\$AUTOMATION_TOKEN" \]\]; then/);
+  assert.match(guard, /::error::GH_AUTOMATION_TOKEN is required/);
+  assert.match(guard, /exit 1/);
+  assert.match(merge, /token: \$\{\{ secrets\.GH_AUTOMATION_TOKEN \}\}/);
+  assert.match(merge, /merge-method: squash/);
+  assert.doesNotMatch(approval, /GH_AUTOMATION_TOKEN/);
+  assert.doesNotMatch(workflow, /uses: actions\/checkout/);
+  const condition = (step) => step.match(/if: >\n([\s\S]*?)(?=^        \w)/m)?.[1];
+  assert.ok(condition(guard));
+  assert.equal(condition(guard), condition(approval));
+  assert.equal(condition(guard), condition(merge));
+});
+
 test("publication workflow collects all image artifacts and generates the dev list", () => {
   const workflow = fs.readFileSync(
     path.join(__dirname, "..", "workflows", "publish-release.yml"),

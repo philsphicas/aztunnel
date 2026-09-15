@@ -4,7 +4,7 @@ on:
   pull_request_target:
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
@@ -17,6 +17,20 @@ jobs:
         uses: dependabot/fetch-metadata@v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Require automation credential
+        if: >
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+          (steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+           steps.metadata.outputs.package-ecosystem == 'github_actions')
+        env:
+          AUTOMATION_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+        run: |
+          if [[ -z "$AUTOMATION_TOKEN" ]]; then
+            echo "::error::GH_AUTOMATION_TOKEN is required so Dependabot merges trigger main CI and release preparation can verify the source commit."
+            exit 1
+          fi
 
       - name: Approve PR
         if: >
@@ -42,5 +56,7 @@ jobs:
            steps.metadata.outputs.package-ecosystem == 'github_actions')
         uses: peter-evans/enable-pull-request-automerge@v3
         with:
+          # GITHUB_TOKEN merges suppress the main CI run required by releases.
+          token: ${{ secrets.GH_AUTOMATION_TOKEN }}
           pull-request-number: ${{ github.event.pull_request.number }}
           merge-method: squash

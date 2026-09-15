@@ -91,6 +91,11 @@ with Contents and Pull requests read/write, Workflows read/write for creating
 workflow-bearing tags, and Actions read. This is the existing automation
 credential, not a new secret. Do not replace it with `GITHUB_TOKEN`: PRs and tags
 created by that token do not trigger the required downstream workflows.
+Dependabot auto-merge also uses `GH_AUTOMATION_TOKEN` so its merges trigger
+push-to-main CI; approval still uses `GITHUB_TOKEN`. Eligible updates fail
+explicitly before approval if the automation credential is unavailable.
+Ensure the credential is available to Dependabot-triggered workflows; where
+Dependabot secrets are used, configure the same `GH_AUTOMATION_TOKEN` there.
 
 No new GitHub environment is required. Keep normal required PR checks enabled.
 The workflows do **not** enable auto-merge or approve their own release PRs.
@@ -98,7 +103,12 @@ To remove the human later, enable auto-merge for eligible release PRs after
 required checks; keep drafts and explicit version decisions as the exception.
 
 If preparation fails because the newest main CI run has not passed, rerun it
-after CI succeeds. If tagging fails, rerun **Approve Maintenance Release**.
+after CI succeeds. If there is no push-to-main CI run because an older
+Dependabot workflow merged with `GITHUB_TOKEN`, rerunning preparation cannot
+repair it. Merge this workflow fix normally with a maintainer credential, wait
+for CI on the new `main` tip, and rerun preparation. Successful PR checks alone
+do not satisfy the exact-source main CI gate.
+If tagging fails, rerun **Approve Maintenance Release**.
 That recovery path finds the request's introducing commit even if unrelated
 commits have advanced `main`, and supports merge, squash, and rebase merges.
 GitHub's commit-to-PR association can briefly lag a merge; rerun approval if
