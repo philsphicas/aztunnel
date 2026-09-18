@@ -84,13 +84,6 @@ but the resulting binary still requires the OS libraries and cannot run in
 scratch. The other image variants and release bundles continue to use upstream
 Go. Using system OpenSSL does not by itself establish FIPS compliance.
 
-This variant temporarily sets `GODEBUG=tlsmlkem=0` to work around
-[an Azure Linux OpenSSL ML-KEM bug](https://github.com/microsoft/go/issues/2472)
-until the fixed OS package is published. This disables post-quantum TLS key
-exchange, not TLS or system cryptography. If you override `GODEBUG`, retain
-`tlsmlkem=0` until the fix is available. This setting does not affect the other
-variants.
-
 ### Release bundles
 
 Maintenance releases are prepared weekly and published after one approval in
