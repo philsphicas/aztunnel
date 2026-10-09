@@ -8,7 +8,8 @@ const goVersionPattern = /^(?:go)?1\.(\d+)\.(\d+)$/;
 
 function parseGoVersion(version) {
   const match = goVersionPattern.exec(version);
-  if (!match) throw new Error(`Expected an exact stable Go version, got '${version}'.`);
+  if (!match)
+    throw new Error(`Expected an exact stable Go version, got '${version}'.`);
   return { minor: Number(match[1]), patch: Number(match[2]) };
 }
 
@@ -46,7 +47,8 @@ function sleepSync(milliseconds) {
 
 function inspectBuilder(reference, execute) {
   const digest = inspectImage(reference, execute);
-  if (digest === null) return { reference, ready: false, reason: "not published" };
+  if (digest === null)
+    return { reference, ready: false, reason: "not published" };
   const index = JSON.parse(
     execute(["buildx", "imagetools", "inspect", "--raw", reference]),
   );
@@ -55,7 +57,9 @@ function inspectBuilder(reference, execute) {
       .filter(({ platform }) => platform)
       .map(({ platform }) => `${platform.os}/${platform.architecture}`),
   );
-  const missing = requiredPlatforms.filter((platform) => !platforms.has(platform));
+  const missing = requiredPlatforms.filter(
+    (platform) => !platforms.has(platform),
+  );
   if (missing.length > 0) {
     return { reference, ready: false, reason: `missing ${missing.join(", ")}` };
   }
@@ -64,7 +68,10 @@ function inspectBuilder(reference, execute) {
 
 // Only a confirmed absence counts as "not ready"; registry or network failures
 // are retried and then surfaced, never mistaken for publication lag.
-function probeBuilder(reference, { execute, attempts = 3, sleep = sleepSync } = {}) {
+function probeBuilder(
+  reference,
+  { execute, attempts = 3, sleep = sleepSync } = {},
+) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
@@ -97,7 +104,9 @@ function selectGoUpdate({ current, releases, lintGo, probe, history = "" }) {
   const candidates = [
     ...new Set(
       releases
-        .filter(({ stable, version }) => stable && goVersionPattern.test(version))
+        .filter(
+          ({ stable, version }) => stable && goVersionPattern.test(version),
+        )
         .map(({ version }) => normalizeGoVersion(version)),
     ),
   ]
@@ -133,7 +142,9 @@ function selectGoUpdate({ current, releases, lintGo, probe, history = "" }) {
     deferred.push({
       version,
       security,
-      reason: missing.map(({ reference, reason }) => `${reference}: ${reason}`).join("; "),
+      reason: missing
+        .map(({ reference, reason }) => `${reference}: ${reason}`)
+        .join("; "),
     });
   }
   return {
@@ -175,9 +186,12 @@ if (require.main === module) {
       "Usage: go-update.cjs select <current-go> <golangci-lint-build-go> <releases.json> <release-history.html> <report-directory>",
     );
   }
-  const [current, lintGo, releasesFile, historyFile, reportDirectory] = process.argv.slice(3);
+  const [current, lintGo, releasesFile, historyFile, reportDirectory] =
+    process.argv.slice(3);
   const { docker } = require("./release-images.cjs");
-  const images = JSON.parse(fs.readFileSync(".github/release-images.json", "utf8")).include;
+  const images = JSON.parse(
+    fs.readFileSync(".github/release-images.json", "utf8"),
+  ).include;
   const selection = selectGoUpdate({
     current,
     lintGo,
@@ -188,8 +202,14 @@ if (require.main === module) {
         probeBuilder(reference, { execute: docker }),
       ),
   });
-  fs.writeFileSync(`${reportDirectory}/builders.md`, `${builderReport(selection)}\n`);
-  fs.writeFileSync(`${reportDirectory}/deferred.md`, `${deferralReport(selection)}\n`);
+  fs.writeFileSync(
+    `${reportDirectory}/builders.md`,
+    `${builderReport(selection)}\n`,
+  );
+  fs.writeFileSync(
+    `${reportDirectory}/deferred.md`,
+    `${deferralReport(selection)}\n`,
+  );
   console.log(
     [
       `status=${selection.status}`,

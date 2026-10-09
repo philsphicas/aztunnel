@@ -64,7 +64,10 @@ function probeWith(images) {
 
 function allBuilders(version) {
   return Object.fromEntries(
-    builderReferences(matrix.include, version).map((reference) => [reference, multiArch]),
+    builderReferences(matrix.include, version).map((reference) => [
+      reference,
+      multiArch,
+    ]),
   );
 }
 
@@ -86,7 +89,10 @@ test("Go versions compare numerically", () => {
 test("probe distinguishes ready, unpublished, and single-platform builders", () => {
   const ready = `${upstream}:1.27.2-bookworm`;
   const amd64Only = `${upstream}:1.27.2-alpine`;
-  const { execute } = registry({ [ready]: multiArch, [amd64Only]: ["linux/amd64"] });
+  const { execute } = registry({
+    [ready]: multiArch,
+    [amd64Only]: ["linux/amd64"],
+  });
   assert.deepEqual(probeBuilder(ready, { execute, sleep: noSleep }), {
     reference: ready,
     ready: true,
@@ -125,7 +131,10 @@ test("probe retries transient registry errors and then fails loudly", () => {
     if (failures-- > 0) throw outage;
     return registry({ [reference]: multiArch }).execute(args);
   };
-  assert.equal(probeBuilder(reference, { execute: flaky, sleep: noSleep }).ready, true);
+  assert.equal(
+    probeBuilder(reference, { execute: flaky, sleep: noSleep }).ready,
+    true,
+  );
 });
 
 test("selects the highest builder-ready patch and defers newer unready ones", () => {
@@ -188,7 +197,10 @@ test("holds a Go feature update until golangci-lint is built with it", () => {
   const held = selectGoUpdate({ ...options, lintGo: "go1.27.3" });
   assert.equal(held.target, "1.27.3");
   assert.equal(held.requiresReview, false);
-  assert.match(held.deferred[0].reason, /golangci-lint is built with go1\.27\.3/);
+  assert.match(
+    held.deferred[0].reason,
+    /golangci-lint is built with go1\.27\.3/,
+  );
 
   const allowed = selectGoUpdate({ ...options, lintGo: "go1.28.0" });
   assert.equal(allowed.target, "1.28.0");
