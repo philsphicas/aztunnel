@@ -4,10 +4,10 @@ const path = require("node:path");
 const { test } = require("node:test");
 const {
   builderReferences,
+  builderReport,
   compareGoVersions,
   deferralReport,
   probeBuilder,
-  securityRelease,
   selectGoUpdate,
 } = require("./go-update.cjs");
 
@@ -57,14 +57,15 @@ function releases(...versions) {
 function probeWith(images) {
   const { execute } = registry(images);
   return (version) =>
-    builderReferences(matrix.include, version).map((reference) =>
-      probeBuilder(reference, { execute, sleep: noSleep }),
-    );
+    builderReferences(matrix.include, version).map((builder) => ({
+      ...builder,
+      ...probeBuilder(builder.reference, { execute, sleep: noSleep }),
+    }));
 }
 
 function allBuilders(version) {
   return Object.fromEntries(
-    builderReferences(matrix.include, version).map((reference) => [
+    builderReferences(matrix.include, version).map(({ reference }) => [
       reference,
       multiArch,
     ]),
@@ -73,9 +74,9 @@ function allBuilders(version) {
 
 test("builder references mirror the release image matrix", () => {
   assert.deepEqual(builderReferences(matrix.include, "go1.27.2"), [
-    `${upstream}:1.27.2-bookworm`,
-    `${upstream}:1.27.2-alpine`,
-    `${microsoft}:1.27.2-azurelinux3.0`,
+    { reference: `${upstream}:1.27.2-bookworm`, required: true },
+    { reference: `${upstream}:1.27.2-alpine`, required: true },
+    { reference: `${microsoft}:1.27.2-azurelinux3.0`, required: false },
   ]);
 });
 
@@ -157,33 +158,42 @@ test("selects the highest builder-ready patch and defers newer unready ones", ()
   assert.match(selection.deferred[0].reason, /alpine: not published/);
 });
 
-test("defers when no newer version has every builder", () => {
+test("a lagging Microsoft builder does not hold back the update", () => {
   const images = allBuilders("1.27.2");
   delete images[`${microsoft}:1.27.2-azurelinux3.0`];
-  const history = `<p id="go1.27.2">
-    go1.27.2 (released 2026-10-08)
-      includes
-        security
-        fixes to the <code>go</code> command</p>`;
   const selection = selectGoUpdate({
     current: "1.27.1",
     lintGo: "go1.27.0",
     releases: releases("1.27.2", "1.27.1"),
     probe: probeWith(images),
-    history,
+  });
+  assert.equal(selection.status, "update");
+  assert.equal(selection.target, "1.27.2");
+  assert.deepEqual(selection.deferred, []);
+  assert.equal(
+    builderReport(selection),
+    [
+      `- \`${upstream}:1.27.2-bookworm\`: \`${digest}\``,
+      `- \`${upstream}:1.27.2-alpine\`: \`${digest}\``,
+      `- \`${microsoft}:1.27.2-azurelinux3.0\`: **not published**; its container build fails until it is published`,
+    ].join("\n"),
+  );
+});
+
+test("defers when an upstream builder is missing", () => {
+  const images = allBuilders("1.27.2");
+  images[`${upstream}:1.27.2-alpine`] = ["linux/amd64"];
+  const selection = selectGoUpdate({
+    current: "1.27.1",
+    lintGo: "go1.27.0",
+    releases: releases("1.27.2", "1.27.1"),
+    probe: probeWith(images),
   });
   assert.equal(selection.status, "deferred");
   assert.equal(selection.target, "1.27.1");
-  assert.deepEqual(selection.deferred, [
-    {
-      version: "1.27.2",
-      security: true,
-      reason: `${microsoft}:1.27.2-azurelinux3.0: not published`,
-    },
-  ]);
   assert.equal(
     deferralReport(selection),
-    `- Go 1.27.2 (**security release**): ${microsoft}:1.27.2-azurelinux3.0: not published`,
+    `Go 1.27.2 deferred: ${upstream}:1.27.2-alpine: missing linux/arm64`,
   );
 });
 
@@ -225,13 +235,4 @@ test("ignores unstable, older, and too-distant releases", () => {
   assert.deepEqual(probed, []);
   assert.equal(selection.status, "current");
   assert.deepEqual(selection.deferred, []);
-});
-
-test("security detection is scoped to the requested release", () => {
-  const history = `<p id="go1.27.1">go1.27.1 (released) includes fixes to cgo</p>
-    <p id="go1.27.2">go1.27.2 includes <b>security</b>
-    fixes to net/http</p>`;
-  assert.equal(securityRelease(history, "1.27.2"), true);
-  assert.equal(securityRelease(history, "1.27.1"), false);
-  assert.equal(securityRelease(history, "1.27.3"), false);
 });

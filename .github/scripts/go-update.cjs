@@ -5,11 +5,13 @@ const { inspectImage } = require("./release-images.cjs");
 // Every release image must be buildable on both published platforms.
 const requiredPlatforms = ["linux/amd64", "linux/arm64"];
 const goVersionPattern = /^(?:go)?1\.(\d+)\.(\d+)$/;
+const upstreamRepository = "golang";
 
 function parseGoVersion(version) {
   const match = goVersionPattern.exec(version);
-  if (!match)
+  if (!match) {
     throw new Error(`Expected an exact stable Go version, got '${version}'.`);
+  }
   return { minor: Number(match[1]), patch: Number(match[2]) };
 }
 
@@ -28,17 +30,22 @@ function languageVersion(version) {
   return `1.${parseGoVersion(version).minor}`;
 }
 
+// Upstream builders gate the update because required CI checks build with them.
+// Other distributions (Microsoft Go) may lag: the update still lands and only
+// their non-required container builds fail until the image is published.
 function builderReferences(images, version) {
   validateImageMatrix({ include: images });
   const target = normalizeGoVersion(version);
-  return [
-    ...new Set(
-      images.map(
-        ({ builder_repository, builder_variant }) =>
-          `${builder_repository || "golang"}:${target}-${builder_variant}`,
-      ),
-    ),
-  ];
+  const builders = new Map();
+  for (const { builder_repository, builder_variant } of images) {
+    const repository = builder_repository || upstreamRepository;
+    const reference = `${repository}:${target}-${builder_variant}`;
+    builders.set(reference, {
+      reference,
+      required: repository === upstreamRepository,
+    });
+  }
+  return [...builders.values()];
 }
 
 function sleepSync(milliseconds) {
@@ -47,8 +54,9 @@ function sleepSync(milliseconds) {
 
 function inspectBuilder(reference, execute) {
   const digest = inspectImage(reference, execute);
-  if (digest === null)
+  if (digest === null) {
     return { reference, ready: false, reason: "not published" };
+  }
   const index = JSON.parse(
     execute(["buildx", "imagetools", "inspect", "--raw", reference]),
   );
@@ -86,19 +94,7 @@ function probeBuilder(
   );
 }
 
-function securityRelease(history, version) {
-  const id = `go${normalizeGoVersion(version)}`;
-  const start = history.indexOf(`<p id="${id}">`);
-  if (start === -1) return false;
-  const end = history.indexOf("</p>", start);
-  const text = history
-    .slice(start, end === -1 ? undefined : end)
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ");
-  return /\bincludes security fixes\b/.test(text);
-}
-
-function selectGoUpdate({ current, releases, lintGo, probe, history = "" }) {
+function selectGoUpdate({ current, releases, lintGo, probe }) {
   const base = parseGoVersion(current);
   const lintLanguage = parseGoVersion(lintGo).minor;
   const candidates = [
@@ -119,18 +115,18 @@ function selectGoUpdate({ current, releases, lintGo, probe, history = "" }) {
 
   const deferred = [];
   for (const version of candidates) {
-    const security = securityRelease(history, version);
     if (parseGoVersion(version).minor > lintLanguage) {
       deferred.push({
         version,
-        security,
         reason: `golangci-lint is built with go${normalizeGoVersion(lintGo)}, older than Go ${languageVersion(version)}`,
       });
       continue;
     }
     const builders = probe(version);
-    const missing = builders.filter(({ ready }) => !ready);
-    if (missing.length === 0) {
+    const blocking = builders.filter(
+      ({ ready, required }) => required && !ready,
+    );
+    if (blocking.length === 0) {
       return {
         status: "update",
         target: version,
@@ -141,8 +137,7 @@ function selectGoUpdate({ current, releases, lintGo, probe, history = "" }) {
     }
     deferred.push({
       version,
-      security,
-      reason: missing
+      reason: blocking
         .map(({ reference, reason }) => `${reference}: ${reason}`)
         .join("; "),
     });
@@ -156,37 +151,38 @@ function selectGoUpdate({ current, releases, lintGo, probe, history = "" }) {
   };
 }
 
-function deferralReport(selection) {
-  return selection.deferred
-    .map(
-      ({ version, security, reason }) =>
-        `- Go ${version}${security ? " (**security release**)" : ""}: ${reason}`,
+function builderReport({ builders }) {
+  return builders
+    .map(({ reference, ready, digest, reason }) =>
+      ready
+        ? `- \`${reference}\`: \`${digest}\``
+        : `- \`${reference}\`: **${reason}**; its container build fails until it is published`,
     )
     .join("\n");
 }
 
-function builderReport(selection) {
-  return selection.builders
-    .map(({ reference, digest }) => `- \`${reference}\` → \`${digest}\``)
+function deferralReport({ deferred }) {
+  return deferred
+    .map(({ version, reason }) => `Go ${version} deferred: ${reason}`)
     .join("\n");
 }
 
 module.exports = {
   builderReferences,
+  builderReport,
   compareGoVersions,
   deferralReport,
   probeBuilder,
-  securityRelease,
   selectGoUpdate,
 };
 
 if (require.main === module) {
-  if (process.argv[2] !== "select" || process.argv.length !== 8) {
+  if (process.argv[2] !== "select" || process.argv.length !== 7) {
     throw new Error(
-      "Usage: go-update.cjs select <current-go> <golangci-lint-build-go> <releases.json> <release-history.html> <report-directory>",
+      "Usage: go-update.cjs select <current-go> <golangci-lint-build-go> <releases.json> <report-directory>",
     );
   }
-  const [current, lintGo, releasesFile, historyFile, reportDirectory] =
+  const [current, lintGo, releasesFile, reportDirectory] =
     process.argv.slice(3);
   const { docker } = require("./release-images.cjs");
   const images = JSON.parse(
@@ -196,18 +192,18 @@ if (require.main === module) {
     current,
     lintGo,
     releases: JSON.parse(fs.readFileSync(releasesFile, "utf8")),
-    history: fs.readFileSync(historyFile, "utf8"),
     probe: (version) =>
-      builderReferences(images, version).map((reference) =>
-        probeBuilder(reference, { execute: docker }),
-      ),
+      builderReferences(images, version).map((builder) => ({
+        ...builder,
+        ...probeBuilder(builder.reference, { execute: docker }),
+      })),
   });
   fs.writeFileSync(
     `${reportDirectory}/builders.md`,
     `${builderReport(selection)}\n`,
   );
   fs.writeFileSync(
-    `${reportDirectory}/deferred.md`,
+    `${reportDirectory}/deferred.txt`,
     `${deferralReport(selection)}\n`,
   );
   console.log(
@@ -215,8 +211,6 @@ if (require.main === module) {
       `status=${selection.status}`,
       `target-go=${selection.target}`,
       `requires-review=${selection.requiresReview}`,
-      `deferred=${selection.deferred.length > 0}`,
-      `security-deferred=${selection.deferred.some(({ security }) => security)}`,
     ].join("\n"),
   );
 }
