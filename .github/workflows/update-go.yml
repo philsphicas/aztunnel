@@ -13,12 +13,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  update:
+  go:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GOTOOLCHAIN: local
+      GH_REPO: ${{ github.repository }}
+      BRANCH: automation/update-go
     steps:
       - uses: actions/checkout@v7
 
+      # Bootstrap only: the target toolchain is selected below via GOTOOLCHAIN.
       - name: Set up latest stable Go
         uses: actions/setup-go@v7
         with:
@@ -26,89 +34,49 @@ jobs:
           check-latest: true
           cache: false
 
-      - name: Determine Go update
+      - name: Read golangci-lint build Go
+        id: lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(tr -d '\r\n' < .golangci-version)"
+          archive="golangci-lint-${version#v}-linux-amd64"
+          curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/${version}/${archive}.tar.gz" |
+            tar -xz -C "$RUNNER_TEMP" "${archive}/golangci-lint"
+          build_go="$(go version "$RUNNER_TEMP/${archive}/golangci-lint" | awk '{ print $2 }')"
+          echo "golangci-lint $version is built with $build_go"
+          echo "build-go=$build_go" >> "$GITHUB_OUTPUT"
+
+      - name: Select Go update
         id: version
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          LINT_GO: ${{ steps.lint.outputs.build-go }}
         run: |
           set -euo pipefail
-
           current="$(go work edit -json | jq -r '.Toolchain // ("go" + .Go)')"
-          current="${current#go}"
-          latest="$(go env GOVERSION)"
-          latest="${latest#go}"
-
-          if [[ ! "$current" =~ ^1\.[0-9]+\.[0-9]+$ ]] ||
-             [[ ! "$latest" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Expected exact stable Go versions; current=$current latest=$latest"
-            exit 1
+          curl -fsSL 'https://go.dev/dl/?mode=json&include=all' -o "$RUNNER_TEMP/releases.json"
+          curl -fsSL https://go.dev/doc/devel/release -o "$RUNNER_TEMP/release-history.html"
+          node .github/scripts/go-update.cjs select "$current" "$LINT_GO" \
+            "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/release-history.html" "$RUNNER_TEMP" |
+            tee -a "$GITHUB_OUTPUT"
+          {
+            echo "current-go=${current#go}"
+            echo "builders<<EOF"
+            cat "$RUNNER_TEMP/builders.md"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [[ -s "$RUNNER_TEMP/deferred.md" ]] && grep -q . "$RUNNER_TEMP/deferred.md"; then
+            {
+              echo "### Deferred Go updates"
+              cat "$RUNNER_TEMP/deferred.md"
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          go_update=false
-          target_go="$current"
-          if [[ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -n1)" == "$latest" ]] &&
-             [[ "$current" != "$latest" ]]; then
-            go_update=true
-            target_go="$latest"
-          fi
-
-          current_baseline="$(awk '$1 == "go" { sub(/\r$/, "", $2); print $2; exit }' go.work)"
-          target_baseline="${target_go%.*}.0"
-
-          latest_lint="$(gh api repos/golangci/golangci-lint/releases/latest --jq .tag_name)"
-          current_lint="$(tr -d '\r\n' < .golangci-version)"
-          if [[ ! "$current_lint" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-             [[ ! "$latest_lint" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Expected exact stable golangci-lint versions; current=$current_lint latest=$latest_lint"
-            exit 1
-          fi
-
-          lint_update=false
-          target_lint="$current_lint"
-          current_lint_semver="${current_lint#v}"
-          latest_lint_semver="${latest_lint#v}"
-          if [[ "$(printf '%s\n%s\n' "$current_lint_semver" "$latest_lint_semver" | sort -V | tail -n1)" == "$latest_lint_semver" ]] &&
-             [[ "$current_lint_semver" != "$latest_lint_semver" ]]; then
-            lint_update=true
-            target_lint="$latest_lint"
-          fi
-
-          update_available="$go_update"
-          if [[ "$lint_update" == "true" ]]; then
-            update_available=true
-          fi
-
-          requires_review=false
-          if [[ "$current_baseline" != "$target_baseline" ]]; then
-            requires_review=true
-          fi
-          if [[ "$lint_update" == "true" ]] &&
-             [[ "${current_lint%%.*}" != "${target_lint%%.*}" ]]; then
-            requires_review=true
-          fi
-
-          echo "current-go=$current" >> "$GITHUB_OUTPUT"
-          echo "target-go=$target_go" >> "$GITHUB_OUTPUT"
-          echo "target-lint=$target_lint" >> "$GITHUB_OUTPUT"
-          echo "requires-review=$requires_review" >> "$GITHUB_OUTPUT"
-          echo "update-available=$update_available" >> "$GITHUB_OUTPUT"
-
-      - name: Verify matching Docker builders are published
-        if: steps.version.outputs.update-available == 'true'
-        run: |
-          docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-bookworm" >/dev/null
-          docker buildx imagetools inspect "golang:${{ steps.version.outputs.target-go }}-alpine" >/dev/null
-          docker buildx imagetools inspect "mcr.microsoft.com/oss/go/microsoft/golang:${{ steps.version.outputs.target-go }}-azurelinux3.0" >/dev/null
-
-      - name: Update toolchain pins
-        if: steps.version.outputs.update-available == 'true'
-        run: |
-          echo "${{ steps.version.outputs.target-lint }}" > .golangci-version
-          bash scripts/update-go-version.sh "${{ steps.version.outputs.target-go }}"
-
+      # A deferred-only run must not touch the branch: create-pull-request would
+      # reset it to an empty diff and close a still-valid pending update.
       - name: Require automation credential
-        if: steps.version.outputs.update-available == 'true'
+        if: steps.version.outputs.status != 'deferred'
         shell: bash
         env:
           GH_AUTOMATION_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
@@ -118,46 +86,144 @@ jobs:
             exit 1
           fi
 
+      - name: Disable auto-merge before review-required changes
+        if: steps.version.outputs.status == 'update' && steps.version.outputs.requires-review == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+        run: bash .github/scripts/reconcile-auto-merge.sh "$BRANCH" true --disable-only
+
+      - name: Update toolchain pins
+        if: steps.version.outputs.status == 'update'
+        env:
+          GOTOOLCHAIN: go${{ steps.version.outputs.target-go }}
+        run: bash scripts/update-go-version.sh "${{ steps.version.outputs.target-go }}"
+
       - name: Create or update pull request
         id: pull-request
-        if: steps.version.outputs.update-available == 'true'
+        if: steps.version.outputs.status != 'deferred'
         uses: peter-evans/create-pull-request@v8
         with:
           # This must not be GITHUB_TOKEN: updater pushes need to trigger normal PR CI.
           token: ${{ secrets.GH_AUTOMATION_TOKEN }}
-          branch: automation/update-go
+          branch: ${{ env.BRANCH }}
           delete-branch: true
           commit-message: "chore(go): update Go to ${{ steps.version.outputs.target-go }}"
           title: "chore(go): update Go to ${{ steps.version.outputs.target-go }}"
           body: |
-            Updates the preferred Go toolchain to `${{ steps.version.outputs.target-go }}` and golangci-lint to `${{ steps.version.outputs.target-lint }}`.
+            Updates the preferred Go toolchain from `${{ steps.version.outputs.current-go }}` to `${{ steps.version.outputs.target-go }}`.
 
             - module `go` directives remain the `major.minor.0` language baseline
             - `go.work` selects the exact preferred patch toolchain
             - Docker builder pins use that same exact toolchain
             - every module is tidied independently
 
-            Feature-version Go updates and golangci-lint major updates require review. Other updates may auto-merge only after required checks pass.
+            Builder images verified for linux/amd64 and linux/arm64:
+            ${{ steps.version.outputs.builders }}
+
+            Feature-version Go updates require review. Patch updates may auto-merge only after required checks pass.
           labels: dependencies
 
-      - name: Enable auto-merge for safe updates
-        if: >
-          steps.version.outputs.requires-review == 'false' &&
-          (steps.pull-request.outputs.pull-request-operation == 'created' ||
-           steps.pull-request.outputs.pull-request-operation == 'updated')
+      - name: Reconcile auto-merge
+        if: steps.version.outputs.status != 'deferred'
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
-        run: gh pr merge --auto --squash "${{ steps.pull-request.outputs.pull-request-number }}"
+        run: bash .github/scripts/reconcile-auto-merge.sh "$BRANCH" "${{ steps.version.outputs.requires-review }}"
 
-      - name: Require review for feature updates
-        if: >
-          steps.version.outputs.requires-review == 'true' &&
-          (steps.pull-request.outputs.pull-request-operation == 'created' ||
-           steps.pull-request.outputs.pull-request-operation == 'updated')
+      - name: Track deferred updates
+        id: deferral
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          bash .github/scripts/track-go-deferral.sh \
+            "${{ steps.version.outputs.deferred }}" \
+            "${{ steps.version.outputs.security-deferred }}" \
+            "$RUNNER_TEMP/deferred.md" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Fail on overdue deferral
+        if: steps.deferral.outputs.overdue == 'true'
+        run: |
+          echo "::error::A Go update has been deferred past its escalation threshold; see issue #${{ steps.deferral.outputs.issue }}."
+          exit 1
+
+  golangci-lint:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      BRANCH: automation/update-golangci-lint
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select golangci-lint update
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current="$(tr -d '\r\n' < .golangci-version)"
+          latest="$(gh api repos/golangci/golangci-lint/releases/latest --jq .tag_name)"
+          if [[ ! "$current" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+             [[ ! "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected exact stable golangci-lint versions; current=$current latest=$latest"
+            exit 1
+          fi
+
+          target="$current"
+          if [[ "$(printf '%s\n%s\n' "${current#v}" "${latest#v}" | sort -V | tail -n1)" == "${latest#v}" ]]; then
+            target="$latest"
+          fi
+          requires_review=false
+          if [[ "${current%%.*}" != "${target%%.*}" ]]; then
+            requires_review=true
+          fi
+
+          {
+            echo "current=$current"
+            echo "target=$target"
+            echo "requires-review=$requires_review"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require automation credential
+        shell: bash
+        env:
+          GH_AUTOMATION_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+        run: |
+          if [[ -z "$GH_AUTOMATION_TOKEN" ]]; then
+            echo "::error::GH_AUTOMATION_TOKEN is required to create updater PRs that trigger normal pull-request CI."
+            exit 1
+          fi
+
+      - name: Disable auto-merge before review-required changes
+        if: steps.version.outputs.requires-review == 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
-          PR_NUMBER: ${{ steps.pull-request.outputs.pull-request-number }}
+        run: bash .github/scripts/reconcile-auto-merge.sh "$BRANCH" true --disable-only
+
+      - name: Update golangci-lint pin
         run: |
-          if [[ "$(gh pr view "$PR_NUMBER" --json autoMergeRequest --jq '.autoMergeRequest != null')" == "true" ]]; then
-            gh pr merge --disable-auto "$PR_NUMBER"
-          fi
+          echo "${{ steps.version.outputs.target }}" > .golangci-version
+          bash scripts/check-go-version.sh
+
+      # Runs even when already current, so a stale PR is closed once main catches up.
+      - name: Create or update pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          # This must not be GITHUB_TOKEN: updater pushes need to trigger normal PR CI.
+          token: ${{ secrets.GH_AUTOMATION_TOKEN }}
+          branch: ${{ env.BRANCH }}
+          delete-branch: true
+          commit-message: "chore(lint): update golangci-lint to ${{ steps.version.outputs.target }}"
+          title: "chore(lint): update golangci-lint to ${{ steps.version.outputs.target }}"
+          body: |
+            Updates golangci-lint from `${{ steps.version.outputs.current }}` to `${{ steps.version.outputs.target }}`.
+
+            Major updates require review. Other updates may auto-merge only after required checks pass.
+          labels: dependencies
+
+      - name: Reconcile auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GH_AUTOMATION_TOKEN }}
+        run: bash .github/scripts/reconcile-auto-merge.sh "$BRANCH" "${{ steps.version.outputs.requires-review }}"

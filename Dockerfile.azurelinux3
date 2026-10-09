@@ -9,11 +9,24 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# Fail instead of silently compiling with a builder Go that differs from go.work.
+# Plain shell only: builder images do not all ship awk.
+RUN expected=""; \
+    while read -r directive value _; do \
+      if [ "$directive" = toolchain ]; then expected="${value%"$(printf '\r')"}"; break; fi; \
+    done < go.work; \
+    actual="$(go env GOVERSION)"; \
+    if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then \
+      echo "error: builder Go $actual does not match go.work toolchain '$expected'" >&2; \
+      exit 1; \
+    fi
 ARG VERSION=dev
 # Microsoft Go 1.27 supports OS OpenSSL with cgo disabled on amd64 and arm64.
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /aztunnel ./cmd/aztunnel
+# A same-version upstream BUILDER_IMAGE override must not pass as Microsoft Go.
+RUN go version -m /aztunnel | grep -q 'microsoft_systemcrypto=1'
 
 FROM ${RUNTIME_IMAGE}
 # Keep cryptography and trust roots owned by the runtime OS packages.

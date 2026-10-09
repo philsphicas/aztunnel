@@ -121,6 +121,7 @@ function promoteStableImages(
 module.exports = {
   candidateState,
   developmentImageEntries,
+  docker,
   inspectImage,
   promoteStableImages,
   readImageRefs,
