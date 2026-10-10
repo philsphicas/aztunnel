@@ -5,7 +5,7 @@
 #   docker build -f mockrelay/Dockerfile -t aztunnel-relay .
 #
 # (The mockrelay/Makefile `docker` target does this automatically.)
-ARG BUILDER_IMAGE=golang:1.27.1-bookworm
+ARG BUILDER_IMAGE=golang:1.27.2-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 ARG CGO_ENABLED=0
 
