@@ -30,7 +30,6 @@
       "image_suffix": "",
       "variant": "-azurelinux3",
       "file": "Dockerfile.azurelinux3",
-      "builder_repository": "mcr.microsoft.com/oss/go/microsoft/golang",
       "builder_variant": "azurelinux3.0",
       "runtime": "mcr.microsoft.com/azurelinux/base/core:3.0"
     },

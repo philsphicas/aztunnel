@@ -84,6 +84,7 @@ jobs:
       - name: Test with Microsoft Go and OS cryptography
         run: |
           docker build --file Dockerfile.azurelinux3 --target builder \
+            --build-arg GO_VERSION="$(make -s print-go-version)" \
             --build-arg VERSION=ci --tag aztunnel-builder:azurelinux3 .
           docker run --rm aztunnel-builder:azurelinux3 sh -ec '
             go version -m /aztunnel > /tmp/build-info

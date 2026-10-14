@@ -1,5 +1,5 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-GO_VERSION := $(shell awk '/^toolchain / { sub(/^go/, "", $$2); gsub(/\r/, "", $$2); print $$2; exit }' ../go.work)
+GO_VERSION := $(shell awk '$$1 == "go" { gsub(/\r/, "", $$2); print $$2; exit }' ../go.work)
 GOFLAGS := -trimpath
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 CGO     := $(shell go env CGO_ENABLED)
@@ -25,7 +25,7 @@ clean: ## Remove build artifacts
 
 docker: ## Build the aztunnel-relay Docker image
 	docker build --build-arg VERSION=$(VERSION) \
-		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-bookworm \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		-t aztunnel-relay -f Dockerfile ..
 
 vulncheck: ## Check Go dependencies for known vulnerabilities

@@ -1,8 +1,6 @@
-// The go directive is the language baseline; toolchain selects the exact patch
-// used by setup-go, local workspace commands, releases, and Docker builders.
-go 1.27.0
-
-toolchain go1.27.2
+// The go directive names the exact Go release used everywhere: setup-go, the
+// Docker builder images, and every module (see docs/releases.md).
+go 1.27.2
 
 use (
 	.

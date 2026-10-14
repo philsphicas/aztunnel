@@ -1,16 +1,17 @@
-ARG BUILDER_IMAGE=mcr.microsoft.com/oss/go/microsoft/golang:1.27.2-azurelinux3.0
+# GO_VERSION is required: make and the release workflow pass the exact go.work
+# version. Microsoft's version-free tags trail Go feature releases, so there is
+# no usable default.
+ARG GO_VERSION
+ARG GO_VARIANT=azurelinux3.0
 ARG RUNTIME_IMAGE=mcr.microsoft.com/azurelinux/base/core:3.0
 
-FROM ${BUILDER_IMAGE} AS builder
-# Never fall back to an upstream Go toolchain without the system-crypto backend.
-ENV GOTOOLCHAIN=local
+FROM mcr.microsoft.com/oss/go/microsoft/golang:${GO_VERSION}-${GO_VARIANT} AS builder
 ENV CGO_ENABLED=0
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-# Microsoft Go 1.27 supports OS OpenSSL with cgo disabled on amd64 and arm64.
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
     -o /aztunnel ./cmd/aztunnel

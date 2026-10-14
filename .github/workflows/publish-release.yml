@@ -110,12 +110,12 @@ jobs:
         with:
           ref: ${{ inputs.commit_sha }}
 
-      - name: Read exact Go toolchain
+      - name: Read Go version
         id: go
         run: |
-          version="$(awk '$1 == "toolchain" { sub(/^go/, "", $2); sub(/\r$/, "", $2); print $2; exit }' go.work)"
+          version="$(awk '$1 == "go" { sub(/\r$/, "", $2); print $2; exit }' go.work)"
           if [[ ! "$version" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::go.work does not declare an exact stable Go toolchain."
+            echo "::error::go.work does not declare an exact stable Go version."
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -158,7 +158,8 @@ jobs:
             org.opencontainers.image.version=${{ inputs.version }}
           build-args: |
             VERSION=${{ inputs.version }}
-            BUILDER_IMAGE=${{ matrix.builder_repository || 'golang' }}:${{ steps.go.outputs.version }}-${{ matrix.builder_variant }}
+            GO_VERSION=${{ steps.go.outputs.version }}
+            GO_VARIANT=${{ matrix.builder_variant }}
             RUNTIME_IMAGE=${{ matrix.runtime }}
 
       - name: Record candidate digest

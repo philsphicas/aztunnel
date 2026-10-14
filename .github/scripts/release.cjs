@@ -90,15 +90,6 @@ function validateImageMatrix(matrix) {
       );
     }
     if (
-      image.builder_repository !== undefined &&
-      (typeof image.builder_repository !== "string" ||
-        !/^[^\s|]+$/.test(image.builder_repository))
-    ) {
-      throw new Error(
-        `Invalid builder_repository for release image ${image.id}.`,
-      );
-    }
-    if (
       image.allow_missing_dev !== undefined &&
       typeof image.allow_missing_dev !== "boolean"
     ) {
