@@ -79,7 +79,7 @@ and the Microsoft build of Go, on both Linux amd64 and arm64. It uses Azure
 Linux's `openssl-libs` and `ca-certificates` packages rather than bundled
 cryptographic libraries or certificates copied from a different distribution.
 Go still implements the TLS protocol; supported cryptographic operations use
-the OS OpenSSL `libcrypto`. Microsoft Go 1.27 supports this with `CGO_ENABLED=0`,
+the OS OpenSSL `libcrypto`. Microsoft Go supports this with `CGO_ENABLED=0`,
 but the resulting binary still requires the OS libraries and cannot run in
 scratch. The other image variants and release bundles continue to use upstream
 Go. Using system OpenSSL does not by itself establish FIPS compliance.

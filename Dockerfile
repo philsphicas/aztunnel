@@ -1,8 +1,10 @@
-ARG BUILDER_IMAGE=golang:1.27.2-bookworm
+# make and the release workflow pass the exact go.work version as GO_VERSION.
+ARG GO_VERSION=1
+ARG GO_VARIANT=bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 ARG CGO_ENABLED=0
 
-FROM ${BUILDER_IMAGE} AS builder
+FROM golang:${GO_VERSION}-${GO_VARIANT} AS builder
 ARG CGO_ENABLED
 WORKDIR /src
 COPY go.mod go.sum ./

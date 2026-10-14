@@ -14,7 +14,7 @@
 // used for the workspace-development experience.
 module github.com/philsphicas/aztunnel/e2e/infra
 
-go 1.27.0
+go 1.27.2
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3

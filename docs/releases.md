@@ -38,6 +38,31 @@ Only one maintenance run proceeds at a time. A tag awaiting publication blocks
 another release. If another stable release advances the baseline while approval
 is pending, the old proposal fails rather than publishing an outdated version.
 
+## Go updates
+
+The `go` directive in `go.work` and every `go.mod` names the exact Go release,
+with no `toolchain` lines, and nothing else stores a Go version. CI installs it
+with setup-go. `make docker*` and the release workflow pass it to the
+Dockerfiles as `GO_VERSION`, so every image is built with
+`golang:<version>-<variant>` or Microsoft's
+`golang:<version>-azurelinux3.0`. A plain `docker build` of `Dockerfile` or
+`mockrelay/Dockerfile` uses `golang:1-bookworm`; `Dockerfile.azurelinux3` has
+no default, so build it with `make docker-azurelinux3`.
+
+The daily **Update Go** workflow runs `scripts/update-go.sh`, which moves every
+`go` directive to the newest Go release once the upstream `golang` images for
+it are published, bumps every module that `govulncheck` reports with a fixed
+version, and opens the result as an auto-merging pull request on
+`automation/update-go`. A Go security release and a matching
+`golang.org/x/...` fix therefore land together. The same workflow opens
+`automation/update-golangci-lint` for `.golangci-version`; major versions wait
+for review.
+
+Microsoft usually publishes its Go image a few days after a Go release. Until
+then the non-required `container-azurelinux3` job fails; updates still merge,
+but development and maintenance releases pause because they require a green CI
+run on `main`. Rerun that run (or push anything) once the image is published.
+
 ## Setup
 
 The `stable-release` GitHub environment must require maintainer approval and

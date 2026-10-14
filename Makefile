@@ -1,11 +1,11 @@
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-GO_VERSION := $(shell awk '/^toolchain / { sub(/^go/, "", $$2); gsub(/\r/, "", $$2); print $$2; exit }' go.work)
+GO_VERSION := $(shell awk '$$1 == "go" { gsub(/\r/, "", $$2); print $$2; exit }' go.work)
 GOFLAGS  := -trimpath
 LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
 CGO    := $(shell go env CGO_ENABLED)
 RACE   := $(if $(filter 1,$(CGO)),-race,)
 
-.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm docker-azurelinux3 fmt fmt-check e2e e2e-mock e2e-mock-fast e2e-mock-matrix e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure perf-matrix perf-placement perf-placement-azure perf-axes-mock perf-table perf-grid perf-history perf-compare perf-clean-history perf-gate vulncheck check-installable check-go-version help
+.PHONY: build test cover lint clean install docker docker-alpine docker-bookworm docker-azurelinux3 fmt fmt-check e2e e2e-mock e2e-mock-fast e2e-mock-matrix e2e-azure e2e-docker e2e-setup e2e-attach e2e-status e2e-clean e2e-grant e2e-ci e2e-janitor perf perf-mock perf-azure perf-matrix perf-placement perf-placement-azure perf-axes-mock perf-table perf-grid perf-history perf-compare perf-clean-history perf-gate vulncheck check-installable check-go-version print-go-version help
 
 .DEFAULT_GOAL := help
 
@@ -23,8 +23,11 @@ check-installable: ## Assert root go.mod has no replace directives (required for
 	fi
 	@echo "ok: root go.mod has no replace directives"
 
-check-go-version: ## Verify Go language and toolchain pins stay synchronized
+check-go-version: ## Verify every go directive names the same exact Go release
 	bash scripts/check-go-version.sh
+
+print-go-version: ## Print the exact Go version from go.work
+	@echo $(GO_VERSION)
 
 test: ## Run tests (with -race if CGO is available)
 ifneq ($(RACE),)
@@ -63,24 +66,24 @@ install: ## Install to $$GOPATH/bin
 
 docker: ## Build Docker image (scratch)
 	docker build --build-arg VERSION=$(VERSION) \
-		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-bookworm \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		-t aztunnel .
 
 docker-alpine: ## Build Docker image (alpine)
 	docker build --build-arg VERSION=$(VERSION) \
-		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-alpine \
+		--build-arg GO_VERSION=$(GO_VERSION) --build-arg GO_VARIANT=alpine \
 		--build-arg RUNTIME_IMAGE=alpine \
 		-t aztunnel:alpine .
 
 docker-bookworm: ## Build Docker image (bookworm)
 	docker build --build-arg VERSION=$(VERSION) \
-		--build-arg BUILDER_IMAGE=golang:$(GO_VERSION)-bookworm \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		--build-arg RUNTIME_IMAGE=debian:bookworm-slim \
 		-t aztunnel:bookworm .
 
 docker-azurelinux3: ## Build Docker image (Azure Linux 3 with OS OpenSSL)
 	docker build -f Dockerfile.azurelinux3 --build-arg VERSION=$(VERSION) \
-		--build-arg BUILDER_IMAGE=mcr.microsoft.com/oss/go/microsoft/golang:$(GO_VERSION)-azurelinux3.0 \
+		--build-arg GO_VERSION=$(GO_VERSION) \
 		-t aztunnel:azurelinux3 .
 
 fmt: ## Format markdown and YAML with prettier
