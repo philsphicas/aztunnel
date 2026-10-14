@@ -1,4 +1,4 @@
-ARG BUILDER_IMAGE=mcr.microsoft.com/oss/go/microsoft/golang:1.27.1-azurelinux3.0
+ARG BUILDER_IMAGE=mcr.microsoft.com/oss/go/microsoft/golang:1.27.2-azurelinux3.0
 ARG RUNTIME_IMAGE=mcr.microsoft.com/azurelinux/base/core:3.0
 
 FROM ${BUILDER_IMAGE} AS builder
