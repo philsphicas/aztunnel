@@ -44,7 +44,7 @@ func runSSHCommand(ctx context.Context, args, env []string, successMarker []byte
 		return sshCommandResult(output, err)
 	case <-output.found:
 		_ = cmd.Process.Kill()
-		<-done
+		<-done //nolint:errcheck // killed after marker found; exit error expected
 		return output.Bytes(), nil
 	case <-ctx.Done():
 		err := <-done

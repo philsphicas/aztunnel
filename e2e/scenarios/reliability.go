@@ -428,7 +428,7 @@ sampling:
 	case <-time.After(15 * time.Second):
 		t.Fatalf("writer goroutine did not exit within 15s after Close; likely bridge deadlock")
 	}
-	<-writerErr // drain; we don't fail on writer errors (Close races are expected)
+	<-writerErr //nolint:errcheck // drain; we don't fail on writer errors (Close races are expected)
 
 	t.Logf("slow-consumer: baseHeap=%d peakHeap=%d delta=%d writtenMid=%d (drained ~%d at %d B/s)",
 		baseHeap, peakHeap, int64(peakHeap)-int64(baseHeap), writtenMid,
@@ -981,7 +981,7 @@ func ScenarioConnect_NoListener_ErrorsCleanly(t *testing.T, b Backend) {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
-		case <-waitDone:
+		case <-waitDone: //nolint:errcheck // exit status irrelevant; logs are checked below
 			goto checkLogs
 		default:
 		}
