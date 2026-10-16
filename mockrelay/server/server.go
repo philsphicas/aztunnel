@@ -196,7 +196,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener, tlsOpts *TLSOptions
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
-		<-errc
+		<-errc //nolint:errcheck // wait for Serve to return ErrServerClosed
 		return ctx.Err()
 	case err := <-errc:
 		if errors.Is(err, http.ErrServerClosed) {

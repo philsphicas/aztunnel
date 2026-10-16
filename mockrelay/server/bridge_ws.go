@@ -81,7 +81,7 @@ func bridgeWS(ctx context.Context, p DelayProfile, a, b *websocket.Conn) error {
 	// peers see a clean close frame.
 	_ = a.Close(websocket.StatusNormalClosure, "bridge closing")
 	_ = b.Close(websocket.StatusNormalClosure, "bridge closing")
-	<-errc
+	<-errc //nolint:errcheck // drain the other copier; first error already captured
 	return foldCloseErr(first)
 }
 
