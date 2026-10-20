@@ -1,6 +1,6 @@
 // The go directive names the exact Go release used everywhere: setup-go, the
 // Docker builder images, and every module (see docs/releases.md).
-go 1.27.2
+go 1.27.3
 
 use (
 	.
