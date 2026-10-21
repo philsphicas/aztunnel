@@ -6,6 +6,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
+    inputs:
+      keepalive-repetitions:
+        description: "Repeat only the Azure idle-connection scenario (1-10); 0 runs the full suite"
+        type: number
+        default: 0
 
 permissions:
   id-token: write
@@ -120,7 +125,22 @@ jobs:
           E2E_AUTH: ${{ matrix.auth }}
           PERF_MATRIX_BACKEND: azure
           PERF_MATRIX_GIT_SHA: ${{ github.sha }}
-        run: make e2e-azure
+          KEEPALIVE_REPETITIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.keepalive-repetitions || 0 }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$KEEPALIVE_REPETITIONS" =~ ^([0-9]|10)$ ]]; then
+            echo "::error::keepalive-repetitions must be an integer from 0 to 10."
+            exit 1
+          fi
+          if [[ "$KEEPALIVE_REPETITIONS" == "0" ]]; then
+            make e2e-azure
+          else
+            cd e2e
+            go test -tags=e2e -timeout=50m -v \
+              -count="$KEEPALIVE_REPETITIONS" \
+              -run='^TestE2E_Azure$/^(entra|sas)$/^LongLivedConnection$' \
+              ./backends/azure/...
+          fi
 
       - name: Upload perf history
         if: always()
