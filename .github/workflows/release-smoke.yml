@@ -1,0 +1,186 @@
+name: Release Smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - ".github/actions/package-release/**"
+      - ".github/scripts/release.cjs"
+      - ".github/release-images.json"
+      - "Dockerfile*"
+      - "mockrelay/Dockerfile"
+      - "go.work"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-smoke-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
+jobs:
+  image-matrix:
+    runs-on: ubuntu-26.04
+    outputs:
+      matrix: ${{ steps.images.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read shared release image definitions
+        id: images
+        run: |
+          matrix="$(node .github/scripts/release.cjs image-matrix)"
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+
+  build-bundles:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+
+      - name: Package binaries
+        id: package
+        uses: ./.github/actions/package-release
+        with:
+          version: smoke
+          goos: ${{ matrix.goos }}
+          goarch: ${{ matrix.goarch }}
+
+      - name: Verify packaged contents
+        env:
+          ASSET: ${{ steps.package.outputs.asset }}
+          TARGET_OS: ${{ matrix.goos }}
+          TARGET_ARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/unpacked"
+          mkdir -p "$destination"
+          extension=""
+          if [[ "$TARGET_OS" == "windows" ]]; then
+            unzip -q "dist/$ASSET" -d "$destination"
+            extension=".exe"
+          else
+            tar -xzf "dist/$ASSET" -C "$destination"
+          fi
+          bundle="$destination/aztunnel-smoke-$TARGET_OS-$TARGET_ARCH"
+          test -s "$bundle/LICENSE"
+          test -s "$bundle/README.md"
+          build_info="$(go version -m "$bundle/aztunnel$extension")"
+          printf '%s\n' "$build_info"
+          grep -F "GOOS=$TARGET_OS" <<<"$build_info"
+          grep -F "GOARCH=$TARGET_ARCH" <<<"$build_info"
+
+      - name: Upload packaged binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-${{ steps.package.outputs.asset }}
+          path: dist/${{ steps.package.outputs.asset }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 1
+
+  build-images:
+    needs: image-matrix
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.image-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read Go version
+        id: go
+        run: |
+          version="$(awk '$1 == "go" { sub(/\r$/, "", $2); print $2; exit }' go.work)"
+          if [[ ! "$version" =~ ^1\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::go.work does not declare an exact stable Go version."
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build images without publishing
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          no-cache: true
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/${{ matrix.id }}.tar
+          build-args: |
+            VERSION=smoke
+            GO_VERSION=${{ steps.go.outputs.version }}
+            GO_VARIANT=${{ matrix.builder_variant }}
+            RUNTIME_IMAGE=${{ matrix.runtime }}
+
+      - name: Verify both image platforms
+        env:
+          IMAGE_ARCHIVE: ${{ runner.temp }}/${{ matrix.id }}.tar
+        run: |
+          set -euo pipefail
+          python3 - "$IMAGE_ARCHIVE" <<'PY'
+          import json
+          import sys
+          import tarfile
+
+          with tarfile.open(sys.argv[1]) as archive:
+              def read_json(path):
+                  with archive.extractfile(path) as stream:
+                      return json.load(stream)
+
+              def platforms(index):
+                  result = set()
+                  for manifest in index["manifests"]:
+                      platform = manifest.get("platform", {})
+                      if platform.get("os") == "linux":
+                          result.add(platform["architecture"])
+                      if manifest["mediaType"] in (
+                          "application/vnd.oci.image.index.v1+json",
+                          "application/vnd.docker.distribution.manifest.list.v2+json",
+                      ):
+                          algorithm, digest = manifest["digest"].split(":", 1)
+                          result.update(platforms(read_json(f"blobs/{algorithm}/{digest}")))
+                  return result
+
+              actual = platforms(read_json("index.json"))
+              if not {"amd64", "arm64"} <= actual:
+                  raise SystemExit(f"Missing expected image platforms: {sorted(actual)}")
+              print(f"Verified Linux image platforms: {sorted(actual)}")
+          PY
+
+      - name: Upload image archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-image-${{ matrix.id }}
+          path: ${{ runner.temp }}/${{ matrix.id }}.tar
+          archive: false
+          if-no-files-found: error
+          retention-days: 1

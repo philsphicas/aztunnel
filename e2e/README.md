@@ -60,6 +60,24 @@ scale with the profile's predicted cost, so slower profiles don't mask
 regressions, and the entra cold-start budget widens only when the profile models
 a token-acquisition cost.
 
+## Focused keepalive diagnostics
+
+Manually dispatch **E2E Tests** with `keepalive-repetitions` set to 1 through
+10 to repeat only the Azure `LongLivedConnection` scenario for each auth method.
+Each repetition holds the same tunnel idle for 130 seconds before checking
+another echo. Failed scenarios print captured sender and listener debug logs.
+The mock suite still runs normally. Leaving the input at `0` runs the full
+Azure suite; pull-request and push runs always use the full suite.
+
+With Azure test configuration available locally, the equivalent focused command
+from `e2e/` is:
+
+```bash
+go test -tags=e2e -timeout=50m -v -count=5 \
+  -run='^TestE2E_Azure$/^(entra|sas)$/^LongLivedConnection$' \
+  ./backends/azure/...
+```
+
 ## Adding tests
 
 Use the testing-discipline taxonomy below to pick where a new test lives.

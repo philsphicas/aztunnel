@@ -30,7 +30,7 @@ jobs:
     # exactly `perf`; otherwise every unrelated label edit would spawn
     # a run.
     if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'perf'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
     timeout-minutes: 30

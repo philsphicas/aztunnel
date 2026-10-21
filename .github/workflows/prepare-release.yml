@@ -22,7 +22,7 @@ concurrency:
 jobs:
   prepare:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -61,7 +61,7 @@ jobs:
     environment:
       name: stable-release
       url: https://github.com/${{ github.repository }}/compare/${{ needs.prepare.outputs.previous_tag }}...${{ needs.prepare.outputs.source_sha }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7

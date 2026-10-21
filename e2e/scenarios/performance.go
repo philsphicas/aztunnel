@@ -237,7 +237,7 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 		opts.Target = echo.Addr()
 	}
 	tun := b.Setup(t, opts)
-	dumpConnectLatencyLogsOnFail(t, tun)
+	dumpTunnelLogsOnFail(t, tun)
 
 	payload := []byte{0x42}
 	buf := make([]byte, 1)
@@ -286,7 +286,7 @@ func runSerialConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 	// run the very trace that diagnoses Phase 2 (sender cold dial) vs
 	// Phase 3 (relay hold) would otherwise be discarded. We dump only
 	// the trace lines (not the full DEBUG buffers) to keep green-run CI
-	// output lean. Skip when the batch failed: dumpConnectLatencyLogsOnFail
+	// output lean. Skip when the batch failed: dumpTunnelLogsOnFail
 	// already dumps the full logs then.
 	if spikes > 0 && !t.Failed() {
 		t.Logf("ConnectLatency_Serial_%v: %d tolerated spike(s) >= NormalP50 %v on a passing run; dumping rendezvous traces for phase analysis",
@@ -355,7 +355,7 @@ func softTailSample(sorted []time.Duration, tolerate int) time.Duration {
 	return sorted[idx]
 }
 
-// dumpConnectLatencyLogsOnFail registers a t.Cleanup that prints the
+// dumpTunnelLogsOnFail registers a t.Cleanup that prints the
 // captured sender and listener logs for every process in the tunnel,
 // but only when the scenario has failed. The ConnectLatency_Serial
 // scenarios' dominant failure mode against real Azure Relay is a
@@ -373,7 +373,7 @@ func softTailSample(sorted []time.Duration, tolerate int) time.Duration {
 // Logs() returns the cumulative buffer, so one dump captures the
 // whole run. Backends that do not wire log capture (Logs == nil)
 // contribute nothing.
-func dumpConnectLatencyLogsOnFail(t *testing.T, tun *Tunnel) {
+func dumpTunnelLogsOnFail(t *testing.T, tun *Tunnel) {
 	t.Helper()
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -385,7 +385,7 @@ func dumpConnectLatencyLogsOnFail(t *testing.T, tun *Tunnel) {
 // dumpTunnelLogs prints the captured sender and listener logs for
 // every process in the tunnel, skipping nil handles and backends that
 // did not wire log capture (Logs == nil). It is unconditional; the
-// failure gate lives in dumpConnectLatencyLogsOnFail's cleanup. It
+// failure gate lives in dumpTunnelLogsOnFail's cleanup. It
 // dumps the FULL buffers and so is reserved for failing runs — passing
 // runs use the lean dumpTunnelRendezvousTraces instead.
 func dumpTunnelLogs(t *testing.T, tun *Tunnel) {
@@ -412,7 +412,7 @@ func dumpTunnelLogs(t *testing.T, tun *Tunnel) {
 // their entire buffers on every green run that happened to tolerate a
 // spike would bloat CI output (and risk hitting log truncation limits),
 // while phase analysis only needs the trace lines. Full-buffer dumps
-// stay reserved for failing runs (dumpConnectLatencyLogsOnFail).
+// stay reserved for failing runs (dumpTunnelLogsOnFail).
 func dumpTunnelRendezvousTraces(t *testing.T, tun *Tunnel) {
 	t.Helper()
 	emitted := false
@@ -574,7 +574,7 @@ func runColdStartConnectLatency(t *testing.T, b Backend, mode SenderMode) {
 		// t.Cleanup, so the prior attempt's resources are released at
 		// test end.
 		tun := b.Setup(t, opts)
-		dumpConnectLatencyLogsOnFail(t, tun)
+		dumpTunnelLogsOnFail(t, tun)
 
 		var err error
 		elapsed, err = timeOneConnect(tun.SenderAddr, echo.Addr(), mode, payload, buf, deadlineBudget)

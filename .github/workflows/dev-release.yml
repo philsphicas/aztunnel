@@ -16,7 +16,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       commit_sha: ${{ steps.release.outputs.commit_sha }}
       ready: ${{ steps.freshness.outputs.ready }}

@@ -1,6 +1,8 @@
 package scenarios
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,13 +78,13 @@ func TestDumpTunnelRendezvousTraces(t *testing.T) {
 	}
 }
 
-// TestDumpConnectLatencyLogsOnFail_SilentOnSuccess verifies the
+// TestDumpTunnelLogsOnFail_SilentOnSuccess verifies the
 // failure-gated cleanup does not touch the captured buffers when the
 // scenario passes.
-func TestDumpConnectLatencyLogsOnFail_SilentOnSuccess(t *testing.T) {
+func TestDumpTunnelLogsOnFail_SilentOnSuccess(t *testing.T) {
 	var senderCalls, listenerCalls atomic.Int32
 	t.Run("inner", func(inner *testing.T) {
-		dumpConnectLatencyLogsOnFail(inner, tunnelWithLogCounters(&senderCalls, &listenerCalls))
+		dumpTunnelLogsOnFail(inner, tunnelWithLogCounters(&senderCalls, &listenerCalls))
 		// inner passes — cleanup must stay silent.
 	})
 	if got := senderCalls.Load(); got != 0 {
@@ -90,5 +92,27 @@ func TestDumpConnectLatencyLogsOnFail_SilentOnSuccess(t *testing.T) {
 	}
 	if got := listenerCalls.Load(); got != 0 {
 		t.Errorf("listener Logs called %d times on success, want 0", got)
+	}
+}
+
+func TestDumpTunnelLogsOnFail_EmitsOnFailure(t *testing.T) {
+	const helperEnv = "AZTUNNEL_TEST_DUMP_FAILURE"
+	if os.Getenv(helperEnv) == "1" {
+		var senderCalls, listenerCalls atomic.Int32
+		dumpTunnelLogsOnFail(t, tunnelWithLogCounters(&senderCalls, &listenerCalls))
+		t.Error("intentional failure to exercise cleanup diagnostics")
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDumpTunnelLogsOnFail_EmitsOnFailure$", "-test.v")
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected helper test to fail with exit code 1; got %v\n%s", err, output)
+	}
+	for _, want := range []string{"--- sender[0] logs ---", "sender log", "--- listener[0] logs ---", "listener log"} {
+		if !strings.Contains(string(output), want) {
+			t.Errorf("missing %q in failure output:\n%s", want, output)
+		}
 	}
 }

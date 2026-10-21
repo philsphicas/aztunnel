@@ -11,7 +11,7 @@ jobs:
   validate:
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       commit_sha: ${{ steps.release.outputs.commit_sha }}
       version: ${{ steps.release.outputs.version }}

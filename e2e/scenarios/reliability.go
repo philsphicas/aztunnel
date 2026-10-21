@@ -1202,6 +1202,7 @@ func ScenarioLongLivedConnection(t *testing.T, b Backend) {
 		Target:         echo.Addr(),
 		AllowedTargets: []string{echo.Addr()},
 	})
+	dumpTunnelLogsOnFail(t, tun)
 
 	conn, err := net.DialTimeout("tcp", tun.SenderAddr, 10*time.Second)
 	if err != nil {
