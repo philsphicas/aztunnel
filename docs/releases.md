@@ -63,6 +63,20 @@ then the non-required `container-azurelinux3` job fails; updates still merge,
 but development and maintenance releases pause because they require a green CI
 run on `main`. Rerun that run (or push anything) once the image is published.
 
+## Runner compatibility checks
+
+The **Release Smoke** workflow runs on release-workflow and container-build
+pull requests, or by manual dispatch. It uses the production packaging action
+for all five binary targets and the shared six-image release matrix for
+amd64/arm64 builds with QEMU. Binary bundles and OCI image archives are uploaded
+as one-day Actions artifacts. It does not push images, create tags, or publish
+GitHub releases; registry promotion and publication rollback are not exercised.
+
+For additional runner validation on a branch, manually dispatch **E2E Janitor**
+with `dry-run` set to `true` and **Perf (PR, opt-in)**. Do not run release tagging
+or updater workflows merely to test runner compatibility: they can modify
+repository or registry state.
+
 ## Setup
 
 The `stable-release` GitHub environment must require maintainer approval and
