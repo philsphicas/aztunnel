@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   janitor:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: e2e-azure
     timeout-minutes: 10
     steps:

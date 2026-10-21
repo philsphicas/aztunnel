@@ -25,7 +25,7 @@ jobs:
     # Only maintainers can apply labels. skip-e2e is a deliberate PR-only
     # exemption and can never suppress push-to-main or manual E2E runs.
     if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'skip-e2e')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The mock backend does not need OIDC; explicitly drop
     # id-token: write so PR-supplied code (`make build` /
     # `make e2e-mock`) cannot mint an OIDC token using the
@@ -63,7 +63,7 @@ jobs:
     # Keep this condition identical to e2e-mock so the required aggregator
     # can distinguish a deliberate full skip from a partial/unexplained skip.
     if: github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'skip-e2e')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: e2e-azure
     # Parallelism strategy: split the Azure suite along the existing
     # auth axis so the two halves of the matrix that previously ran
@@ -139,7 +139,7 @@ jobs:
   # stay BLOCKED forever.
   e2e:
     name: e2e
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [e2e-mock, e2e-azure]
     # Run even if upstream jobs were skipped (e.g. azure on a fork
     # PR without secrets), but fail if any upstream job failed.
