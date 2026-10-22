@@ -10,6 +10,7 @@ const {
   nextVersion,
   parseVersion,
   prepare,
+  prepareDevelopment,
   tag,
   validateImageMatrix,
 } = require("./release.cjs");
@@ -395,6 +396,54 @@ test("publication workflow collects all image artifacts and generates the dev li
   assert.match(workflow, /release-images\.cjs dev-images/);
   assert.doesNotMatch(workflow, /name: image-(?:client|relay)-/);
   assert.doesNotMatch(workflow, /"ghcr\.io\/.*\|dev/);
+  assert.match(workflow, /pull: true\n\s+no-cache: true/);
+});
+
+test("manual development refresh is main-only and requires tested source", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", "workflows", "dev-release.yml"),
+    "utf8",
+  );
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.ok(
+    workflow.includes(
+      "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'",
+    ),
+  );
+  assert.match(workflow, /ref: main/);
+  assert.match(
+    workflow,
+    /await prepareDevelopment\(\{ github, context, core \}\)/,
+  );
+  for (const output of ["commit_sha", "ready", "version"]) {
+    assert.ok(workflow.includes(`steps.refresh.outputs.${output}`));
+  }
+});
+
+test("every container and packaged binary is gated by offline certificate checks", () => {
+  for (const file of new Set(matrix.include.map((image) => image.file))) {
+    const dockerfile = fs.readFileSync(
+      path.join(__dirname, "..", "..", file),
+      "utf8",
+    );
+    assert.match(
+      dockerfile,
+      /go test -c -o \/trust\.test \.\/internal\/trustcheck/,
+    );
+    assert.match(dockerfile, /FROM runtime AS checked/);
+    assert.match(
+      dockerfile,
+      /RUN \["\/trust\.test".*"-ca-bundle=.*"-artifact=/,
+    );
+    assert.match(dockerfile, /FROM runtime\nCOPY --from=checked \/aztunnel/);
+    assert.doesNotMatch(dockerfile.split("FROM runtime\n")[1], /trust\.test/);
+  }
+  const action = fs.readFileSync(
+    path.join(__dirname, "..", "actions", "package-release", "action.yml"),
+    "utf8",
+  );
+  assert.match(action, /go test -count=1 \.\/internal\/trustcheck/);
+  assert.ok(action.includes('-args -artifact="${stage}/aztunnel${extension}"'));
 });
 
 test("maintenance workflow gates captured release inputs behind one environment approval", () => {
@@ -677,6 +726,20 @@ test("an unchanged weekly source prepares the next patch and approval summary wi
   assert.equal(h.calls.filter(({ name }) => name === "createRef").length, 0);
 });
 
+test("manual development refresh captures the tested source without tags or stable-release state", async () => {
+  const h = harness();
+  await prepareDevelopment(h);
+  assert.deepEqual(h.outputs, {
+    commit_sha: sha,
+    version: `dev-${sha.slice(0, 12)}`,
+    ready: "true",
+  });
+  assert.deepEqual(
+    h.calls.map(({ name }) => name),
+    ["git", "ci"],
+  );
+});
+
 test("manual patch, minor and major bumps use the highest published stable release", async () => {
   for (const [bump, version] of [
     ["patch", "v0.10.10"],
@@ -743,7 +806,7 @@ test("preparation rejects invalid bumps and source SHAs without outputs", async 
   }
 });
 
-test("both stages require the newest exact-source main push CI, never an older success", async () => {
+test("release preparation and tagging require the newest exact-source main push CI, never an older success", async () => {
   const cases = [
     [[], /Missing main push CI/],
     [[{ ...successfulCI, head_sha: oldSHA }], /Missing main push CI/],
@@ -768,7 +831,7 @@ test("both stages require the newest exact-source main push CI, never an older s
       /Failed main push CI/,
     ]),
   ];
-  for (const operation of [prepare, tag]) {
+  for (const operation of [prepare, prepareDevelopment, tag]) {
     for (const [runs, message] of cases) {
       const h = harness({ runs });
       await assert.rejects(operation(h), message);

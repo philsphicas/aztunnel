@@ -14,10 +14,18 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /aztunnel ./cmd/aztunnel
+    -o /aztunnel ./cmd/aztunnel && \
+    go test -c -o /trust.test ./internal/trustcheck
 
-FROM ${RUNTIME_IMAGE}
+FROM ${RUNTIME_IMAGE} AS runtime
 # Keep cryptography and trust roots owned by the runtime OS packages.
 RUN tdnf upgrade -y && tdnf install -y openssl-libs ca-certificates && tdnf clean all
-COPY --from=builder /aztunnel /usr/local/bin/aztunnel
+
+FROM runtime AS checked
+COPY --from=builder /aztunnel /aztunnel
+COPY --from=builder /trust.test /trust.test
+RUN ["/trust.test", "-test.v", "-ca-bundle=/etc/pki/tls/certs/ca-bundle.crt", "-artifact=/aztunnel"]
+
+FROM runtime
+COPY --from=checked /aztunnel /usr/local/bin/aztunnel
 ENTRYPOINT ["aztunnel"]

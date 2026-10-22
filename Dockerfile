@@ -13,12 +13,20 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=${CGO_ENABLED} go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /aztunnel ./cmd/aztunnel
+    -o /aztunnel ./cmd/aztunnel && \
+    CGO_ENABLED=${CGO_ENABLED} go test -c -o /trust.test ./internal/trustcheck
 
-FROM ${RUNTIME_IMAGE}
+FROM ${RUNTIME_IMAGE} AS runtime
 # Copy CA certificates from the builder for runtime images that may lack them
 # (e.g., scratch). For images that already include them, this is a harmless
 # overwrite.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /aztunnel /usr/local/bin/aztunnel
+
+FROM runtime AS checked
+COPY --from=builder /aztunnel /aztunnel
+COPY --from=builder /trust.test /trust.test
+RUN ["/trust.test", "-test.v", "-ca-bundle=/etc/ssl/certs/ca-certificates.crt", "-artifact=/aztunnel"]
+
+FROM runtime
+COPY --from=checked /aztunnel /usr/local/bin/aztunnel
 ENTRYPOINT ["aztunnel"]

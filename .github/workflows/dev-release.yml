@@ -1,6 +1,7 @@
 name: Development Release
 
 on:
+  workflow_dispatch:
   workflow_run:
     workflows: [CI]
     types: [completed]
@@ -13,16 +14,34 @@ permissions:
 jobs:
   prepare:
     if: >
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     outputs:
-      commit_sha: ${{ steps.release.outputs.commit_sha }}
-      ready: ${{ steps.freshness.outputs.ready }}
-      version: ${{ steps.release.outputs.version }}
+      commit_sha: ${{ steps.refresh.outputs.commit_sha || steps.release.outputs.commit_sha }}
+      ready: ${{ steps.refresh.outputs.ready || steps.freshness.outputs.ready }}
+      version: ${{ steps.refresh.outputs.version || steps.release.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Prepare manual security refresh
+        if: github.event_name == 'workflow_dispatch'
+        id: refresh
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { prepareDevelopment } = require('./.github/scripts/release.cjs');
+            await prepareDevelopment({ github, context, core });
+
       - name: Require newest successful main CI run
+        if: github.event_name == 'workflow_run'
         id: freshness
         env:
           GH_TOKEN: ${{ github.token }}
@@ -43,7 +62,7 @@ jobs:
 
       - name: Set development version
         id: release
-        if: steps.freshness.outputs.ready == 'true'
+        if: github.event_name == 'workflow_run' && steps.freshness.outputs.ready == 'true'
         env:
           COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
