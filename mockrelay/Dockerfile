@@ -29,9 +29,17 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=${CGO_ENABLED} go build -trimpath \
     -ldflags "-s -w -X main.version=${VERSION}" \
-    -o /aztunnel-relay ./mockrelay/cmd/aztunnel-relay
+    -o /aztunnel-relay ./mockrelay/cmd/aztunnel-relay && \
+    CGO_ENABLED=${CGO_ENABLED} go test -c -o /trust.test ./internal/trustcheck
 
-FROM ${RUNTIME_IMAGE}
+FROM ${RUNTIME_IMAGE} AS runtime
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /aztunnel-relay /usr/local/bin/aztunnel-relay
+
+FROM runtime AS checked
+COPY --from=builder /aztunnel-relay /aztunnel-relay
+COPY --from=builder /trust.test /trust.test
+RUN ["/trust.test", "-test.v", "-ca-bundle=/etc/ssl/certs/ca-certificates.crt", "-artifact=/aztunnel-relay"]
+
+FROM runtime
+COPY --from=checked /aztunnel-relay /usr/local/bin/aztunnel-relay
 ENTRYPOINT ["aztunnel-relay"]

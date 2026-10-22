@@ -16,9 +16,9 @@ The approved job also runs its tagging script from that exact source revision,
 refreshing remote `main` and stable tags before checking ancestry and creating a tag.
 Development releases continue independently after successful `main` builds.
 
-Each approved week gets a new version even without source changes. Stable builds
-pull fresh container bases, disable the build cache, and upgrade Azure Linux
-runtime packages.
+Each approved week gets a new version even without source changes. Both stable
+and development builds pull fresh container bases, disable the build cache, and
+upgrade Azure Linux runtime packages.
 This picks up merged dependency updates and available container security fixes
 without maintaining a separate package inventory or guessing whether a rebuild
 is worthwhile. It does not guarantee that every vulnerability has an upstream fix.
@@ -110,3 +110,37 @@ pushes do not participate in the maintenance workflow's concurrency lock.
 When migrating from the old process, cancel any pending old maintenance runs and
 close obsolete `automation/maintenance-release` PRs rather than merging them.
 The old request file no longer controls publication.
+
+## Certificate trust and security refreshes
+
+For an urgent container refresh without source changes, run **Actions >
+Development Release > Run workflow** on `main`. It requires the newest
+push-to-main CI run for that exact source to have succeeded, rebuilds without
+cached layers, and retains the normal freshness and publication safeguards.
+It does not create a stable release. Use **Prepare Maintenance Release** for
+the separately approved stable patch release.
+
+Every container build runs the offline `internal/trustcheck` suite with its
+runtime CA bundle and executable, on each target architecture. Only the checked
+executable enters the final image; the test executable and fixtures do not.
+Release bundles run the same Go verification tests and check that the packaged
+executable uses that toolchain, including cross-compiled binaries.
+
+The eMudhra regression fixtures cover fourteen published TLS chains, including
+Sectigo cross-signs and the two non-CT chains. Tests deliberately trust the
+affected roots to verify Go's compromised-key blocklist, independently of OS
+updates. A separate bundle inspection rejects the affected root and TLS
+intermediate keys so patched Go cannot hide an unsafe bundle from non-Go
+programs. Positive controls require a valid synthetic TLS chain and continued
+trust in ISRG Root X1. Fixtures are public certificates only, checked offline
+at a fixed time so expiry cannot produce a false pass.
+
+If a container fails this gate, update its distribution's CA packages or wait
+for a refreshed builder image; do not disable certificate verification. Stable
+candidate retries reuse existing digests rather than rebuilding an immutable
+version, so an already-built unsafe candidate must not be promoted.
+
+After publication, replace installed binaries and recreate containers with the
+new versions or digests. Rebuilding does not update running containers. Update
+host trust stores and external authentication tools such as Azure CLI separately;
+aztunnel's Go verifier does not protect those processes.

@@ -175,6 +175,15 @@ async function requireCI(github, repo, sha) {
   }
 }
 
+async function prepareDevelopment({ github, context, core, execute = run }) {
+  const sourceSHA = execute("git", ["rev-parse", "HEAD"]);
+  validateSource(sourceSHA);
+  await requireCI(github, context.repo, sourceSHA);
+  core.setOutput("commit_sha", sourceSHA);
+  core.setOutput("version", `dev-${sourceSHA.slice(0, 12)}`);
+  core.setOutput("ready", "true");
+}
+
 function requireNoPendingTag(previous, execute = run, requested) {
   const tags = execute("git", ["tag", "--list", "v*"])
     .split(/\r?\n/)
@@ -286,6 +295,7 @@ module.exports = {
   nextVersion,
   parseVersion,
   prepare,
+  prepareDevelopment,
   requireCI,
   requireNoPendingTag,
   tag,

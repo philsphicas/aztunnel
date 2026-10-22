@@ -44,6 +44,9 @@ runs:
           go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
           -o "${stage}/aztunnel${extension}" ./cmd/aztunnel
 
+        go test -count=1 ./internal/trustcheck \
+          -args -artifact="${stage}/aztunnel${extension}"
+
         cp LICENSE README.md "$stage/"
 
         if [[ "$TARGET_OS" == "windows" ]]; then

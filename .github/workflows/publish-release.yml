@@ -149,7 +149,7 @@ jobs:
           file: ${{ matrix.file }}
           platforms: linux/amd64,linux/arm64
           pull: true
-          no-cache: ${{ inputs.channel == 'stable' }}
+          no-cache: true
           push: true
           tags: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:${{ inputs.channel }}-${{ inputs.version }}-${{ inputs.commit_sha }}${{ matrix.variant }}
           labels: |
