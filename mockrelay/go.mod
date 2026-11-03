@@ -13,7 +13,7 @@ go 1.27.3
 
 require (
 	github.com/KimMachineGun/automemlimit v1.0.1
-	github.com/alecthomas/kong v1.16.1
+	github.com/alecthomas/kong v1.17.0
 	github.com/coder/websocket v1.8.15
 	github.com/philsphicas/aztunnel v0.0.0
 	golang.org/x/sync v0.24.0
