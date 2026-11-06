@@ -3,7 +3,7 @@ module github.com/philsphicas/aztunnel
 go 1.27.3
 
 require (
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.24.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0
 	github.com/KimMachineGun/automemlimit v1.0.1
 	github.com/alecthomas/kong v1.17.0
