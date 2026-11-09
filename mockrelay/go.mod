@@ -16,7 +16,7 @@ require (
 	github.com/alecthomas/kong v1.17.0
 	github.com/coder/websocket v1.8.15
 	github.com/philsphicas/aztunnel v0.0.0
-	golang.org/x/sync v0.24.0
+	golang.org/x/sync v0.25.0
 )
 
 require (
