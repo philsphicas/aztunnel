@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.24.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0
-	github.com/KimMachineGun/automemlimit v1.0.1
+	github.com/KimMachineGun/automemlimit v1.0.2
 	github.com/alecthomas/kong v1.17.0
 	github.com/coder/websocket v1.8.15
 	github.com/prometheus/client_golang v1.25.0
